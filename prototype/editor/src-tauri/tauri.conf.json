@@ -1,0 +1,8 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "synote-editor-prototype",
+  "identifier": "dev.synote.prototype",
+  "build": { "devUrl": "http://localhost:5173", "frontendDist": "../dist", "beforeDevCommand": "pnpm dev" },
+  "app": { "windows": [{ "title": "PROTOTYPE · Synote 编辑器（Tauri）", "width": 1400, "height": 900 }], "security": { "csp": null } },
+  "bundle": { "active": false, "icon": ["icons/icon.png"] }
+}
