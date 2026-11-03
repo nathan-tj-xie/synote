@@ -88,7 +88,7 @@
 | 冲突三方数据 + 写回 | ✅ 完整 git 语义 | ✅ 同左 | ⚠️ mergeDriver 能拿到三方内容，但不留 index stage | ✅ | ✅ | ⚠️ 能算出冲突，不能持久化 merge 状态 |
 | 单文件历史 / 任意版本 | ✅ 含 `--follow` | ✅ | ✅ 含 follow | ✅ 要自己实现 | ✅ 要自己实现 | ✅ 要自己实现，没有重命名跟踪 |
 | HEAD ↔ 工作区 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 10k/5GB 下的 status | ✅ 可开 fsmonitor | ✅ | 见第 5 节 | 约等于 libgit2 | 见第 5 节 | 见第 5 节 |
+| 10k 笔记 + 2.5k 附件下的 status（实测） | ✅ ~45 ms | ✅ 同左 | ❌ ~2.4 s | 约等于 libgit2 | ⚠️ ~2.0 s | ✅ ~20 ms |
 | 复用系统凭据 | ✅ 完全复用 | ✅（全局配置 + 自带 GCM） | ❌ 没有 helper，没有 SSH | ⚠️ 要自己写 | ⚠️ 要自己写，SSH 不读 config | ⚠️ helper 可用，push 未完成 |
 | 不需要用户预装 git | ❌ 需要预装 | ✅ | ✅ | ✅ | ✅ | ✅ |
 | 包体积 | 0 | +44~64 MB | 很小 | 中等，有原生 ABI 问题 | 小 | 小 |
@@ -101,7 +101,7 @@
 理由：
 1. 它是唯一能无条件满足“认证依赖系统已有 git 配置/凭据”的方案：HTTPS helper、SSH config、GCM、企业代理都原样生效。
 2. 冲突处理有完整的 git 语义（stage 1/2/3、`MERGE_HEAD`、abort/continue）。用户离开 Synote 去终端继续操作，状态不会乱。目标用户是懂 git 的开发者，这点很关键。
-3. 性能有 fsmonitor / untracked cache 可开，基准见第 5 节。
+3. 实测 status ~45 ms、单文件历史 ~28 ms，远低于“打开库 3 秒内可用”的预算；还可以开 fsmonitor / untracked cache。
 4. 和技术栈无关：Electron（TS）和 Tauri（Rust）都能直接调用，不会绑死后面的“桌面外壳”选型。
 5. 同类产品都这么做：VS Code、Zed、GitHub Desktop，以及 GitButler 的网络操作。
 
@@ -113,11 +113,29 @@
 可选的混合方案（如果技术底座选 Tauri/Rust）：本地只读操作（读 blob、单文件历史、status）在进程内用 `gix` 或 `git2` 完成，省掉进程开销；写操作、合并、push/pull 用 git CLI。GitButler 就是这么做的。代价是两套实现要保持一致，MVP 阶段不建议。
 
 不建议：
-- **isomorphic-git**：没有 SSH，没有 credential helper，和“依赖系统凭据”的约束直接冲突。
+- **isomorphic-git**：没有 SSH，没有 credential helper，和“依赖系统凭据”的约束直接冲突；实测 status 和单文件 log 都要 2.4–2.6 s，比 git CLI 慢 50–90 倍。
 - **nodegit**：稳定版停在 2020 年，原生 ABI 的维护成本高。
 - **只用 gitoxide**：push 和 merge 状态持久化还没完成。
 - **只用 libgit2**：SSH 不读 `~/.ssh/config`，认证要自己写；连 Cargo 都提供了退回 CLI 的开关。
 
 ## 5. 本机基准
 
-（待补充：基准运行中，完成后更新本节。）
+环境：Apple M1 Max、APFS、macOS；git 2.54.0 (Apple Git-157)、Node 26.12.1、Rust release 构建。数值是热缓存下 3 次运行的中位数。
+
+测试仓库：10,000 篇约 2 KB 的 md（分 100 个子目录）+ 2,500 个 200 KB 的随机二进制附件，共 12,500 个文件、101 次提交（`notes/d00/n00000.md` 每次提交都改）；工作区改了 3 篇笔记、新增 1 个未跟踪文件。
+**附件只用了 200 KB/个（共约 500 MB），没有用 5 GB**：status 的成本由文件数量决定，已提交文件只比较 stat、不重新 hash，所以文件数和目标规模一致就能代表 status / log 的性能。首次 add / push 5 GB 的成本不在本基准范围内（见 2.4）。
+
+| 操作 | git CLI | git2 0.21（libgit2 1.9.7） | gix 0.90 | isomorphic-git 1.44.10 |
+|---|---|---|---|---|
+| status（含 untracked） | **47 ms**（`status --porcelain=v2 -uall`） | 2,029 ms（首次运行出现过一次 77 ms，没能复现） | **20 ms** | 2,385 ms（`statusMatrix`） |
+| 单文件历史（101 个 commit） | 28 ms（`log -- <path>`） | 6 ms（revwalk + tree 比较） | 7 ms | 2,548 ms（`log({ filepath })`） |
+| 最近 100 个 commit | 18 ms（`log -n100`） | — | — | — |
+| 读取 HEAD 版本的一个文件 | 15 ms（`show HEAD:<path>`，含进程启动） | — | — | — |
+
+观察：
+- git CLI 每次调用都带约 10–15 ms 的进程启动开销（macOS），绝对值依然很小；Windows 上的进程启动更慢，高频读 blob 建议用 `cat-file --batch` 长连接。
+- 开启 `core.fsmonitor` + `core.untrackedCache` 后 status 仍是约 40 ms：在这个规模下，APFS 上 stat 本来就不是瓶颈；文件更多或在 Windows/NTFS 上收益会更明显（未实测）。
+- git2 的 status 稳定在约 2 s，比 git CLI 慢约 40 倍，原因没深挖（可能和 libgit2 对 stat 缓存 / racy 条目的处理有关）。
+- 进程内的 Rust 库读历史比 CLI 快，因为省掉了进程启动；但三种方式都已远低于交互阈值。
+
+局限：只在 macOS 上测了；没测 Windows、冷缓存、更大的历史（如 1 万个 commit）和 push/pull 网络性能。基准程序：Rust 版本用 `git2::Repository::statuses` 与 `gix::Repository::status().into_iter()`；单文件历史用 revwalk 比较每个 commit 与其父 commit 在该路径上的 tree entry；JS 版本用 `statusMatrix` / `log({ filepath })`。
