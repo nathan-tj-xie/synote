@@ -5,7 +5,7 @@ import path from 'node:path'
 import { i18next, i18nOptions } from '../shared/i18n'
 import { commands } from '../shared/commands'
 import { indexMethods, type GitState, type ItemMenuAction, type VaultInfo } from '../shared/api'
-import { exec, findGit, Git, type Found } from './git'
+import { exec, findGit, Git, type GitDetectionResult } from './git'
 import { isHidden, resolveInVault, scanEntries, toPosix, uniqueNoteName } from './vault'
 
 i18next.init(i18nOptions)
@@ -102,7 +102,7 @@ const readSettings = (): Promise<{ gitPath?: string }> =>
     })
     .catch(() => ({}))
 
-let found: Promise<Found> | null = null
+let found: Promise<GitDetectionResult> | null = null
 let git: Git | null = null
 // 重新检测或切换笔记库时加一，查询途中代次变了说明结果已过期
 let gitGen = 0
@@ -141,7 +141,7 @@ async function gitState(): Promise<GitState> {
   // 代次已校验，这里到创建实例之间没有 await；检测结果或笔记库不同就换实例
   if (git?.cwd !== root || git.bin !== f.bin || git.PATH !== f.PATH) {
     git?.close()
-    git = new Git(f.bin, f.PATH, root, () => void callIndex('reconcile').catch(() => {}))
+    git = new Git(f.bin, f.PATH, root, () => void callIndex('reconcile').catch((e) => console.error('[index] reconcile failed', e)))
   }
   let s: GitState
   try {
@@ -164,7 +164,8 @@ async function queryGit(g: Git, version: string): Promise<GitState> {
 let gitTimer: NodeJS.Timeout | undefined
 function pushGitState() {
   clearTimeout(gitTimer)
-  gitTimer = setTimeout(() => gitState().then((s) => win?.webContents.send('git:changed', s), () => {}), 300)
+  // 推送没有调用方可以报错，记日志；渲染进程下次 invoke 时会拿到同样的错误
+  gitTimer = setTimeout(() => gitState().then((s) => win?.webContents.send('git:changed', s), (e) => console.error('[git] push state failed', e)), 300)
 }
 
 function vaultPath(rel: string): string {

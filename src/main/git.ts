@@ -28,7 +28,7 @@ export function parseVersion(out: string): number[] | null {
 
 export const versionOk = (v: number[]) => v[0] > MIN_VERSION[0] || (v[0] === MIN_VERSION[0] && v[1] >= MIN_VERSION[1])
 
-export type Found =
+export type GitDetectionResult =
   | { status: 'ok'; bin: string; version: string; PATH: string }
   | { status: 'tooOld'; bin: string; version: string }
   | { status: 'missing' }
@@ -41,7 +41,7 @@ export async function findGit(o: {
   shell?: string
   exec: Exec
   isFile: (p: string) => boolean
-}): Promise<Found> {
+}): Promise<GitDetectionResult> {
   const win = o.platform === 'win32'
   const mac = o.platform === 'darwin'
   const which = (PATH: string) =>
@@ -51,9 +51,9 @@ export async function findGit(o: {
       .find(o.isFile)
 
   let clt: boolean | undefined
-  let tooOld: Found | undefined
+  let tooOld: GitDetectionResult | undefined
   // git 子进程用选中那一级的 PATH，否则 git 能找到、git-lfs 却找不到（research/lfs 2.5）
-  const probe = async (bin: string | undefined, PATH: string): Promise<Found | undefined> => {
+  const probe = async (bin: string | undefined, PATH: string): Promise<GitDetectionResult | undefined> => {
     if (!bin) return
     // /usr/bin/git 是 shim：没装 Command Line Tools 时一调用就弹安装框，先用 xcode-select -p 确认
     if (mac && bin === '/usr/bin/git' && !(clt ??= (await o.exec('/usr/bin/xcode-select', ['-p'])).code === 0)) return
@@ -142,6 +142,14 @@ export class GitError extends Error {
   }
 }
 
+// `config --get`、`rev-parse --verify --quiet` 查不到时退出码为 1，记为 fallback；其它失败（配置损坏、权限等）照常抛出
+const onExit1 =
+  <T>(fallback: T) =>
+  (e: unknown): T => {
+    if (e instanceof GitError && e.code === 1) return fallback
+    throw e
+  }
+
 export class Git {
   private readonly env: NodeJS.ProcessEnv
   private cat: CatFile | null = null
@@ -175,8 +183,13 @@ export class Git {
     }
   }
 
+  // 只有明确的 notRepo 才算不是仓库；所有权检查、配置损坏等错误照常抛出，不能误报成非 git 目录
   async isRepo(): Promise<boolean> {
-    return (await this.run(['rev-parse', '--is-inside-work-tree']).catch(() => '')).trim() === 'true'
+    const out = await this.run(['rev-parse', '--is-inside-work-tree']).catch((e) => {
+      if (e instanceof GitError && e.kind === 'notRepo') return ''
+      throw e
+    })
+    return out.trim() === 'true'
   }
 
   async status(): Promise<StatusEntry[]> {
@@ -184,14 +197,14 @@ export class Git {
     return parseStatus(await this.run(['--no-optional-locks', 'status', '--porcelain=v2', '-z', '--untracked-files=all']))
   }
 
-  // 缺失时 git config 退出码为 1，记为 null
   async identity(): Promise<{ name: string | null; email: string | null }> {
-    const get = (k: string) => this.run(['config', '--get', k]).then((s) => s.trim() || null, () => null)
+    const get = (k: string) => this.run(['config', '--get', k]).then((s) => s.trim() || null, onExit1(null))
     const [name, email] = await Promise.all([get('user.name'), get('user.email')])
     return { name, email }
   }
 
   // LFS 检测（research/lfs 2.2）：本机是否装了 git-lfs；哪些路径按 .gitattributes 应走 LFS
+  // `git lfs version` 任何失败都说明 git-lfs 不可用，记为 false
   lfsInstalled(): Promise<boolean> {
     return this.run(['lfs', 'version']).then(() => true, () => false)
   }
@@ -209,7 +222,7 @@ export class Git {
   async readBlob(spec: string): Promise<Buffer | null> {
     // 按行协议传不了含换行的路径（-Z 要 2.42+），先用 rev-parse 换成 oid 再读
     if (/[\r\n]/.test(spec)) {
-      const oid = (await this.run(['rev-parse', '--verify', '--quiet', spec]).catch(() => '')).trim()
+      const oid = (await this.run(['rev-parse', '--verify', '--quiet', spec]).catch(onExit1(''))).trim()
       if (!oid) return null
       spec = oid
     }

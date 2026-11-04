@@ -316,6 +316,20 @@ describe('Git（系统 git）', () => {
     await expect(new Git('git', process.env.PATH!, repo, undefined, { ...env, GIT_CEILING_DIRECTORIES: path.dirname(repo) }).run(['status'])).rejects.toMatchObject({ kind: 'notRepo' })
   })
 
+  // 只有「不是仓库」「没配置」「对象不存在」才转成 false / null，其它故障不能被误报成这几种状态
+  it('配置损坏时 isRepo / identity / readBlob 照常抛错', async () => {
+    const { repo, env, sh } = setup()
+    sh('init', '-q')
+    sh('commit', '-q', '--allow-empty', '-m', '1')
+    const git = new Git('git', process.env.PATH!, repo, undefined, env)
+    expect(await git.readBlob('HEAD:没\n有.md')).toBeNull() // 退出码 1：对象不存在
+    writeFileSync(path.join(repo, '.git', 'config'), '[bad\n', { flag: 'a' })
+    await expect(git.isRepo()).rejects.toMatchObject({ kind: 'unknown', stderr: expect.stringContaining('bad config line') })
+    await expect(git.identity()).rejects.toMatchObject({ code: 128 })
+    await expect(git.readBlob('HEAD:换\n行.md')).rejects.toBeInstanceOf(GitError)
+    git.close()
+  })
+
   it('合并冲突经 Git.run() 分类为 conflict，保留 stdout', async () => {
     const { repo, env, sh } = setup()
     sh('init', '-q', '-b', 'main')
