@@ -44,10 +44,12 @@ export async function findGit(o: {
 }): Promise<GitDetectionResult> {
   const win = o.platform === 'win32'
   const mac = o.platform === 'darwin'
+  // 路径规则跟着传入的 platform 走，不用宿主平台的（测试里会在 Windows 上模拟 macOS）
+  const p = win ? path.win32 : path.posix
   const which = (PATH: string) =>
-    PATH.split(win ? ';' : ':')
+    PATH.split(p.delimiter)
       .filter(Boolean)
-      .map((d) => path.join(d, win ? 'git.exe' : 'git'))
+      .map((d) => p.join(d, win ? 'git.exe' : 'git'))
       .find(o.isFile)
 
   let clt: boolean | undefined
@@ -67,7 +69,7 @@ export async function findGit(o: {
 
   // 设置项先验证，合法就不必等登录 shell（最多 3 s）
   // shortcut: 设置项命中时 git-lfs 只在 git 同目录和当前 PATH 里找；有 lfs 误报未安装的反馈时再后台补取登录 shell PATH
-  const set = o.setting && (await probe(o.setting, [path.dirname(o.setting), o.PATH].join(win ? ';' : ':')))
+  const set = o.setting && (await probe(o.setting, [p.dirname(o.setting), o.PATH].join(p.delimiter)))
   if (set) return set
 
   let loginPATH: string | undefined

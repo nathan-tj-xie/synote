@@ -298,7 +298,9 @@ describe('Git（系统 git）', () => {
     expect(await kind(['pull', '--rebase', 'o', 'main'])).toBe('conflict') // rebase 的 CONFLICT 也在 stdout
   })
 
-  it('缺 git-lfs 经 Git.run() 分类为 lfsMissing', async () => {
+  // 靠「PATH 里只放 git、不放 git-lfs」来复现。Git for Windows 把 git-lfs.exe 和 git 依赖的 DLL 放在同一个 mingw64/bin 里，
+  // 没法单独去掉 git-lfs；Windows 上 msys sh 的报错文本相同，由上面的文本用例覆盖
+  it.skipIf(process.platform === 'win32')('缺 git-lfs 经 Git.run() 分类为 lfsMissing', async () => {
     const { dir, repo, env, sh } = setup()
     sh('init', '-q')
     writeFileSync(path.join(repo, '.gitattributes'), '*.bin filter=lfs\n')
