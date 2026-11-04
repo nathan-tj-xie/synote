@@ -7,6 +7,7 @@ export const commands = {
   commandPalette: { title: 'commandPalette', key: 'Mod-Shift-p' },
   save: { title: 'save', key: 'Mod-s' },
   search: { title: 'search', key: 'Mod-Shift-f' },
+  toggleDiff: { title: 'toggleDiff', key: 'Mod-Shift-d' },
   newNote: { title: 'newNote' },
   trash: { title: 'trash' },
   rebuildIndex: { title: 'rebuildIndex' },

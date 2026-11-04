@@ -18,6 +18,7 @@ const api: SynoteApi = {
   writeConfig: (v, c) => ipcRenderer.invoke('vault:writeConfig', v, c),
   readFile: (v, p) => ipcRenderer.invoke('file:read', v, p),
   writeFile: (v, p, c) => ipcRenderer.invoke('file:write', v, p, c),
+  readBytes: (v, p) => ipcRenderer.invoke('file:readBytes', v, p),
   createNote: (v, dir) => ipcRenderer.invoke('file:createNote', v, dir),
   trash: (v, p) => ipcRenderer.invoke('file:trash', v, p),
   showItemMenu: (p, dir) => ipcRenderer.invoke('menu:item', p, dir),
@@ -32,6 +33,7 @@ const api: SynoteApi = {
   gitState: () => ipcRenderer.invoke('git:state'),
   redetectGit: () => ipcRenderer.invoke('git:redetect'),
   chooseGit: () => ipcRenderer.invoke('git:choose'),
+  readHead: (v, p) => ipcRenderer.invoke('git:readHead', v, p),
   onGitChanged: subscribe('git:changed'),
 }
 

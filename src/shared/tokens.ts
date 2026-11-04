@@ -10,4 +10,7 @@ export const tokens = {
   accent: '#4f8cff',
   danger: '#ef5b5b',
   onAccent: '#ffffff',
+  // diff 的增删底色（带透明度，叠在 bg 上）
+  diffInserted: '#3fb95026',
+  diffRemoved: '#ef5b5b26',
 } as const

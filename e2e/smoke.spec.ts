@@ -322,7 +322,8 @@ test('edits to the old note while the next one loads are kept', async () => {
   await editor.click()
   await win.keyboard.press('ControlOrMeta+End')
   await win.keyboard.type('后来')
-  await expect.poll(() => slow('done'), { timeout: 5000 }).toBe(1)
+  // a.md 自动保存后外部改动检查会再读一次 a.md（不延迟），完成数可能先到 2；等 b.md 显示出来才说明慢读已返回
+  await expect.poll(() => slow('done'), { timeout: 5000 }).toBeGreaterThanOrEqual(1)
   await expect(editor).toHaveText('B')
   await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('A后来')
   await clickTab(win, 'a')
@@ -667,5 +668,158 @@ test('editor uses VSCode keymap', async () => {
   await win.keyboard.type('x')
   await expect(win.locator('.cm-content')).toHaveText('x x')
   await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('x x')
+  await app.close()
+})
+
+// 工作区对比（S14）：⌘⇧D 原地切到 HEAD ↔ 工作区，diff 里编辑走同一条保存路径，切回正文内容一致
+test('workspace diff: toggle, edit and save, back to prose', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '# 标题\n第一行\n' })
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(vault, '..', 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' }
+  writeFileSync(env.GIT_CONFIG_GLOBAL, '')
+  const git = (...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: vault, env })
+  git('init', '-q')
+  git('add', '.')
+  git('commit', '-qm', '1')
+  writeFileSync(path.join(vault, 'a.md'), '# 标题\n第一行\n工作区新增\n')
+
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('工作区新增')
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  const diff = win.locator('.monaco-diff-editor')
+  await expect(diff).toBeVisible({ timeout: 10_000 })
+  const original = diff.locator('.editor.original .view-lines')
+  const modified = diff.locator('.editor.modified .view-lines')
+  await expect(original).toContainText('第一行')
+  await expect(original).not.toContainText('工作区新增')
+  await expect(modified).toContainText('工作区新增')
+  await expect(win.locator('.cm-content')).toBeHidden()
+
+  // diff 里编辑工作区一侧：⌘S（命令注册表的快捷键）立即保存
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('在 diff 里写')
+  await win.keyboard.press('ControlOrMeta+s')
+  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('# 标题\n第一行\n工作区新增\n在 diff 里写')
+  await expect(win.locator('[role=tab] [title="未保存"]')).toHaveCount(0)
+
+  // 外部改动（没有未保存改动）重新加载：diff 一侧跟着更新
+  writeFileSync(path.join(vault, 'a.md'), '# 标题\n外部改动\n')
+  await expect(modified).toContainText('外部改动')
+
+  // 切回正文：内容一致，CM6 照常编辑并自动保存
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  await expect(diff).toBeHidden()
+  const editor = win.locator('.cm-content')
+  await expect(editor).toHaveText('# 标题外部改动')
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('！')
+  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('# 标题\n外部改动\n！')
+
+  // 再进 diff：第二次不用重新加载 Monaco，显示的是正文最新内容
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  await expect(modified).toContainText('！')
+  await app.close()
+})
+
+// Monaco 和 CM6 按偏移量同步，两边对文本的表示要一致：开头的 BOM（Monaco 单独存）、外部重载只改了代理对的一半
+test('workspace diff keeps offsets in sync with BOM and surrogate pairs', async () => {
+  const { app, win, vault } = await launch({ 'bom.md': '\uFEFFabc', 'emoji.md': '😀abc' })
+  // 同步要靠偏移换算本身对齐，不能靠自检重设兜底
+  const syncErrors: string[] = []
+  win.on('console', (m) => m.text().startsWith('[diff]') && syncErrors.push(m.text()))
+  execFileSync('git', ['init', '-q'], { cwd: vault })
+  const disk = (p: string) => readFileSync(path.join(vault, p), 'utf8')
+  const modified = win.locator('.monaco-diff-editor .editor.modified .view-lines')
+
+  await win.getByRole('treeitem', { name: 'bom.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('abc')
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  await expect(modified).toContainText('abc', { timeout: 10_000 })
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('X')
+  await win.keyboard.press('ControlOrMeta+s')
+  await expect.poll(() => disk('bom.md')).toBe('\uFEFFabcX')
+
+  await win.getByRole('treeitem', { name: 'emoji.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('😀abc')
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  await expect(modified).toContainText('😀abc')
+  writeFileSync(path.join(vault, 'emoji.md'), '😁abc')
+  await expect(modified).toContainText('😁abc')
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('X')
+  await win.keyboard.press('ControlOrMeta+s')
+  await expect.poll(() => disk('emoji.md')).toBe('😁abcX')
+  expect(syncErrors).toEqual([])
+  await app.close()
+})
+
+// Monaco 隐藏开头 BOM 的个数不靠猜：双 BOM、外部增删 BOM 之后在 diff 里输入，落盘都要对
+test('workspace diff with double BOM and external BOM changes', async () => {
+  const { app, win, vault } = await launch({ 'two.md': '\uFEFF\uFEFFabc', 'ext.md': 'abc' })
+  // 同步要靠偏移换算本身对齐，不能靠自检重设兜底
+  const syncErrors: string[] = []
+  win.on('console', (m) => m.text().startsWith('[diff]') && syncErrors.push(m.text()))
+  execFileSync('git', ['init', '-q'], { cwd: vault })
+  const disk = (p: string) => readFileSync(path.join(vault, p), 'utf8')
+  const modified = win.locator('.monaco-diff-editor .editor.modified .view-lines')
+  const typeAtEnd = async (text: string) => {
+    await win.keyboard.press('ControlOrMeta+End')
+    await win.keyboard.type(text)
+    await win.keyboard.press('ControlOrMeta+s')
+  }
+
+  await win.getByRole('treeitem', { name: 'two.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('abc')
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  await expect(modified).toContainText('abc', { timeout: 10_000 })
+  await typeAtEnd('X')
+  await expect.poll(() => disk('two.md')).toBe('\uFEFF\uFEFFabcX')
+
+  await win.getByRole('treeitem', { name: 'ext.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('abc')
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  await expect(modified).toContainText('abc')
+  // 外部加上 BOM、加成两个、再去掉：每次都等 diff 显示出新内容后再输入
+  for (const [ext, typed, want] of [
+    ['\uFEFFabc1', 'X', '\uFEFFabc1X'],
+    ['\uFEFF\uFEFFabc2', 'Y', '\uFEFF\uFEFFabc2Y'],
+    ['abc3', 'Z', 'abc3Z'],
+  ]) {
+    writeFileSync(path.join(vault, 'ext.md'), ext)
+    await expect(modified).toContainText(ext.replace(/\uFEFF/g, '').trim())
+    await typeAtEnd(typed)
+    await expect.poll(() => disk('ext.md')).toBe(want)
+  }
+  expect(syncErrors).toEqual([])
+  await app.close()
+})
+
+// 快捷键与 CM6 一致：进 diff 时按 keymap.ts 的对照表自检（vscodeKeymap 的每个键在 Monaco 里都绑到对应命令、命令存在），
+// 不一致会打 [diff] 日志。CI 双平台跑，mac / Windows 两半对照表都实测
+test('workspace diff keybindings match CM6', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '第一行\n第二行\n' })
+  execFileSync('git', ['init', '-q'], { cwd: vault })
+  const diffLogs: string[] = []
+  win.on('console', (m) => m.text().startsWith('[diff]') && diffLogs.push(m.text()))
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('第二行')
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  const modified = win.locator('.monaco-diff-editor .editor.modified .view-lines')
+  await expect(modified).toContainText('第二行', { timeout: 10_000 })
+  // 抽一条要显式注册的键实际按一下：⌘End（mac 上 Monaco 默认不绑）到文末再输入
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('尾')
+  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('第一行\n第二行\n尾')
+  expect(diffLogs).toEqual([])
+  await app.close()
+})
+
+test('workspace diff outside a git repo reports and stays in prose', async () => {
+  const { app, win } = await launch({ 'a.md': 'x' })
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(win.locator('.cm-content')).toHaveText('x')
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  await expect(win.getByRole('alert')).toContainText('不是 git 仓库')
+  await expect(win.locator('.cm-content')).toBeVisible()
   await app.close()
 })

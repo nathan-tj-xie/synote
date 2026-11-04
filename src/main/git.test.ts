@@ -222,6 +222,21 @@ describe('Git（系统 git）', () => {
     git.close()
   })
 
+  // 工作区对比读 `HEAD:./路径`：按 git 的工作目录解析，笔记库是仓库子目录时也读得到
+  it('HEAD:./ 相对笔记库（仓库子目录）', async () => {
+    const { repo, env, sh } = setup()
+    sh('init', '-q')
+    mkdirSync(path.join(repo, '笔记'))
+    writeFileSync(path.join(repo, '笔记', 'a.md'), '子目录\n')
+    sh('add', '.')
+    sh('commit', '-qm', '1')
+
+    const git = new Git('git', process.env.PATH!, path.join(repo, '笔记'), undefined, env)
+    expect((await git.readBlob('HEAD:./a.md'))?.toString()).toBe('子目录\n')
+    expect(await git.readBlob('HEAD:a.md')).toBeNull() // 不加 ./ 是相对仓库根
+    git.close()
+  })
+
   // 按行协议传不了换行：走 rev-parse 换 oid，不能让后面的请求错位
   it.skipIf(process.platform === 'win32')('路径含换行', async () => {
     const { repo, env, sh } = setup()
