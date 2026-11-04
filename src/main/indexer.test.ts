@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { extractLinks, Indexer } from './indexer'
+import { extractLinks, findMatches, Indexer } from './indexer'
 
 describe('extractLinks', () => {
   test('standard links, wikilinks and loose attachment refs, skipping code', () => {
@@ -20,6 +20,17 @@ describe('extractLinks', () => {
     expect(links.sort()).toEqual(
       ['note:b/c d.md', 'att:attachments/p.png', 'att:attachments/q.png', 'wiki:同名', 'note:dir/sub.md', 'wiki:x', 'note:n/r.md'].sort(),
     )
+  })
+})
+
+describe('findMatches', () => {
+  test('line, column and per-line snippet for every occurrence, CRLF-safe', () => {
+    const body = '第一行 Foo\r\n第二行 foo 和 FOO\n' + 'x'.repeat(60) + 'foo'
+    const m = findMatches(body, 'foo')
+    expect(m.map((x) => [x.line, x.col])).toEqual([[1, 4], [2, 4], [2, 10], [3, 60]])
+    for (const x of m) expect(x.text.slice(x.start, x.start + 3).toLowerCase()).toBe('foo')
+    expect(m[0].text).toBe('第一行 Foo')
+    expect(m[3].text.startsWith('…')).toBe(true)
   })
 })
 
@@ -58,6 +69,14 @@ describe('Indexer', () => {
     expect(idx.search('预览').map((h) => h.path)).toEqual(['sub/c.md']) // 2 字走 LIKE
     expect(idx.search('hello').map((h) => h.path)).toEqual(['sub/c.md'])
     expect(idx.search('100%')).toEqual([])
+    expect(idx.search('hello')[0].matches).toEqual([{ line: 1, col: 8, text: '实时预览很好用 Hello World', start: 8 }])
+  })
+
+  test('short queries are ranked by occurrence count', async () => {
+    const { idx } = setup({ 'a.md': '预览', 'b.md': '预览 预览 预览', 'c.md': '预览 预览' })
+    await idx.reconcile()
+    await idx.idle()
+    expect(idx.search('预览').map((h) => h.path)).toEqual(['b.md', 'c.md', 'a.md'])
   })
 
   test('search falls back to in-memory scan before full text is written', async () => {
@@ -137,11 +156,18 @@ test.runIf(process.env.SYNOTE_BENCH)('bench 10k notes', { timeout: 120_000 }, as
   const again = new Indexer(db, root)
   await again.reconcile()
   const reopen = performance.now() - t
-  t = performance.now()
-  again.search('基准测试')
-  const search = performance.now() - t
+  // 每条都命中全部 10k 篇，是最坏情况
+  const searches = Object.fromEntries(
+    ['基准测试', 'English words', '中文', 'En'].map((q) => {
+      t = performance.now()
+      expect(again.search(q)).toHaveLength(50)
+      return [q, performance.now() - t]
+    }),
+  )
   again.close()
-  console.log(`[bench] links ready ${linksReady | 0}ms, full ${full | 0}ms, reopen+reconcile ${reopen | 0}ms, search ${search | 0}ms`)
+  const fmt = Object.entries(searches).map(([q, ms]) => `"${q}" ${ms | 0}ms`).join(', ')
+  console.log(`[bench] links ready ${linksReady | 0}ms, full ${full | 0}ms, reopen+reconcile ${reopen | 0}ms, search ${fmt}`)
   expect(linksReady).toBeLessThan(1500)
   expect(reopen).toBeLessThan(500)
+  for (const ms of Object.values(searches)) expect(ms).toBeLessThan(200)
 })

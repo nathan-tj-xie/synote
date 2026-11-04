@@ -8,12 +8,14 @@ type State = {
   dirty: Record<string, true>
   error: string | null
   palette: 'files' | 'commands' | null
+  sidebar: 'files' | 'search'
   setVault: (v: VaultInfo | null) => void
   open: (path: string) => void
   close: (path: string) => void
   setDirty: (path: string, dirty: boolean) => void
   setError: (e: string | null) => void
   setPalette: (p: State['palette']) => void
+  setSidebar: (v: State['sidebar']) => void
 }
 
 export const useStore = create<State>((set) => ({
@@ -23,6 +25,7 @@ export const useStore = create<State>((set) => ({
   dirty: {},
   error: null,
   palette: null,
+  sidebar: 'files',
   setVault: (vault) =>
     set((s) => {
       // 已不存在的文件对应的标签页自动关闭
@@ -46,4 +49,5 @@ export const useStore = create<State>((set) => ({
     }),
   setError: (error) => set({ error }),
   setPalette: (palette) => set({ palette }),
+  setSidebar: (sidebar) => set({ sidebar }),
 }))

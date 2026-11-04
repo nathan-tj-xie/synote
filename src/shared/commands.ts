@@ -6,6 +6,7 @@ export const commands = {
   quickOpen: { title: 'quickOpen', key: 'Mod-p' },
   commandPalette: { title: 'commandPalette', key: 'Mod-Shift-p' },
   save: { title: 'save', key: 'Mod-s' },
+  search: { title: 'search', key: 'Mod-Shift-f' },
   newNote: { title: 'newNote' },
   trash: { title: 'trash' },
   rebuildIndex: { title: 'rebuildIndex' },

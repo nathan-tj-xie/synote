@@ -1,6 +1,6 @@
 // CM6 薄封装：一个 EditorView，按标签页缓存 EditorState，不放进 React state（ADR 0005）
 import { markdown } from '@codemirror/lang-markdown'
-import { EditorState, Transaction } from '@codemirror/state'
+import { EditorSelection, EditorState, Transaction } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
 import { minimalSetup } from 'codemirror'
 import { useStore } from './store'
@@ -9,6 +9,9 @@ const states = new Map<string, EditorState>()
 const timers = new Map<string, ReturnType<typeof setTimeout>>()
 let view: EditorView | null = null
 let current: string | null = null
+let loading: string | null = null
+// 搜索结果点击后要定位的位置，文件加载完再应用
+let target: { path: string; line: number; col: number; len: number } | null = null
 
 const theme = EditorView.theme(
   {
@@ -78,11 +81,38 @@ export async function show(path: string | null) {
   if (!path) return view.setState(makeState(''))
   let s = states.get(path)
   if (!s) {
-    s = makeState(await window.synote.readFile(path))
+    loading = path
+    try {
+      s = makeState(await window.synote.readFile(path))
+    } finally {
+      loading = null
+    }
     if (current !== path) return states.set(path, s) // 读文件期间又切走了
   }
   view.setState(s)
+  applyTarget()
   view.focus()
+}
+
+function applyTarget() {
+  if (!view || !target || target.path !== current) return
+  const doc = view.state.doc
+  // 索引可能比编辑器内容旧：行列越界时夹到文末
+  const line = doc.line(Math.min(target.line, doc.lines))
+  const from = Math.min(line.from + target.col, line.to)
+  const to = Math.min(from + target.len, line.to)
+  target = null
+  view.dispatch({ selection: EditorSelection.single(from, to), effects: EditorView.scrollIntoView(from, { y: 'center' }) })
+}
+
+// 打开文件并选中第 line 行 col 列起 len 个字符
+export function reveal(path: string, line: number, col: number, len: number) {
+  target = { path, line, col, len }
+  if (path === current && loading !== path) {
+    applyTarget()
+    view?.focus()
+  }
+  useStore.getState().open(path)
 }
 
 export const saveCurrent = () => current && flush(current)

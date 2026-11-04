@@ -21,5 +21,8 @@ export const zhCN = {
     findCommand: '输入命令名称',
     noMatches: '没有匹配项',
     rebuildIndex: '重建索引',
+    search: '搜索',
+    searchPlaceholder: '在笔记中搜索',
+    searchCount: '{{files}} 个文件，{{matches}} 处命中',
   },
 } as const

@@ -2,17 +2,19 @@ import { useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Group, Panel, Separator } from 'react-resizable-panels'
 import s from './App.module.css'
-import { installShortcuts } from './commands'
+import { installShortcuts, run } from './commands'
 import { EditorPane } from './EditorPane'
 import { reloadIfClean } from './editor'
 import { FileTree } from './FileTree'
 import { Palette } from './Palette'
+import { Search } from './Search'
 import { useStore } from './store'
 import { Welcome } from './Welcome'
 
 export function App() {
   const vault = useStore((st) => st.vault)
   const error = useStore((st) => st.error)
+  const sidebar = useStore((st) => st.sidebar)
   const { t } = useTranslation()
 
   useEffect(
@@ -30,13 +32,22 @@ export function App() {
   return (
     <div className={s.app}>
       <nav className={s.activity}>
-        <button className={s.activityOn} title={t('files')} aria-label={t('files')}>
+        <button className={sidebar === 'files' ? s.activityOn : ''} title={t('files')} aria-label={t('files')} onClick={() => useStore.getState().setSidebar('files')}>
           ▤
+        </button>
+        <button className={sidebar === 'search' ? s.activityOn : ''} title={t('search')} aria-label={t('search')} onClick={() => run('search')}>
+          ⌕
         </button>
       </nav>
       <Group orientation="horizontal" className={s.main}>
         <Panel defaultSize={280} minSize={160} className={s.sidebar}>
-          <FileTree />
+          {/* 两个视图都保持挂载，切换时不丢文件树展开状态和搜索词 */}
+          <div className={s.view} hidden={sidebar !== 'files'}>
+            <FileTree />
+          </div>
+          <div className={s.view} hidden={sidebar !== 'search'}>
+            <Search />
+          </div>
         </Panel>
         <Separator className={s.separator} />
         <Panel minSize={300}>
