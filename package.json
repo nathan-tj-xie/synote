@@ -1,0 +1,45 @@
+{
+  "name": "synote",
+  "productName": "Synote",
+  "version": "0.0.1",
+  "description": "git 存储的桌面 Markdown 笔记应用",
+  "private": true,
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "e2e": "playwright test",
+    "dist": "electron-vite build && electron-builder --publish never"
+  },
+  "dependencies": {
+    "@codemirror/lang-markdown": "^6.5.2",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
+    "@headless-tree/core": "^1.8.0",
+    "@headless-tree/react": "^1.8.0",
+    "@tanstack/react-virtual": "^3.14.25",
+    "codemirror": "^6.0.2",
+    "i18next": "^26.7.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-i18next": "^17.1.11",
+    "react-resizable-panels": "^4.17.0",
+    "zustand": "^5.0.16"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.2.1",
+    "electron": "^45.2.1",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^6.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.1.0"
+  },
+  "packageManager": "pnpm@12.10.1"
+}

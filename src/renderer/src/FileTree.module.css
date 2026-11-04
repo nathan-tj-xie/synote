@@ -1,0 +1,11 @@
+.wrap { height: 100%; display: flex; flex-direction: column; }
+.header { display: flex; align-items: center; padding: 6px 8px 6px 12px; }
+.title { flex: 1; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.icon { background: none; border: none; color: var(--fg-muted); cursor: pointer; padding: 0 6px; }
+.icon:hover { color: var(--fg); }
+.scroll { flex: 1; overflow: auto; }
+.row { position: absolute; top: 0; left: 0; right: 0; height: 24px; display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; outline: none; }
+.row:hover { background: var(--bg-hover); }
+.active { background: var(--bg-selected); }
+.focused { box-shadow: inset 0 0 0 1px var(--accent); }
+.chev { width: 14px; flex: none; color: var(--fg-muted); font-size: 10px; }

@@ -1,0 +1,18 @@
+appId: dev.synote.app
+productName: Synote
+directories:
+  output: dist
+files:
+  - out/**
+  - package.json
+# 未签名包（MVP 不做签名与公证）
+mac:
+  target: [dmg, zip]
+  identity: null
+win:
+  target: [nsis]
+nsis:
+  oneClick: false
+publish:
+  provider: github
+  releaseType: release
