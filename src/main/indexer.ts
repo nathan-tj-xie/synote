@@ -4,7 +4,7 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { setImmediate as tick } from 'node:timers/promises'
 import { parser } from '@lezer/markdown'
-import type { SearchHit } from '../shared/api'
+import type { SearchHit, SearchMatch } from '../shared/api'
 import { isHidden, toPosix } from './vault'
 
 const VERSION = 1
@@ -77,10 +77,31 @@ async function walk(root: string): Promise<Map<string, Stat>> {
   return out
 }
 
-function snippet(body: string, q: string): string {
-  const i = body.toLowerCase().indexOf(q.toLowerCase())
-  const from = Math.max(0, i - 40)
-  return (from > 0 ? '…' : '') + body.slice(from, i + q.length + 40).replace(/\s+/g, ' ')
+// shortcut: 每个文件最多列 20 处命中，有人要看全部时再做“展开更多”
+const MAX_MATCHES = 20
+
+// 列出正文里的每处命中：行号 + 列号（CRLF 下也和 CM6 的行对得上），每行截取命中前后一段做摘要
+export function findMatches(body: string, q: string): SearchMatch[] {
+  // shortcut: 假设 toLowerCase 不改变长度（个别字符如 İ 例外，列号会偏），遇到再按码点比较
+  const lower = body.toLowerCase()
+  const needle = q.toLowerCase()
+  const out: SearchMatch[] = []
+  let line = 1
+  let lineStart = 0
+  for (let i = lower.indexOf(needle); i >= 0 && out.length < MAX_MATCHES; i = lower.indexOf(needle, i + needle.length)) {
+    for (let j = body.indexOf('\n', lineStart); j >= 0 && j < i; j = body.indexOf('\n', lineStart)) {
+      line++
+      lineStart = j + 1
+    }
+    let end = body.indexOf('\n', i)
+    if (end < 0) end = body.length
+    const col = i - lineStart
+    const from = Math.max(lineStart, i - 40)
+    const prefix = from > lineStart ? '…' : ''
+    const text = prefix + body.slice(from, Math.min(end, i + q.length + 80)).replace(/\s/g, ' ').trimEnd()
+    out.push({ line, col, text, start: prefix.length + i - from })
+  }
+  return out
 }
 
 export class Indexer {
@@ -229,19 +250,25 @@ export class Indexer {
     return rows.map((r) => r.path)
   }
 
-  // ≥ 3 字走 trigram MATCH（BM25 排序），1–2 字只能 LIKE 全表扫描
+  // ≥ 3 字走 trigram MATCH（BM25 排序）；1–2 字只能 LIKE 全表扫描，按出现次数排序
   search(q: string, limit = 50): SearchHit[] {
     q = q.trim()
     if (!q) return []
-    const sql =
-      [...q].length >= 3
-        ? 'SELECT f.path, fts.body FROM fts JOIN files f ON f.id = fts.rowid WHERE fts MATCH ? ORDER BY rank LIMIT ?'
-        : "SELECT f.path, fts.body FROM fts JOIN files f ON f.id = fts.rowid WHERE fts.body LIKE ? ESCAPE '\\' LIMIT ?"
-    const arg = [...q].length >= 3 ? `"${q.replaceAll('"', '""')}"` : `%${q.replace(/[\\%_]/g, '\\$&')}%`
-    const rows = this.db.prepare(sql).all(arg, limit + this.pending.size) as { path: string; body: string }[]
-    const hits = rows.filter((r) => !this.pending.has(r.path)).map((r) => ({ path: r.path, snippet: snippet(r.body, q) }))
-    const lower = q.toLowerCase()
-    for (const [p, body] of this.pending) if (body.toLowerCase().includes(lower)) hits.push({ path: p, snippet: snippet(body, q) })
+    const fts = [...q].length >= 3
+    // shortcut: LIKE 分支的次数用 replace() 数，区分大小写，英文大小写混写时偏少，只影响排序
+    const sql = fts
+      ? 'SELECT f.path, fts.body FROM fts JOIN files f ON f.id = fts.rowid WHERE fts MATCH :arg ORDER BY rank LIMIT :n'
+      : `SELECT f.path, fts.body FROM fts JOIN files f ON f.id = fts.rowid WHERE fts.body LIKE :arg ESCAPE '\\'
+         ORDER BY length(fts.body) - length(replace(fts.body, :q, '')) DESC, f.path LIMIT :n`
+    const arg = fts ? `"${q.replaceAll('"', '""')}"` : `%${q.replace(/[\\%_]/g, '\\$&')}%`
+    const params: Record<string, string | number> = { arg, n: limit + this.pending.size }
+    if (!fts) params.q = q
+    const rows = this.db.prepare(sql).all(params) as { path: string; body: string }[]
+    const hits = rows.filter((r) => !this.pending.has(r.path)).map((r) => ({ path: r.path, matches: findMatches(r.body, q) }))
+    for (const [p, body] of this.pending) {
+      const matches = findMatches(body, q)
+      if (matches.length) hits.push({ path: p, matches })
+    }
     return hits.slice(0, limit)
   }
 

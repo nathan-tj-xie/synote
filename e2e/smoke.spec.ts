@@ -103,3 +103,33 @@ test('index service in utility process', async () => {
   await expect.poll(() => win.evaluate(() => window.synote.backlinks('b.md'))).toEqual(['a.md'])
   await app.close()
 })
+
+// 全文搜索（S7）：⌘⇧F 打开搜索视图 → 输入即搜 → 点击命中打开文件并选中命中处
+test('full-text search opens file at match', async () => {
+  const base = mkdtempSync(path.join(tmpdir(), 'synote-e2e-'))
+  const vault = path.join(base, 'vault')
+  const userData = path.join(base, 'user-data')
+  mkdirSync(vault, { recursive: true })
+  mkdirSync(userData)
+  writeFileSync(path.join(vault, 'a.md'), '# 标题\n\n第三行有实时预览\n')
+  writeFileSync(path.join(vault, 'b.md'), '无关内容')
+  writeFileSync(path.join(userData, 'recent.json'), JSON.stringify([vault]))
+
+  const app = await electron.launch({ args: ['.'], env: { ...process.env, SYNOTE_USER_DATA: userData } })
+  const win = await app.firstWindow()
+  await expect(win.getByRole('tree')).toBeVisible()
+
+  await win.keyboard.press('ControlOrMeta+Shift+f')
+  const input = win.getByRole('textbox', { name: '搜索' })
+  await expect(input).toBeFocused()
+  await input.fill('实时预览')
+  const list = win.getByRole('list', { name: '搜索' })
+  await expect(list.getByRole('listitem')).toHaveCount(2, { timeout: 5000 }) // 文件行 + 一处命中
+  await list.getByRole('listitem').filter({ hasText: '第三行有' }).click()
+
+  await expect(win.getByRole('tab', { name: 'a' })).toBeVisible()
+  await expect(win.locator('.cm-content')).toContainText('第三行有实时预览')
+  expect(await win.evaluate(() => getSelection()?.toString())).toBe('实时预览')
+  await expect(win.getByRole('alert')).toHaveCount(0)
+  await app.close()
+})

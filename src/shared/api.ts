@@ -5,7 +5,9 @@ export type Entry = { path: string; dir: boolean } // path 为相对笔记库根
 
 export type VaultInfo = { root: string; name: string; entries: Entry[] }
 
-export type SearchHit = { path: string; snippet: string }
+// line 从 1 开始，col 是行内 UTF-16 偏移；text 是该行的摘要，命中从 text[start] 开始，长度同查询词
+export type SearchMatch = { line: number; col: number; text: string; start: number }
+export type SearchHit = { path: string; matches: SearchMatch[] }
 
 // 渲染进程可调用的索引查询（主进程按这个白名单转发给索引 utility process）
 export const indexMethods = ['backlinks', 'search', 'attachmentRefs', 'orphans', 'rebuild'] as const

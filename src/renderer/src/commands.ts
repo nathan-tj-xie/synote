@@ -17,6 +17,13 @@ export const handlers: Record<CommandId, Handler> = {
   quickOpen: { when: () => !!st().vault, run: () => st().setPalette('files') },
   commandPalette: { when: () => !!st().vault, run: () => st().setPalette('commands') },
   save: { when: () => !!st().active, run: saveCurrent },
+  search: {
+    when: () => !!st().vault,
+    run: () => {
+      st().setSidebar('search')
+      requestAnimationFrame(() => document.getElementById('search-input')?.focus())
+    },
+  },
   newNote: {
     when: () => !!st().vault,
     run: (dir = '') =>

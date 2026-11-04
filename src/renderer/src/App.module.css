@@ -7,3 +7,5 @@
 .separator { width: 1px; background: var(--border); }
 .separator:hover, .separator[data-separator="active"] { background: var(--accent); }
 .error { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); background: var(--bg-raised); border: 1px solid var(--danger); padding: 6px 14px; border-radius: 6px; cursor: pointer; }
+.view { height: 100%; }
+.view[hidden] { display: none; }
