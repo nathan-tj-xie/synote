@@ -4,7 +4,7 @@ import { existsSync, promises as fs, statSync, watch, type FSWatcher } from 'nod
 import path from 'node:path'
 import { i18next, i18nOptions } from '../shared/i18n'
 import { commands } from '../shared/commands'
-import { indexMethods, type GitState, type ItemMenuAction, type VaultInfo } from '../shared/api'
+import { indexMethods, type GitState, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
 import { exec, findGit, Git, type GitDetectionResult } from './git'
 import { isHidden, resolveInVault, scanEntries, toPosix, uniqueNoteName } from './vault'
 
@@ -35,10 +35,29 @@ async function openVault(dir: string): Promise<VaultInfo> {
   // 先于任何 await 启动：快速连开两个库时，按调用顺序最后一个生效
   startWatching(dir)
   startIndexer(dir)
-  const entries = await scanEntries(dir)
+  const [entries, config] = await Promise.all([scanEntries(dir), readConfig(dir)])
   const recent = [dir, ...(await recentVaults()).filter((r) => r !== dir)].slice(0, 10)
   await fs.writeFile(recentFile(), JSON.stringify(recent))
-  return { root: dir, name: path.basename(dir), entries }
+  return { root: dir, name: path.basename(dir), entries, config }
+}
+
+const configFile = (dir: string) => path.join(dir, '.synote', 'config.json')
+
+// .synote/config.json 入 git：没有就建一个空的；读不出来时按空配置处理，不覆盖用户的文件
+async function readConfig(dir: string): Promise<VaultConfig> {
+  try {
+    return JSON.parse(await fs.readFile(configFile(dir), 'utf8'))
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.error('[vault] cannot read config', e)
+      return {}
+    }
+  }
+  await fs
+    .mkdir(path.dirname(configFile(dir)), { recursive: true })
+    .then(() => fs.writeFile(configFile(dir), '{}\n', { flag: 'wx' }))
+    .catch((e) => console.error('[vault] cannot create config', e)) // 只读目录也能打开
+  return {}
 }
 
 function startWatching(dir: string) {
@@ -180,6 +199,10 @@ ipcMain.handle('vault:openDialog', async () => {
 })
 ipcMain.handle('vault:open', (_e, dir: string) => openVault(dir))
 ipcMain.handle('vault:recent', () => recentVaults())
+ipcMain.handle('vault:writeConfig', (_e, config: VaultConfig) => {
+  if (!root) throw new Error('no vault open')
+  return fs.writeFile(configFile(root), `${JSON.stringify(config, null, 2)}\n`)
+})
 ipcMain.handle('file:read', (_e, rel: string) => fs.readFile(vaultPath(rel), 'utf8'))
 ipcMain.handle('file:write', (_e, rel: string, content: string) => fs.writeFile(vaultPath(rel), content))
 ipcMain.handle('file:createNote', async (_e, dir: string) => {

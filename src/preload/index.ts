@@ -14,6 +14,7 @@ const api: SynoteApi = {
   openVaultDialog: () => ipcRenderer.invoke('vault:openDialog'),
   openVault: (root) => ipcRenderer.invoke('vault:open', root),
   recentVaults: () => ipcRenderer.invoke('vault:recent'),
+  writeConfig: (c) => ipcRenderer.invoke('vault:writeConfig', c),
   readFile: (p) => ipcRenderer.invoke('file:read', p),
   writeFile: (p, c) => ipcRenderer.invoke('file:write', p, c),
   createNote: (dir) => ipcRenderer.invoke('file:createNote', dir),

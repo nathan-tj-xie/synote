@@ -3,7 +3,10 @@ import type { CommandId } from './commands'
 
 export type Entry = { path: string; dir: boolean } // path 为相对笔记库根目录的 POSIX 路径
 
-export type VaultInfo = { root: string; name: string; entries: Entry[] }
+// .synote/config.json 的内容（入 git）；具体字段由用到的功能各自加
+export type VaultConfig = Record<string, unknown>
+
+export type VaultInfo = { root: string; name: string; entries: Entry[]; config: VaultConfig }
 
 // line 从 1 开始，col 是行内 UTF-16 偏移；text 是该行的摘要，命中从 text[start] 开始，长度同查询词
 export type SearchMatch = { line: number; col: number; text: string; start: number }
@@ -37,6 +40,7 @@ export interface SynoteApi {
   openVaultDialog(): Promise<VaultInfo | null>
   openVault(root: string): Promise<VaultInfo>
   recentVaults(): Promise<string[]>
+  writeConfig(config: VaultConfig): Promise<void>
   readFile(path: string): Promise<string>
   writeFile(path: string, content: string): Promise<void>
   createNote(dir: string): Promise<string>

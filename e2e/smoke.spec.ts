@@ -71,8 +71,12 @@ test('open vault, edit, save, reload external change', async () => {
   writeFileSync(file, '# 外部改的\n')
   await expect(editor).toContainText('# 外部改的', { timeout: 5000 })
 
-  // 非 git 目录：上面的笔记库本身就不是 git 仓库，没有报错即可
+  // 非 git 目录：上面的笔记库本身就不是 git 仓库，没有报错即可；.synote/config.json 自动创建
   await expect(win.getByRole('alert')).toHaveCount(0)
+  expect(JSON.parse(readFileSync(path.join(vault, '.synote', 'config.json'), 'utf8'))).toEqual({})
+  await expect(tree.getByText('.synote')).toHaveCount(0)
+  await win.evaluate(() => window.synote.writeConfig({ k: 1 }))
+  expect(JSON.parse(readFileSync(path.join(vault, '.synote', 'config.json'), 'utf8'))).toEqual({ k: 1 })
   await app.close()
 })
 
