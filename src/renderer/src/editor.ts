@@ -1,7 +1,7 @@
 // CM6 薄封装：一个 EditorView，按标签页缓存 EditorState，不放进 React state（ADR 0005）
 import { markdown } from '@codemirror/lang-markdown'
 import { EditorState, Transaction } from '@codemirror/state'
-import { EditorView, keymap } from '@codemirror/view'
+import { EditorView } from '@codemirror/view'
 import { minimalSetup } from 'codemirror'
 import { useStore } from './store'
 
@@ -29,7 +29,6 @@ function makeState(doc: string): EditorState {
       markdown(),
       EditorView.lineWrapping,
       theme,
-      keymap.of([{ key: 'Mod-s', run: () => (current && flush(current), true) }]),
       EditorView.updateListener.of((u) => {
         if (u.docChanged && current && !u.transactions.some((t) => t.annotation(Transaction.remote))) scheduleSave(current)
       }),
@@ -85,6 +84,8 @@ export async function show(path: string | null) {
   view.setState(s)
   view.focus()
 }
+
+export const saveCurrent = () => current && flush(current)
 
 export function forget(path: string) {
   if (timers.has(path)) flush(path) // flush 同步取走内容，之后才能清掉缓存

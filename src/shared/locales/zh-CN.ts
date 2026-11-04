@@ -14,5 +14,11 @@ export const zhCN = {
     emptyEditor: '从左侧选择一篇笔记',
     vaultMissing: '笔记库不存在：{{path}}',
     saveFailed: '保存失败：{{message}}',
+    quickOpen: '快速切换',
+    commandPalette: '命令面板',
+    save: '保存',
+    findFile: '按名称查找文件',
+    findCommand: '输入命令名称',
+    noMatches: '没有匹配项',
   },
 } as const

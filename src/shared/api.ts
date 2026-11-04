@@ -1,9 +1,11 @@
 // 主进程 ↔ 渲染进程的 IPC 契约，两边共享类型
+import type { CommandId } from './commands'
+
 export type Entry = { path: string; dir: boolean } // path 为相对笔记库根目录的 POSIX 路径
 
 export type VaultInfo = { root: string; name: string; entries: Entry[] }
 
-export type ItemMenuAction = 'newNote' | 'trash' | null
+export type ItemMenuAction = Extract<CommandId, 'newNote' | 'trash'> | null
 
 export interface SynoteApi {
   openVaultDialog(): Promise<VaultInfo | null>

@@ -7,11 +7,13 @@ type State = {
   active: string | null
   dirty: Record<string, true>
   error: string | null
+  palette: 'files' | 'commands' | null
   setVault: (v: VaultInfo | null) => void
   open: (path: string) => void
   close: (path: string) => void
   setDirty: (path: string, dirty: boolean) => void
   setError: (e: string | null) => void
+  setPalette: (p: State['palette']) => void
 }
 
 export const useStore = create<State>((set) => ({
@@ -20,6 +22,7 @@ export const useStore = create<State>((set) => ({
   active: null,
   dirty: {},
   error: null,
+  palette: null,
   setVault: (vault) =>
     set((s) => {
       // 已不存在的文件对应的标签页自动关闭
@@ -42,4 +45,5 @@ export const useStore = create<State>((set) => ({
       return { dirty: d }
     }),
   setError: (error) => set({ error }),
+  setPalette: (palette) => set({ palette }),
 }))
