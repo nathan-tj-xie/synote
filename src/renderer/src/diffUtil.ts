@@ -17,6 +17,14 @@ export function minimalEdit(a: string, b: string): { from: number; to: number; i
   return { from: p, to: a.length - q, insert: b.slice(p, b.length - q) }
 }
 
+// doc 是否恰好等于「若干个 BOM + visible」，是的话返回 BOM 的个数（Monaco 藏起来的那部分），否则 null
+export function bomOffset(doc: string, visible: string): number | null {
+  const n = doc.length - visible.length
+  if (n < 0 || !doc.endsWith(visible)) return null
+  for (let i = 0; i < n; i++) if (doc.charCodeAt(i) !== 0xfeff) return null
+  return n
+}
+
 const mimes: Record<string, string> = {
   png: 'image/png',
   jpg: 'image/jpeg',

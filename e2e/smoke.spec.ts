@@ -722,6 +722,9 @@ test('workspace diff: toggle, edit and save, back to prose', async () => {
 // Monaco 和 CM6 按偏移量同步，两边对文本的表示要一致：开头的 BOM（Monaco 单独存）、外部重载只改了代理对的一半
 test('workspace diff keeps offsets in sync with BOM and surrogate pairs', async () => {
   const { app, win, vault } = await launch({ 'bom.md': '\uFEFFabc', 'emoji.md': '😀abc' })
+  // 同步要靠偏移换算本身对齐，不能靠自检重设兜底
+  const syncErrors: string[] = []
+  win.on('console', (m) => m.text().startsWith('[diff]') && syncErrors.push(m.text()))
   execFileSync('git', ['init', '-q'], { cwd: vault })
   const disk = (p: string) => readFileSync(path.join(vault, p), 'utf8')
   const modified = win.locator('.monaco-diff-editor .editor.modified .view-lines')
@@ -745,6 +748,48 @@ test('workspace diff keeps offsets in sync with BOM and surrogate pairs', async 
   await win.keyboard.type('X')
   await win.keyboard.press('ControlOrMeta+s')
   await expect.poll(() => disk('emoji.md')).toBe('😁abcX')
+  expect(syncErrors).toEqual([])
+  await app.close()
+})
+
+// Monaco 隐藏开头 BOM 的个数不靠猜：双 BOM、外部增删 BOM 之后在 diff 里输入，落盘都要对
+test('workspace diff with double BOM and external BOM changes', async () => {
+  const { app, win, vault } = await launch({ 'two.md': '\uFEFF\uFEFFabc', 'ext.md': 'abc' })
+  // 同步要靠偏移换算本身对齐，不能靠自检重设兜底
+  const syncErrors: string[] = []
+  win.on('console', (m) => m.text().startsWith('[diff]') && syncErrors.push(m.text()))
+  execFileSync('git', ['init', '-q'], { cwd: vault })
+  const disk = (p: string) => readFileSync(path.join(vault, p), 'utf8')
+  const modified = win.locator('.monaco-diff-editor .editor.modified .view-lines')
+  const typeAtEnd = async (text: string) => {
+    await win.keyboard.press('ControlOrMeta+End')
+    await win.keyboard.type(text)
+    await win.keyboard.press('ControlOrMeta+s')
+  }
+
+  await win.getByRole('treeitem', { name: 'two.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('abc')
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  await expect(modified).toContainText('abc', { timeout: 10_000 })
+  await typeAtEnd('X')
+  await expect.poll(() => disk('two.md')).toBe('\uFEFF\uFEFFabcX')
+
+  await win.getByRole('treeitem', { name: 'ext.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('abc')
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  await expect(modified).toContainText('abc')
+  // 外部加上 BOM、加成两个、再去掉：每次都等 diff 显示出新内容后再输入
+  for (const [ext, typed, want] of [
+    ['\uFEFFabc1', 'X', '\uFEFFabc1X'],
+    ['\uFEFF\uFEFFabc2', 'Y', '\uFEFF\uFEFFabc2Y'],
+    ['abc3', 'Z', 'abc3Z'],
+  ]) {
+    writeFileSync(path.join(vault, 'ext.md'), ext)
+    await expect(modified).toContainText(ext.replace(/\uFEFF/g, '').trim())
+    await typeAtEnd(typed)
+    await expect.poll(() => disk('ext.md')).toBe(want)
+  }
+  expect(syncErrors).toEqual([])
   await app.close()
 })
 

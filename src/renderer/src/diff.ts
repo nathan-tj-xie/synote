@@ -23,7 +23,7 @@ import 'monaco-editor/languages/definitions/markdown/register.js'
 import EditorWorker from 'monaco-editor/editor/editor.worker.js?worker'
 import { i18next } from '../../shared/i18n'
 import { monacoColors } from './tokens'
-import { imageAt, imageMime, minimalEdit } from './diffUtil'
+import { bomOffset, imageAt, imageMime, minimalEdit } from './diffUtil'
 
 // diff 计算放在 worker 里，不卡输入
 self.MonacoEnvironment = { getWorker: () => new EditorWorker() }
@@ -45,31 +45,35 @@ export type Change = { from: number; to: number; insert: string }
 
 let editor: monaco.editor.IStandaloneDiffEditor | null = null
 let cur: { vault: string; path: string; original: monaco.editor.ITextModel; modified: monaco.editor.ITextModel } | null = null
-// replace 写入 Monaco 时为 true：这些改动来自 CM6，不能再同步回去
+// replace / reset 写入 Monaco 时为 true：这些改动来自 CM6，不能再同步回去
 let applying = false
-// Monaco 把开头的 BOM 单独存、不算进文本和偏移，CM6 的 doc 里却是一个字符：工作区一侧的文本 = CM6 正文去掉 BOM，
-// 偏移整体差 bom 位。落盘字节不动（仍按 CM6 的 doc 写）
-let bom = 0
-const strip = (doc: string) => {
-  bom = doc.startsWith('\uFEFF') ? 1 : 0
-  return doc.slice(bom)
+// 不变式：CM6 正文 = off 个 BOM + Monaco 文本。Monaco 会把开头的 BOM 藏起来、不算进文本和偏移，藏几个不猜，
+// 每次同步后按两边的实际文本量出来。mirror 是最近一次确认对齐时 Monaco 的文本，null 表示没对齐上。
+// 写回 CM6 之前先确认对齐；对不上就不写回，以 CM6 为准重设 Monaco，错位的改动永远进不了 CM6、也就不会落盘
+let off = 0
+let mirror: string | null = null
+
+function align(doc: string): boolean {
+  const v = cur!.modified.getValue()
+  const o = bomOffset(doc, v)
+  mirror = o === null ? null : v
+  off = o ?? 0
+  return o !== null
 }
 
-// 不变式自检：每次同步后工作区一侧必须和 CM6 正文一致；不一致说明偏移换算有漏洞，以 CM6 为准整体重设并记日志
-function verify(doc: string) {
-  const m = cur?.modified
-  const want = strip(doc)
-  if (!m || m.getValue() === want) return
-  console.error('[diff] modified side out of sync with CM6, resetting', { path: cur!.path })
+// 以 CM6 为准整体重设工作区一侧；unexpected 为 true 说明前面的同步出了漏洞，记日志
+function reset(doc: string, unexpected = true) {
+  if (unexpected) console.error('[diff] modified side out of sync with CM6, resetting', { path: cur!.path })
   applying = true
   try {
-    m.setValue(want)
+    cur!.modified.setValue(doc)
   } finally {
     applying = false
   }
+  if (!align(doc)) console.error('[diff] cannot align modified side with CM6, edits are not written back', { path: cur!.path })
 }
 
-// docNow：CM6 视图里的最新正文，同步后用来自检
+// docNow：CM6 视图里的最新正文，写回前后用来核对对齐
 export function create(parent: HTMLElement, onEdit: (changes: Change[]) => void, docNow: () => string) {
   const body = getComputedStyle(document.body)
   editor = monaco.editor.createDiffEditor(parent, {
@@ -89,10 +93,14 @@ export function create(parent: HTMLElement, onEdit: (changes: Change[]) => void,
     renderOverviewRuler: true,
   })
   editor.getModifiedEditor().onDidChangeModelContent((e) => {
+    if (applying || !cur) return
+    const doc = docNow()
+    // 改动前两边必须对齐（mirror 就是这次改动前的 Monaco 文本），否则这次输入不写回
+    if (mirror === null || bomOffset(doc, mirror) !== off) return reset(doc)
     // 一次事件里的多处改动都以改动前的文档为坐标，正好对应 CM6 一个事务里的多个 change
-    if (applying) return
-    onEdit(e.changes.map((c) => ({ from: c.rangeOffset + bom, to: c.rangeOffset + c.rangeLength + bom, insert: c.text })))
-    verify(docNow())
+    onEdit(e.changes.map((c) => ({ from: c.rangeOffset + off, to: c.rangeOffset + c.rangeLength + off, insert: c.text })))
+    const now = docNow()
+    if (!align(now)) reset(now)
   })
 }
 
@@ -104,8 +112,9 @@ export function show(vault: string, path: string, head: string, doc: string, rea
     m.setEOL(monaco.editor.EndOfLineSequence.LF)
     return m
   }
-  cur = { vault, path, original: mk(head), modified: mk(strip(doc)) }
+  cur = { vault, path, original: mk(head), modified: mk(doc) }
   editor!.setModel({ original: cur.original, modified: cur.modified })
+  if (!align(doc)) reset(doc)
   setReadOnly(readOnly)
 }
 
@@ -117,23 +126,28 @@ export function hide() {
   cur = null
 }
 
-const edit = (m: monaco.editor.ITextModel, text: string) => {
-  const e = minimalEdit(m.getValue(), text)
-  if (!e) return
-  const range = monaco.Range.fromPositions(m.getPositionAt(e.from), m.getPositionAt(e.to))
-  applying = true
-  try {
-    m.pushEditOperations([], [{ range, text: e.insert }], () => null)
-  } finally {
-    applying = false
-  }
-}
-
-// CM6 那边的改动（外部重载）：推给工作区一侧
+// CM6 那边的改动（外部重载）：按 CM6 坐标求最小替换，换算成 Monaco 坐标推过去，保住光标和撤销栈。
+// 改动碰到 Monaco 藏起来的 BOM、或之前没对齐，就整体重设
 export function replace(doc: string) {
   if (!cur) return
-  edit(cur.modified, strip(doc))
-  verify(doc)
+  const m = cur.modified
+  if (mirror !== null && m.getValue() === mirror) {
+    const e = minimalEdit('\uFEFF'.repeat(off) + mirror, doc)
+    if (!e) return
+    if (e.from >= off) {
+      const range = monaco.Range.fromPositions(m.getPositionAt(e.from - off), m.getPositionAt(e.to - off))
+      applying = true
+      try {
+        m.pushEditOperations([], [{ range, text: e.insert }], () => null)
+      } finally {
+        applying = false
+      }
+      if (align(doc)) return
+      return reset(doc)
+    }
+    return reset(doc, false)
+  }
+  reset(doc)
 }
 // HEAD 变了（提交、切分支）：更新左侧
 export const setHead = (head: string) => cur && cur.original.setValue(head)

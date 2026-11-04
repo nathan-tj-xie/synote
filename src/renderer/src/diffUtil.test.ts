@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { imageAt, minimalEdit } from './diffUtil'
+import { bomOffset, imageAt, minimalEdit } from './diffUtil'
 
 const apply = (a: string, e: ReturnType<typeof minimalEdit>) => (e ? a.slice(0, e.from) + e.insert + a.slice(e.to) : a)
 
@@ -18,6 +18,21 @@ describe('minimalEdit', () => {
       expect([isLow(a, e.from), isLow(a, e.to)]).toEqual([false, false])
       expect(/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/.test(e.insert)).toBe(false)
     }
+  })
+})
+
+describe('bomOffset', () => {
+  it('前面多出的全是 BOM：返回个数', () => {
+    expect(bomOffset('abc', 'abc')).toBe(0)
+    expect(bomOffset('\uFEFFabc', 'abc')).toBe(1)
+    expect(bomOffset('\uFEFF\uFEFFabc', '\uFEFFabc')).toBe(1)
+    expect(bomOffset('\uFEFF\uFEFF', '')).toBe(2)
+  })
+  it('对不上为 null', () => {
+    expect(bomOffset('abc', 'abcd')).toBeNull()
+    expect(bomOffset('xabc', 'abc')).toBeNull()
+    expect(bomOffset('\uFEFFabX', 'abc')).toBeNull()
+    expect(bomOffset('\uFEFFxabc', 'abc')).toBeNull()
   })
 })
 
