@@ -9,6 +9,16 @@ describe('minimalEdit', () => {
   it('重复字符时前后缀不重叠', () => {
     for (const [a, b] of [['aaa', 'aa'], ['aa', 'aaaa'], ['', 'x'], ['x', ''], ['abba', 'aba']]) expect(apply(a, minimalEdit(a, b))).toBe(b)
   })
+  // 😀 和 😁 的高代理码元相同：边界不能落在代理对中间（Monaco 会把范围扩到整个码点，插入文本却没扩）
+  it('不切开代理对', () => {
+    const isLow = (s: string, i: number) => /[\uDC00-\uDFFF]/.test(s[i] ?? '')
+    for (const [a, b] of [['😀abc', '😁abc'], ['abc😀', 'abc😁'], ['x😀😀y', 'x😀😁y'], ['😀', '😀😀'], ['a😀', 'a']]) {
+      const e = minimalEdit(a, b)!
+      expect(apply(a, e)).toBe(b)
+      expect([isLow(a, e.from), isLow(a, e.to)]).toEqual([false, false])
+      expect(/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/.test(e.insert)).toBe(false)
+    }
+  })
 })
 
 describe('imageAt', () => {

@@ -719,6 +719,35 @@ test('workspace diff: toggle, edit and save, back to prose', async () => {
   await app.close()
 })
 
+// Monaco 和 CM6 按偏移量同步，两边对文本的表示要一致：开头的 BOM（Monaco 单独存）、外部重载只改了代理对的一半
+test('workspace diff keeps offsets in sync with BOM and surrogate pairs', async () => {
+  const { app, win, vault } = await launch({ 'bom.md': '\uFEFFabc', 'emoji.md': '😀abc' })
+  execFileSync('git', ['init', '-q'], { cwd: vault })
+  const disk = (p: string) => readFileSync(path.join(vault, p), 'utf8')
+  const modified = win.locator('.monaco-diff-editor .editor.modified .view-lines')
+
+  await win.getByRole('treeitem', { name: 'bom.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('abc')
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  await expect(modified).toContainText('abc', { timeout: 10_000 })
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('X')
+  await win.keyboard.press('ControlOrMeta+s')
+  await expect.poll(() => disk('bom.md')).toBe('\uFEFFabcX')
+
+  await win.getByRole('treeitem', { name: 'emoji.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('😀abc')
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  await expect(modified).toContainText('😀abc')
+  writeFileSync(path.join(vault, 'emoji.md'), '😁abc')
+  await expect(modified).toContainText('😁abc')
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('X')
+  await win.keyboard.press('ControlOrMeta+s')
+  await expect.poll(() => disk('emoji.md')).toBe('😁abcX')
+  await app.close()
+})
+
 test('workspace diff outside a git repo reports and stays in prose', async () => {
   const { app, win } = await launch({ 'a.md': 'x' })
   await win.getByRole('treeitem', { name: 'a.md' }).click()

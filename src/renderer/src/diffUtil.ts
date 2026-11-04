@@ -1,13 +1,19 @@
 // 工作区对比用到的纯函数（不依赖 Monaco），便于单测
 
-// a 变成 b 的最小单段替换（去掉公共前后缀），外部重载推给 Monaco 时用，保住光标和撤销栈
+// a 变成 b 的最小单段替换（去掉公共前后缀），外部重载推给 Monaco 时用，保住光标和撤销栈。
+// 边界只落在码点上：切开代理对的话 Monaco 会把范围扩到整个码点，插入文本却没扩，两边就错位了
+const isHigh = (c: number) => c >= 0xd800 && c <= 0xdbff
+const isLow = (c: number) => c >= 0xdc00 && c <= 0xdfff
+
 export function minimalEdit(a: string, b: string): { from: number; to: number; insert: string } | null {
   if (a === b) return null
   const max = Math.min(a.length, b.length)
   let p = 0
   while (p < max && a.charCodeAt(p) === b.charCodeAt(p)) p++
+  if (p > 0 && isHigh(a.charCodeAt(p - 1))) p-- // 前缀停在高代理之后：退回到这个码点之前
   let q = 0
   while (q < max - p && a.charCodeAt(a.length - 1 - q) === b.charCodeAt(b.length - 1 - q)) q++
+  if (q > 0 && isLow(a.charCodeAt(a.length - q))) q-- // 后缀从低代理开始：让出这个码点
   return { from: p, to: a.length - q, insert: b.slice(p, b.length - q) }
 }
 

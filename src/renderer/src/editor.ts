@@ -161,7 +161,7 @@ function syncDiff() {
     const [mod, head] = await Promise.all([diff ?? import('./diff'), window.synote.readHead(v, want)])
     diff = mod
     if (my !== diffSeq || !view) return // 期间又切了文件 / 形态，或换了库
-    if (!diffBox!.childElementCount) mod.create(diffBox!, applyFromDiff)
+    if (!diffBox!.childElementCount) mod.create(diffBox!, applyFromDiff, () => view!.state.doc.toString())
     diffBox!.hidden = false
     cmBox!.hidden = true
     mod.show(v, want, decode(head), view.state.doc.toString(), locked)
