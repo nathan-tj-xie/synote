@@ -40,11 +40,12 @@ export interface SynoteApi {
   openVaultDialog(): Promise<VaultInfo | null>
   openVault(root: string): Promise<VaultInfo>
   recentVaults(): Promise<string[]>
-  writeConfig(config: VaultConfig): Promise<void>
-  readFile(path: string): Promise<string>
-  writeFile(path: string, content: string): Promise<void>
-  createNote(dir: string): Promise<string>
-  trash(path: string): Promise<void>
+  // 以下读写都带上发起方所在的笔记库（VaultInfo.root），和主进程当前的库不一致时拒绝
+  writeConfig(vault: string, config: VaultConfig): Promise<void>
+  readFile(vault: string, path: string): Promise<string>
+  writeFile(vault: string, path: string, content: string): Promise<void>
+  createNote(vault: string, dir: string): Promise<string>
+  trash(vault: string, path: string): Promise<void>
   showItemMenu(path: string, dir: boolean): Promise<ItemMenuAction>
   reportReady(): void
   // 外部改动：刷新后的条目与变化的路径

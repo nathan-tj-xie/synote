@@ -39,13 +39,14 @@ function openVault(dir: string): Promise<VaultInfo> {
 
 async function doOpenVault(dir: string): Promise<VaultInfo> {
   if (!existsSync(dir)) throw new Error(t('vaultMissing', { path: dir }))
-  root = dir
-  gitGen++ // 进行中的 git 状态查询作废
   startWatching(dir)
   startIndexer(dir)
   const [entries, config] = await Promise.all([scanEntries(dir), readConfig(dir)])
   const recent = [dir, ...(await recentVaults()).filter((r) => r !== dir)].slice(0, 10)
   await fs.writeFile(recentFile(), JSON.stringify(recent))
+  // 全部就绪、马上回复时才切 root：开库期间界面仍是旧库，它的读写照常落在旧库
+  root = dir
+  gitGen++ // 进行中的 git 状态查询作废
   return { root: dir, name: path.basename(dir), entries, config }
 }
 
@@ -190,10 +191,14 @@ function pushGitState() {
   gitTimer = setTimeout(() => gitState().then((s) => win?.webContents.send('git:changed', s), (e) => console.error('[git] push state failed', e)), 300)
 }
 
-function vaultPath(rel: string): string {
+// 渲染进程的读写都带上它所在的笔记库：和当前库不一致（期间切过库）就拒绝并报错，绝不落到别的库。
+// 在第一个 await 之前调用，目标路径就此定下，之后再切库也不影响
+function checkVault(vault: string): string {
   if (!root) throw new Error('no vault open')
-  return resolveInVault(root, rel)
+  if (vault !== root) throw new Error(t('vaultSwitched', { vault }))
+  return root
 }
+const vaultPath = (vault: string, rel: string) => resolveInVault(checkVault(vault), rel)
 
 ipcMain.handle('vault:openDialog', async () => {
   const r = await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] })
@@ -201,17 +206,18 @@ ipcMain.handle('vault:openDialog', async () => {
 })
 ipcMain.handle('vault:open', (_e, dir: string) => openVault(dir))
 ipcMain.handle('vault:recent', () => recentVaults())
-ipcMain.handle('vault:writeConfig', async (_e, config: VaultConfig) => {
-  if (!root) throw new Error('no vault open')
-  await fs.mkdir(path.dirname(configFile(root)), { recursive: true })
-  await fs.writeFile(configFile(root), `${JSON.stringify(config, null, 2)}\n`)
+ipcMain.handle('vault:writeConfig', async (_e, vault: string, config: VaultConfig) => {
+  const file = configFile(checkVault(vault))
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  await fs.writeFile(file, `${JSON.stringify(config, null, 2)}\n`)
 })
-ipcMain.handle('file:read', (_e, rel: string) => fs.readFile(vaultPath(rel), 'utf8'))
-ipcMain.handle('file:write', (_e, rel: string, content: string) => fs.writeFile(vaultPath(rel), content))
-ipcMain.handle('file:createNote', async (_e, dir: string) => {
-  const entries = await scanEntries(root!)
+ipcMain.handle('file:read', (_e, vault: string, rel: string) => fs.readFile(vaultPath(vault, rel), 'utf8'))
+ipcMain.handle('file:write', (_e, vault: string, rel: string, content: string) => fs.writeFile(vaultPath(vault, rel), content))
+ipcMain.handle('file:createNote', async (_e, vault: string, dir: string) => {
+  const r = checkVault(vault)
+  const entries = await scanEntries(r)
   const rel = uniqueNoteName(new Set(entries.map((x) => x.path)), dir, t('untitled'))
-  await fs.writeFile(vaultPath(rel), '', { flag: 'wx' }) // wx：不覆盖已有文件
+  await fs.writeFile(resolveInVault(r, rel), '', { flag: 'wx' }) // wx：不覆盖已有文件
   return rel
 })
 ipcMain.handle('index:call', (_e, method: string, ...args: unknown[]) => {
@@ -227,7 +233,7 @@ ipcMain.handle('git:choose', async () => {
   detectGit()
   return gitState()
 })
-ipcMain.handle('file:trash', (_e, rel: string) => shell.trashItem(vaultPath(rel)))
+ipcMain.handle('file:trash', (_e, vault: string, rel: string) => shell.trashItem(vaultPath(vault, rel)))
 ipcMain.handle(
   'menu:item',
   (_e, _rel: string, dir: boolean) =>

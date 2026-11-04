@@ -11,6 +11,7 @@ type Handler = {
 }
 
 const vault = () => !!useVault.getState().vault
+const root = () => useVault.getState().vault!.root
 const ed = useEditor.getState
 const ui = useUi.getState
 const fail = (e: unknown) => ui().setError(String(e))
@@ -28,20 +29,24 @@ export const handlers: Record<CommandId, Handler> = {
   },
   newNote: {
     when: vault,
-    run: (dir = '') =>
-      window.synote
-        .createNote(dir)
-        .then((p) => ed().open(p))
-        .catch(fail),
+    run: (dir = '') => {
+      const r = root()
+      return window.synote
+        .createNote(r, dir)
+        .then((p) => useVault.getState().vault?.root === r && ed().open(p)) // 期间换了库：不在新库里开旧库的标签
+        .catch(fail)
+    },
   },
   trash: {
     when: () => !!ed().active,
     run: async (path = ed().active!) => {
+      const r = root()
       try {
-        await window.synote.trash(path)
+        await window.synote.trash(r, path)
       } catch (e) {
         return fail(e)
       }
+      if (useVault.getState().vault?.root !== r) return // 期间换了库：新库里的同名标签不能关
       for (const tab of ed().tabs) if (tab === path || tab.startsWith(`${path}/`)) forget(tab)
     },
   },

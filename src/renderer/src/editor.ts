@@ -4,12 +4,13 @@ import { EditorSelection, EditorState, Transaction } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { vscodeKeymap } from '@replit/codemirror-vscode-keymap'
 import { minimalSetup } from 'codemirror'
-import { useEditor, useUi } from './store'
+import { useEditor, useUi, useVault } from './store'
 
 const states = new Map<string, EditorState>()
 const timers = new Map<string, ReturnType<typeof setTimeout>>()
 // 每个文件的写盘串成一条链：后发的保存必须在先发的之后落盘，否则旧内容会覆盖新内容
 const writes = new Map<string, Promise<unknown>>()
+let vault: string | null = null // 当前笔记库（VaultInfo.root），读写都带上它，主进程据此拒绝跨库读写
 let view: EditorView | null = null
 let current: string | null = null // 要显示的文件
 let shown: string | null = null // 视图里实际是哪个文件；读文件期间仍是上一个
@@ -58,8 +59,9 @@ async function flush(path: string) {
   clearTimeout(timers.get(path))
   timers.delete(path)
   const text = docOf(path)
-  if (text === undefined) return
-  const write = (writes.get(path) ?? Promise.resolve()).then(() => window.synote.writeFile(path, text))
+  if (text === undefined || !vault) return
+  const v = vault // 按发起时所在的库写；之后换了库，主进程会拒绝并报错
+  const write = (writes.get(path) ?? Promise.resolve()).then(() => window.synote.writeFile(v, path, text))
   writes.set(path, write.catch(() => {}))
   try {
     await write
@@ -97,7 +99,7 @@ export async function show(path: string | null) {
   if (!path) return setView(null, blank())
   let s = states.get(path)
   if (!s) {
-    s = makeState(await window.synote.readFile(path))
+    s = makeState(await window.synote.readFile(vault!, path))
     if (shown === path || states.has(path)) return // 读文件期间另一次 show 已经读进来了，以先到的为准
     if (current !== path) return states.set(path, s) // 读文件期间又切走了
   }
@@ -146,16 +148,31 @@ export async function reloadIfClean(path: string) {
   if (!states.has(path) && path !== shown) return
   if (useEditor.getState().dirty[path]) return
   const before = docOf(path)
+  const v = vault!
   let text: string
   try {
-    text = await window.synote.readFile(path)
+    text = await window.synote.readFile(v, path)
   } catch {
-    return // 文件已删除，标签页由 setVault 关闭
+    return // 文件已删除（标签页由 setVault 关闭），或已换库
   }
-  // 读文件期间有本地输入（不论是否已存盘），或标签页已关：以本地为准，读到的可能是旧快照
-  if (docOf(path) !== before || useEditor.getState().dirty[path]) return
+  // 读文件期间换了库、有本地输入（不论是否已存盘）或标签页已关：以本地为准，读到的可能是旧快照
+  if (vault !== v || docOf(path) !== before || useEditor.getState().dirty[path]) return
   if (text === before) return // 自己写入触发的事件
   if (path === shown && view) view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text }, annotations: Transaction.remote.of(true) })
   else states.set(path, makeState(text))
   useEditor.getState().setDirty(path, false)
 }
+
+// 换笔记库：旧库没写完的改动按旧库发出（主进程已切库时拒绝并提示），然后清空整个编辑器状态；标签由 store 清
+function switchVault(root: string | null) {
+  for (const p of [...timers.keys()]) flush(p)
+  states.clear()
+  target = null
+  current = null
+  if (shown) {
+    shown = null
+    if (view) setView(null, blank())
+  }
+  vault = root
+}
+useVault.subscribe((s, prev) => s.vault?.root !== prev.vault?.root && switchVault(s.vault?.root ?? null))

@@ -15,6 +15,8 @@ type EditorState = {
   close: (path: string) => void
   // 只保留仍存在的文件对应的标签页
   keep: (alive: Set<string>) => void
+  // 换了笔记库：标签、活动文件、dirty 全清（两库同名文件也不沿用）
+  reset: () => void
   setDirty: (path: string, dirty: boolean) => void
 }
 
@@ -27,12 +29,14 @@ type UiState = {
   setSidebar: (v: UiState['sidebar']) => void
 }
 
-export const useVault = create<VaultState>((set) => ({
+export const useVault = create<VaultState>((set, get) => ({
   vault: null,
   setVault: (vault) => {
+    const same = get().vault?.root === vault?.root
     set({ vault })
-    // 已不存在的文件对应的标签页自动关闭
-    useEditor.getState().keep(new Set(vault?.entries.map((e) => e.path)))
+    if (!same) useEditor.getState().reset()
+    // 同一个库的外部改动：已不存在的文件对应的标签页自动关闭
+    else useEditor.getState().keep(new Set(vault?.entries.map((e) => e.path)))
   },
 }))
 
@@ -52,6 +56,7 @@ export const useEditor = create<EditorState>((set) => ({
       const tabs = s.tabs.filter((t) => alive.has(t))
       return { tabs, active: s.active && alive.has(s.active) ? s.active : (tabs.at(-1) ?? null) }
     }),
+  reset: () => set({ tabs: [], active: null, dirty: {} }),
   setDirty: (path, dirty) =>
     set((s) => {
       const d = { ...s.dirty }

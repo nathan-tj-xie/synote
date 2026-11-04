@@ -1,11 +1,11 @@
 import { _electron as electron, expect, test, type ElectronApplication } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-// 临时笔记库 + 独立 userData，启动后等文件树出来
-async function launch(files: Record<string, string>) {
+// 临时笔记库 + 独立 userData，启动后等文件树出来；给了 recent 时按它写最近列表，不等文件树
+async function launch(files: Record<string, string>, recent?: (vault: string) => string[]) {
   const base = mkdtempSync(path.join(tmpdir(), 'synote-e2e-'))
   const vault = path.join(base, 'vault')
   const userData = path.join(base, 'user-data')
@@ -15,11 +15,36 @@ async function launch(files: Record<string, string>) {
     mkdirSync(path.dirname(path.join(vault, p)), { recursive: true })
     writeFileSync(path.join(vault, p), c)
   }
-  writeFileSync(path.join(userData, 'recent.json'), JSON.stringify([vault]))
+  writeFileSync(path.join(userData, 'recent.json'), JSON.stringify(recent?.(vault) ?? [vault]))
   const app = await electron.launch({ args: ['.'], env: { ...process.env, SYNOTE_USER_DATA: userData } })
   const win = await app.firstWindow()
-  await expect(win.getByRole('tree')).toBeVisible()
+  if (!recent) await expect(win.getByRole('tree')).toBeVisible()
   return { app, win, vault }
+}
+
+// 另建一个笔记库，.synote/config.json 是 FIFO：主进程开这个库时读配置会一直卡住，release() 写入后才放行，
+// 用来把“开库进行中”的窗口拉长到测试可控（Windows 没有 mkfifo）
+function blockedVault(base: string, name: string, files: Record<string, string>) {
+  const dir = path.join(base, name)
+  mkdirSync(path.join(dir, '.synote'), { recursive: true })
+  for (const [p, c] of Object.entries(files)) writeFileSync(path.join(dir, p), c)
+  const fifo = path.join(dir, '.synote', 'config.json')
+  execFileSync('mkfifo', [fifo])
+  // 非阻塞打开写端：读端（主进程）还没打开时 ENXIO，轮询到读端就绪再写
+  const release = () =>
+    expect
+      .poll(() => {
+        try {
+          const fd = openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK)
+          writeSync(fd, '{}')
+          closeSync(fd)
+          return true
+        } catch {
+          return false
+        }
+      })
+      .toBe(true)
+  return { dir, release }
 }
 
 // 把主进程的 file:read / file:write 换成第一次调用晚 ms 毫秒才回的版本，用来复现 IPC 乱序；
@@ -32,7 +57,9 @@ async function slowFirstCall(app: ElectronApplication, vault: string, channel: '
       const slow = (g.slow = { calls: 0, done: 0 })
       const wait = () => new Promise((r) => setTimeout(r, slow.calls++ === 0 ? ms : 0))
       ipcMain.removeHandler(channel)
-      ipcMain.handle(channel, async (_e, rel: string, content: string) => {
+      // 只取最后的 rel（和 content），不管前面带不带笔记库参数；替换后不经过主进程的笔记库校验
+      ipcMain.handle(channel, async (_e, ...args: string[]) => {
+        const [rel, content] = channel === 'file:write' ? args.slice(-2) : [args.at(-1)!]
         const file = `${vault}/${rel}`
         try {
           if (channel === 'file:write') return await wait().then(() => fs.writeFile(file, content))
@@ -74,7 +101,7 @@ test('open vault, edit, save, reload external change', async () => {
   // 非 git 目录：上面的笔记库本身就不是 git 仓库，没有报错即可；打开库不创建 .synote/config.json，写配置时才创建
   await expect(win.getByRole('alert')).toHaveCount(0)
   expect(existsSync(path.join(vault, '.synote'))).toBe(false)
-  await win.evaluate(() => window.synote.writeConfig({ k: 1 }))
+  await win.evaluate((v) => window.synote.writeConfig(v, { k: 1 }), vault)
   expect(JSON.parse(readFileSync(path.join(vault, '.synote', 'config.json'), 'utf8'))).toEqual({ k: 1 })
   await win.waitForTimeout(500) // 等 watcher 推送刷新文件树
   await expect(tree.getByText('.synote')).toHaveCount(0)
@@ -175,7 +202,7 @@ test('opening vaults in quick succession: last call wins', async () => {
     return got
   }, [slowVault, fastVault])
   expect(order).toEqual([slowVault, fastVault])
-  expect(await win.evaluate(() => window.synote.readFile('只在快库.md'))).toBe('快')
+  expect(await win.evaluate((v) => window.synote.readFile(v, '只在快库.md'), fastVault)).toBe('快')
   expect((await win.evaluate(() => window.synote.recentVaults()))[0]).toBe(fastVault)
   await app.close()
 })
@@ -312,6 +339,62 @@ test('closing a loading search target drops the pending reveal', async () => {
   await win.keyboard.press('Enter')
   await expect(win.locator('.cm-content')).toContainText('第二行有目标')
   expect(await win.evaluate(() => getSelection()?.toString())).toBe('')
+  await app.close()
+})
+
+// 主进程开新库期间（还没返回），界面上仍是旧库：这时的保存写回旧库；新库开好后旧界面的写入被拒绝并提示
+test('saves during a vault switch go to the vault that issued them', async () => {
+  test.skip(process.platform === 'win32', 'mkfifo')
+  const { app, win, vault } = await launch({ 'x.md': 'A 的 x' })
+  const other = blockedVault(path.dirname(vault), 'other', { 'x.md': 'B 的 x' })
+  await win.getByRole('treeitem', { name: 'x.md' }).click()
+  const editor = win.locator('.cm-content')
+  await expect(editor).toHaveText('A 的 x')
+
+  const opened = win.evaluate((d) => window.synote.openVault(d).then((v) => v.root), other.dir) // 卡在读配置
+  await win.waitForTimeout(300)
+  await editor.click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('改')
+  await win.keyboard.press('ControlOrMeta+s')
+  await expect.poll(() => readFileSync(path.join(vault, 'x.md'), 'utf8')).toBe('A 的 x改')
+  expect(readFileSync(path.join(other.dir, 'x.md'), 'utf8')).toBe('B 的 x')
+
+  await other.release()
+  expect(await opened).toBe(other.dir)
+  await win.keyboard.type('再')
+  await win.keyboard.press('ControlOrMeta+s')
+  await expect(win.getByRole('alert')).toContainText('笔记库已切换')
+  expect(readFileSync(path.join(other.dir, 'x.md'), 'utf8')).toBe('B 的 x')
+  await app.close()
+})
+
+// 启动时自动打开 A、又点了 B：B 晚到时换掉整个编辑器（两库都有 x.md 也不沿用 A 的标签和正文），不写错库
+test('switching to another vault drops tabs and editor state of the old one', async () => {
+  test.skip(process.platform === 'win32', 'mkfifo')
+  const base = mkdtempSync(path.join(tmpdir(), 'synote-e2e-'))
+  const a = blockedVault(base, 'a', { 'x.md': 'A 的 x' })
+  const b = blockedVault(base, 'b', { 'x.md': 'B 的 x', 'B 独有.md': '' })
+  const { app, win } = await launch({}, (v) => [v + '-missing', a.dir, b.dir]) // 第一项不存在：自动打开失败，停在欢迎页
+  await win.getByRole('button', { name: a.dir }).click()
+  await win.getByRole('button', { name: b.dir }).click()
+  await a.release()
+  await win.getByRole('treeitem', { name: 'x.md' }).click()
+  const editor = win.locator('.cm-content')
+  await expect(editor).toHaveText('A 的 x')
+  await editor.click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('改')
+  await expect.poll(() => readFileSync(path.join(a.dir, 'x.md'), 'utf8')).toBe('A 的 x改')
+
+  await b.release()
+  await expect(win.getByRole('treeitem', { name: 'B 独有.md' })).toBeVisible()
+  await expect(win.getByRole('tab')).toHaveCount(0)
+  await win.keyboard.type('又')
+  await win.keyboard.press('ControlOrMeta+s')
+  await win.waitForTimeout(800) // 过了自动保存的 500 ms
+  expect(readFileSync(path.join(b.dir, 'x.md'), 'utf8')).toBe('B 的 x')
+  expect(readFileSync(path.join(a.dir, 'x.md'), 'utf8')).toBe('A 的 x改')
   await app.close()
 })
 
