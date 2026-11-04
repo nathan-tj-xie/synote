@@ -5,6 +5,11 @@ export type Entry = { path: string; dir: boolean } // path 为相对笔记库根
 
 export type VaultInfo = { root: string; name: string; entries: Entry[] }
 
+export type SearchHit = { path: string; snippet: string }
+
+// 渲染进程可调用的索引查询（主进程按这个白名单转发给索引 utility process）
+export const indexMethods = ['backlinks', 'search', 'attachmentRefs', 'orphans', 'rebuild'] as const
+
 export type ItemMenuAction = Extract<CommandId, 'newNote' | 'trash'> | null
 
 export interface SynoteApi {
@@ -19,6 +24,14 @@ export interface SynoteApi {
   reportReady(): void
   // 外部改动：刷新后的条目与变化的路径
   onVaultChanged(cb: (e: { entries: Entry[]; changed: string[] }) => void): () => void
+  // 索引（S6）
+  backlinks(path: string): Promise<string[]>
+  search(query: string): Promise<SearchHit[]>
+  attachmentRefs(path: string): Promise<number>
+  orphans(): Promise<string[]>
+  rebuildIndex(): Promise<void>
+  // 索引更新后推送变化的路径；反链、引用计数、孤儿列表据此重新查询
+  onIndexChanged(cb: (paths: string[]) => void): () => void
 }
 
 declare global {

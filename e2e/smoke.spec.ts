@@ -73,3 +73,33 @@ test('quick open and command palette', async () => {
   await expect(win.getByRole('alert')).toHaveCount(0)
   await app.close()
 })
+
+// 索引服务：utility process 里的 node:sqlite 能用，反链 / 搜索 / 孤儿 / 重建索引走通
+test('index service in utility process', async () => {
+  const base = mkdtempSync(path.join(tmpdir(), 'synote-e2e-'))
+  const vault = path.join(base, 'vault')
+  const userData = path.join(base, 'user-data')
+  mkdirSync(path.join(vault, 'attachments'), { recursive: true })
+  mkdirSync(userData)
+  writeFileSync(path.join(vault, 'a.md'), '去看 [b](b.md)，实时预览')
+  writeFileSync(path.join(vault, 'b.md'), '')
+  writeFileSync(path.join(vault, 'attachments', 'orphan.png'), '')
+  writeFileSync(path.join(userData, 'recent.json'), JSON.stringify([vault]))
+
+  const app = await electron.launch({ args: ['.'], env: { ...process.env, SYNOTE_USER_DATA: userData } })
+  const win = await app.firstWindow()
+  await expect(win.getByRole('tree')).toBeVisible()
+
+  await expect.poll(() => win.evaluate(() => window.synote.backlinks('b.md').catch(() => [])), { timeout: 5000 }).toEqual(['a.md'])
+  await expect.poll(() => win.evaluate(() => window.synote.search('实时预览').then((h) => h.map((x) => x.path)))).toEqual(['a.md'])
+  expect(await win.evaluate(() => window.synote.orphans())).toEqual(['attachments/orphan.png'])
+
+  writeFileSync(path.join(vault, 'b.md'), '![](attachments/orphan.png)')
+  await expect.poll(() => win.evaluate(() => window.synote.orphans()), { timeout: 5000 }).toEqual([])
+
+  await win.keyboard.press('ControlOrMeta+Shift+p')
+  await win.keyboard.type('重建索引')
+  await win.keyboard.press('Enter')
+  await expect.poll(() => win.evaluate(() => window.synote.backlinks('b.md'))).toEqual(['a.md'])
+  await app.close()
+})

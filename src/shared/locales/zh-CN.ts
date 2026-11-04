@@ -20,5 +20,6 @@ export const zhCN = {
     findFile: '按名称查找文件',
     findCommand: '输入命令名称',
     noMatches: '没有匹配项',
+    rebuildIndex: '重建索引',
   },
 } as const
