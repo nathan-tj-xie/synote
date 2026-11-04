@@ -49,17 +49,17 @@ function Body({ mode, getIndex, close }: { mode: 'files' | 'commands'; getIndex:
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // 订阅可用条件读到的状态：面板打开期间关掉活动文件等，命令列表跟着变
-  const vault = useVault((st) => st.vault)
+  const hasVault = useVault((st) => st.vault !== null) // 只订阅布尔值：文件列表变化不重算命令
   const active = useEditor((st) => st.active)
   const cmds = useMemo(
     () => ids.filter((id) => id !== 'commandPalette' && available(id)).map((id) => ({ id, title: t(commands[id].title) })),
-    [t, vault, active],
+    [t, hasVault, active],
   )
   const hits: Hit[] = useMemo(() => {
     if (mode === 'files') return searchPaths(query, getIndex())
     if (!query.trim()) return cmds.map((c) => ({ id: c.id, text: c.title, indexes: [] }))
     return fuzzysort.go(query, cmds, { key: 'title' }).map((r) => ({ id: r.obj.id, text: r.obj.title, indexes: r.indexes }))
-  }, [mode, query, cmds, getIndex])
+  }, [mode, query, cmds, mode === 'files' && getIndex]) // 命令模式不随文件列表重算
 
   const v = useVirtualizer({ count: hits.length, getScrollElement: () => scrollRef.current, estimateSize: () => ROW, overscan: 10 })
   useEffect(() => setSel(0), [hits])
