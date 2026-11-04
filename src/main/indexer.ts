@@ -57,7 +57,7 @@ export function extractLinks(src: string, text: string): Link[] {
   const quoted: [number, number][] = []
   for (const m of text.matchAll(/\bsrc\s*=\s*(["'])[^"'\n]*?attachments\/([^"'\n]+)\1/gi)) {
     quoted.push([m.index, m.index + m[0].length])
-    add({ dst: `attachments/${decode(m[2])}`, kind: 'att' })
+    add({ dst: `attachments/${decode(m[2].trim())}`, kind: 'att' }) // 引号里的首尾空白不属于路径
   }
   for (const m of text.matchAll(/attachments\/([^\s)"'<>\]|`]+)/g)) {
     if (quoted.some(([a, b]) => m.index >= a && m.index < b)) continue

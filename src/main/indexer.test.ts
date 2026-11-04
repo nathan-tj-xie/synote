@@ -29,6 +29,11 @@ describe('extractLinks', () => {
   })
 })
 
+test('<img src> with surrounding whitespace still counts as a reference', () => {
+  const links = extractLinks('note.md', '<img src=" attachments/a.png "> <img src="attachments/b c.png\t">').map((l) => `${l.kind}:${l.dst}`)
+  expect(links.sort()).toEqual(['att:attachments/a.png', 'att:attachments/b c.png'])
+})
+
 describe('findMatches', () => {
   test('line, column and per-line snippet for every occurrence, CRLF-safe', () => {
     const body = '第一行 Foo\r\n第二行 foo 和 FOO\n' + 'x'.repeat(60) + 'foo'
