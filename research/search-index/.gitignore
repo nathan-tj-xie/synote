@@ -1,0 +1,9 @@
+node_modules/
+package-lock.json
+.vault/
+.out/
+sample-note.md
+.gen.log
+.bench.log
+.vault-w/
+*.log

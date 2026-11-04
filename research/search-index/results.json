@@ -1,0 +1,1050 @@
+{
+ "minisearch-bigram": {
+  "engine": "minisearch-bigram",
+  "readMs": 402.1,
+  "buildMs": 20268.1,
+  "persistMs": 2460.5,
+  "sizeMB": 51.5,
+  "heapMB": 1856,
+  "loadMs": 7958.7,
+  "rssMB": 1171,
+  "queries": [
+   {
+    "name": "en 高频词",
+    "q": "thomasing",
+    "ms": 3.7,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 低频词",
+    "q": "nipcheese",
+    "ms": 0.1,
+    "hits": 92,
+    "truth": 92,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 词内子串",
+    "q": "homasin",
+    "ms": 0,
+    "hits": 0,
+    "truth": 6854,
+    "recall": 0,
+    "precision": 1
+   },
+   {
+    "name": "en 前缀",
+    "q": "thom",
+    "ms": 3.7,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 2 字高频词",
+    "q": "一个",
+    "ms": 5.2,
+    "hits": 9983,
+    "truth": 9983,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 2 字低频词",
+    "q": "喇嘛",
+    "ms": 0.1,
+    "hits": 107,
+    "truth": 107,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 3 字人名",
+    "q": "章宗祥",
+    "ms": 0.1,
+    "hits": 74,
+    "truth": 74,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 词内子串",
+    "q": "汉市",
+    "ms": 0.5,
+    "hits": 1161,
+    "truth": 1161,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 跨词子串",
+    "q": "法权章",
+    "ms": 0.1,
+    "hits": 1,
+    "truth": 1,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 单字",
+    "q": "链",
+    "ms": 6,
+    "hits": 7699,
+    "truth": 8531,
+    "recall": 0.902,
+    "precision": 1
+   },
+   {
+    "name": "zh 词典外 2 字术语",
+    "q": "反链",
+    "ms": 2.4,
+    "hits": 4643,
+    "truth": 4643,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 词典外 4 字术语",
+    "q": "孤儿附件",
+    "ms": 6.4,
+    "hits": 4725,
+    "truth": 4725,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "中英混合 2 词",
+    "q": "武汉 darning",
+    "ms": 1.2,
+    "hits": 463,
+    "truth": 463,
+    "recall": 1,
+    "precision": 1
+   }
+  ],
+  "updateMs": 13.6,
+  "updatePersistMs": 2151.3
+ },
+ "_env": {
+  "node": "v26.12.1",
+  "platform": "darwin-arm64"
+ },
+ "minisearch-segmenter": {
+  "engine": "minisearch-segmenter",
+  "readMs": 1565.3,
+  "buildMs": 15204.9,
+  "persistMs": 1215.1,
+  "sizeMB": 31.5,
+  "heapMB": 814,
+  "loadMs": 1018.1,
+  "rssMB": 578,
+  "queries": [
+   {
+    "name": "en 高频词",
+    "q": "thomasing",
+    "ms": 3.6,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 低频词",
+    "q": "nipcheese",
+    "ms": 0.1,
+    "hits": 92,
+    "truth": 92,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 词内子串",
+    "q": "homasin",
+    "ms": 0,
+    "hits": 0,
+    "truth": 6854,
+    "recall": 0,
+    "precision": 1
+   },
+   {
+    "name": "en 前缀",
+    "q": "thom",
+    "ms": 3.5,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 2 字高频词",
+    "q": "一个",
+    "ms": 4.8,
+    "hits": 9983,
+    "truth": 9983,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 2 字低频词",
+    "q": "喇嘛",
+    "ms": 0.1,
+    "hits": 107,
+    "truth": 107,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 3 字人名",
+    "q": "章宗祥",
+    "ms": 0.2,
+    "hits": 73,
+    "truth": 74,
+    "recall": 0.986,
+    "precision": 1
+   },
+   {
+    "name": "zh 词内子串",
+    "q": "汉市",
+    "ms": 2.1,
+    "hits": 476,
+    "truth": 1161,
+    "recall": 0.083,
+    "precision": 0.202
+   },
+   {
+    "name": "zh 跨词子串",
+    "q": "法权章",
+    "ms": 0.3,
+    "hits": 0,
+    "truth": 1,
+    "recall": 0,
+    "precision": 1
+   },
+   {
+    "name": "zh 单字",
+    "q": "链",
+    "ms": 4.1,
+    "hits": 8524,
+    "truth": 8531,
+    "recall": 0.999,
+    "precision": 1
+   },
+   {
+    "name": "zh 词典外 2 字术语",
+    "q": "反链",
+    "ms": 4.9,
+    "hits": 4671,
+    "truth": 4643,
+    "recall": 0.999,
+    "precision": 0.993
+   },
+   {
+    "name": "zh 词典外 4 字术语",
+    "q": "孤儿附件",
+    "ms": 3.8,
+    "hits": 4725,
+    "truth": 4725,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "中英混合 2 词",
+    "q": "武汉 darning",
+    "ms": 1.1,
+    "hits": 463,
+    "truth": 463,
+    "recall": 1,
+    "precision": 1
+   }
+  ],
+  "updateMs": 8.3,
+  "updatePersistMs": 1135.1
+ },
+ "minisearch-jieba": {
+  "engine": "minisearch-jieba",
+  "readMs": 404.7,
+  "buildMs": 14853.4,
+  "persistMs": 1307,
+  "sizeMB": 29.5,
+  "heapMB": 812,
+  "loadMs": 1200.5,
+  "rssMB": 547,
+  "queries": [
+   {
+    "name": "en 高频词",
+    "q": "thomasing",
+    "ms": 3.6,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 低频词",
+    "q": "nipcheese",
+    "ms": 0.1,
+    "hits": 92,
+    "truth": 92,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 词内子串",
+    "q": "homasin",
+    "ms": 0,
+    "hits": 0,
+    "truth": 6854,
+    "recall": 0,
+    "precision": 1
+   },
+   {
+    "name": "en 前缀",
+    "q": "thom",
+    "ms": 3.6,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 2 字高频词",
+    "q": "一个",
+    "ms": 5.5,
+    "hits": 9982,
+    "truth": 9983,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 2 字低频词",
+    "q": "喇嘛",
+    "ms": 0.1,
+    "hits": 106,
+    "truth": 107,
+    "recall": 0.991,
+    "precision": 1
+   },
+   {
+    "name": "zh 3 字人名",
+    "q": "章宗祥",
+    "ms": 0,
+    "hits": 74,
+    "truth": 74,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 词内子串",
+    "q": "汉市",
+    "ms": 0.8,
+    "hits": 0,
+    "truth": 1161,
+    "recall": 0,
+    "precision": 1
+   },
+   {
+    "name": "zh 跨词子串",
+    "q": "法权章",
+    "ms": 0.1,
+    "hits": 0,
+    "truth": 1,
+    "recall": 0,
+    "precision": 1
+   },
+   {
+    "name": "zh 单字",
+    "q": "链",
+    "ms": 3.8,
+    "hits": 7353,
+    "truth": 8531,
+    "recall": 0.862,
+    "precision": 1
+   },
+   {
+    "name": "zh 词典外 2 字术语",
+    "q": "反链",
+    "ms": 5.1,
+    "hits": 4640,
+    "truth": 4643,
+    "recall": 0.999,
+    "precision": 1
+   },
+   {
+    "name": "zh 词典外 4 字术语",
+    "q": "孤儿附件",
+    "ms": 4.1,
+    "hits": 4725,
+    "truth": 4725,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "中英混合 2 词",
+    "q": "武汉 darning",
+    "ms": 0.8,
+    "hits": 279,
+    "truth": 463,
+    "recall": 0.603,
+    "precision": 1
+   }
+  ],
+  "updateMs": 7.9,
+  "updatePersistMs": 1091.6
+ },
+ "flexsearch-bigram": {
+  "engine": "flexsearch-bigram",
+  "readMs": 410.1,
+  "buildMs": 9121.9,
+  "persistMs": 548.6,
+  "sizeMB": 89.2,
+  "heapMB": 1145,
+  "loadMs": 687.1,
+  "rssMB": 695,
+  "queries": [
+   {
+    "name": "en 高频词",
+    "q": "thomasing",
+    "ms": 0,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 低频词",
+    "q": "nipcheese",
+    "ms": 0,
+    "hits": 92,
+    "truth": 92,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 词内子串",
+    "q": "homasin",
+    "ms": 0,
+    "hits": 0,
+    "truth": 6854,
+    "recall": 0,
+    "precision": 1
+   },
+   {
+    "name": "en 前缀",
+    "q": "thom",
+    "ms": 0,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 2 字高频词",
+    "q": "一个",
+    "ms": 0,
+    "hits": 9983,
+    "truth": 9983,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 2 字低频词",
+    "q": "喇嘛",
+    "ms": 0,
+    "hits": 107,
+    "truth": 107,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 3 字人名",
+    "q": "章宗祥",
+    "ms": 0,
+    "hits": 74,
+    "truth": 74,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 词内子串",
+    "q": "汉市",
+    "ms": 0,
+    "hits": 1161,
+    "truth": 1161,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 跨词子串",
+    "q": "法权章",
+    "ms": 0,
+    "hits": 1,
+    "truth": 1,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 单字",
+    "q": "链",
+    "ms": 0,
+    "hits": 7699,
+    "truth": 8531,
+    "recall": 0.902,
+    "precision": 1
+   },
+   {
+    "name": "zh 词典外 2 字术语",
+    "q": "反链",
+    "ms": 0,
+    "hits": 4643,
+    "truth": 4643,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 词典外 4 字术语",
+    "q": "孤儿附件",
+    "ms": 0.4,
+    "hits": 4725,
+    "truth": 4725,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "中英混合 2 词",
+    "q": "武汉 darning",
+    "ms": 0.3,
+    "hits": 463,
+    "truth": 463,
+    "recall": 1,
+    "precision": 1
+   }
+  ],
+  "updateMs": 44.3,
+  "updatePersistMs": 363.2
+ },
+ "sqlite-trigram-better": {
+  "engine": "sqlite-trigram-better",
+  "readMs": 404.6,
+  "buildMs": 5812.5,
+  "persistMs": 1170,
+  "sizeMB": 152.8,
+  "heapMB": 168,
+  "loadMs": 5.5,
+  "rssMB": 59,
+  "queries": [
+   {
+    "name": "en 高频词",
+    "q": "thomasing",
+    "ms": 7.9,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 低频词",
+    "q": "nipcheese",
+    "ms": 0.3,
+    "hits": 92,
+    "truth": 92,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 词内子串",
+    "q": "homasin",
+    "ms": 6.5,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 前缀",
+    "q": "thom",
+    "ms": 4.9,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 2 字高频词",
+    "q": "一个",
+    "ms": 0.1,
+    "hits": 9983,
+    "truth": 9983,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 2 字低频词",
+    "q": "喇嘛",
+    "ms": 21.9,
+    "hits": 107,
+    "truth": 107,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 3 字人名",
+    "q": "章宗祥",
+    "ms": 0.1,
+    "hits": 74,
+    "truth": 74,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 词内子串",
+    "q": "汉市",
+    "ms": 1.4,
+    "hits": 1161,
+    "truth": 1161,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 跨词子串",
+    "q": "法权章",
+    "ms": 0,
+    "hits": 1,
+    "truth": 1,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 单字",
+    "q": "链",
+    "ms": 0.1,
+    "hits": 8531,
+    "truth": 8531,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 词典外 2 字术语",
+    "q": "反链",
+    "ms": 0.3,
+    "hits": 4643,
+    "truth": 4643,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 词典外 4 字术语",
+    "q": "孤儿附件",
+    "ms": 3.1,
+    "hits": 4725,
+    "truth": 4725,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "中英混合 2 词",
+    "q": "武汉 darning",
+    "ms": 0.8,
+    "hits": 463,
+    "truth": 463,
+    "recall": 1,
+    "precision": 1
+   }
+  ],
+  "updateMs": 12.9
+ },
+ "sqlite-trigram-node": {
+  "engine": "sqlite-trigram-node",
+  "readMs": 406.6,
+  "buildMs": 6370.6,
+  "persistMs": 1134.8,
+  "sizeMB": 152.8,
+  "heapMB": 150,
+  "loadMs": 0.9,
+  "rssMB": 58,
+  "queries": [
+   {
+    "name": "en 高频词",
+    "q": "thomasing",
+    "ms": 8.2,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 低频词",
+    "q": "nipcheese",
+    "ms": 0.3,
+    "hits": 92,
+    "truth": 92,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 词内子串",
+    "q": "homasin",
+    "ms": 6.7,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 前缀",
+    "q": "thom",
+    "ms": 5,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 2 字高频词",
+    "q": "一个",
+    "ms": 0.1,
+    "hits": 9983,
+    "truth": 9983,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 2 字低频词",
+    "q": "喇嘛",
+    "ms": 20.4,
+    "hits": 107,
+    "truth": 107,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 3 字人名",
+    "q": "章宗祥",
+    "ms": 0.1,
+    "hits": 74,
+    "truth": 74,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 词内子串",
+    "q": "汉市",
+    "ms": 1.5,
+    "hits": 1161,
+    "truth": 1161,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 跨词子串",
+    "q": "法权章",
+    "ms": 0,
+    "hits": 1,
+    "truth": 1,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 单字",
+    "q": "链",
+    "ms": 0.1,
+    "hits": 8531,
+    "truth": 8531,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 词典外 2 字术语",
+    "q": "反链",
+    "ms": 0.4,
+    "hits": 4643,
+    "truth": 4643,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 词典外 4 字术语",
+    "q": "孤儿附件",
+    "ms": 3.3,
+    "hits": 4725,
+    "truth": 4725,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "中英混合 2 词",
+    "q": "武汉 darning",
+    "ms": 0.9,
+    "hits": 463,
+    "truth": 463,
+    "recall": 1,
+    "precision": 1
+   }
+  ],
+  "updateMs": 12.4
+ },
+ "sqlite-trigram-detail-none": {
+  "engine": "sqlite-trigram-detail-none",
+  "readMs": 414.1,
+  "buildMs": 4932,
+  "persistMs": 551.4,
+  "sizeMB": 74.4,
+  "heapMB": 167,
+  "loadMs": 4.8,
+  "rssMB": 60,
+  "queries": [
+   {
+    "name": "en 高频词",
+    "q": "thomasing",
+    "ms": 0.2,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 低频词",
+    "q": "nipcheese",
+    "ms": 0.2,
+    "hits": 92,
+    "truth": 92,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 词内子串",
+    "q": "homasin",
+    "ms": 0.1,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 前缀",
+    "q": "thom",
+    "ms": 0.1,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 2 字高频词",
+    "q": "一个",
+    "ms": 0.1,
+    "hits": 9983,
+    "truth": 9983,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 2 字低频词",
+    "q": "喇嘛",
+    "ms": 21.6,
+    "hits": 107,
+    "truth": 107,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 3 字人名",
+    "q": "章宗祥",
+    "ms": 0.2,
+    "hits": 74,
+    "truth": 74,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 词内子串",
+    "q": "汉市",
+    "ms": 1.6,
+    "hits": 1161,
+    "truth": 1161,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 跨词子串",
+    "q": "法权章",
+    "ms": 0,
+    "hits": 1,
+    "truth": 1,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 单字",
+    "q": "链",
+    "ms": 0.1,
+    "hits": 8531,
+    "truth": 8531,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 词典外 2 字术语",
+    "q": "反链",
+    "ms": 0.3,
+    "hits": 4643,
+    "truth": 4643,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 词典外 4 字术语",
+    "q": "孤儿附件",
+    "ms": 0.2,
+    "hits": 4725,
+    "truth": 4725,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "中英混合 2 词",
+    "q": "武汉 darning",
+    "ms": 0.7,
+    "hits": 463,
+    "truth": 463,
+    "recall": 1,
+    "precision": 1
+   }
+  ],
+  "updateMs": 13.7
+ },
+ "tantivy-bigram": {
+  "engine": "tantivy-bigram",
+  "readMs": 399.5,
+  "buildMs": 2804,
+  "persistMs": 730.2,
+  "sizeMB": 28.5,
+  "heapMB": 453,
+  "loadMs": 1.6,
+  "rssMB": 60,
+  "queries": [
+   {
+    "name": "en 高频词",
+    "q": "thomasing",
+    "ms": 0.4,
+    "hits": 6854,
+    "truth": 6854,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 低频词",
+    "q": "nipcheese",
+    "ms": 0.2,
+    "hits": 92,
+    "truth": 92,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "en 词内子串",
+    "q": "homasin",
+    "ms": 0,
+    "hits": 0,
+    "truth": 6854,
+    "recall": 0,
+    "precision": 1
+   },
+   {
+    "name": "en 前缀",
+    "q": "thom",
+    "ms": 0,
+    "hits": 0,
+    "truth": 6854,
+    "recall": 0,
+    "precision": 1
+   },
+   {
+    "name": "zh 2 字高频词",
+    "q": "一个",
+    "ms": 0.5,
+    "hits": 9983,
+    "truth": 9983,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 2 字低频词",
+    "q": "喇嘛",
+    "ms": 0.2,
+    "hits": 107,
+    "truth": 107,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 3 字人名",
+    "q": "章宗祥",
+    "ms": 0.2,
+    "hits": 74,
+    "truth": 74,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 词内子串",
+    "q": "汉市",
+    "ms": 0.2,
+    "hits": 1161,
+    "truth": 1161,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 跨词子串",
+    "q": "法权章",
+    "ms": 0,
+    "hits": 1,
+    "truth": 1,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 单字",
+    "q": "链",
+    "ms": 0,
+    "hits": 0,
+    "truth": 8531,
+    "recall": 0,
+    "precision": 1
+   },
+   {
+    "name": "zh 词典外 2 字术语",
+    "q": "反链",
+    "ms": 0.3,
+    "hits": 4643,
+    "truth": 4643,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "zh 词典外 4 字术语",
+    "q": "孤儿附件",
+    "ms": 1.7,
+    "hits": 4725,
+    "truth": 4725,
+    "recall": 1,
+    "precision": 1
+   },
+   {
+    "name": "中英混合 2 词",
+    "q": "武汉 darning",
+    "ms": 0.3,
+    "hits": 463,
+    "truth": 463,
+    "recall": 1,
+    "precision": 1
+   }
+  ],
+  "updateMs": 109.4
+ }
+}
