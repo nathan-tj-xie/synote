@@ -50,7 +50,7 @@ export const handlers: Record<CommandId, Handler> = {
       for (const tab of ed().tabs) if (tab === path || tab.startsWith(`${path}/`)) forget(tab)
     },
   },
-  rebuildIndex: { when: vault, run: () => window.synote.rebuildIndex().catch(fail) },
+  rebuildIndex: { when: vault, run: () => window.synote.rebuildIndex(root()).catch(fail) },
 }
 
 export const ids = Object.keys(commands) as CommandId[]

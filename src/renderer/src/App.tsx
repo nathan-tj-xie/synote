@@ -20,9 +20,10 @@ export function App() {
 
   useEffect(
     () =>
-      window.synote.onVaultChanged(({ entries, changed }) => {
+      window.synote.onVaultChanged(({ root, entries, changed }) => {
         const v = useVault.getState().vault
-        if (v) useVault.getState().setVault({ ...v, entries })
+        if (v?.root !== root) return // 别的库（切库前）迟到的事件
+        useVault.getState().setVault({ ...v, entries })
         changed.forEach(reloadIfClean)
       }),
     [],

@@ -37,8 +37,11 @@ export type GitState =
 export type ItemMenuAction = Extract<CommandId, 'newNote' | 'trash'> | null
 
 export interface SynoteApi {
-  openVaultDialog(): Promise<VaultInfo | null>
-  openVault(root: string): Promise<VaultInfo>
+  // 选择文件夹，取消时为 null
+  pickVault(): Promise<string | null>
+  // 切库交接的两步（渲染进程的 openVault 串行驱动）：prepare 只读新库，commit 一次性切换
+  prepareVault(root: string): Promise<VaultInfo>
+  commitVault(root: string): Promise<void>
   recentVaults(): Promise<string[]>
   // 以下读写都带上发起方所在的笔记库（VaultInfo.root），和主进程当前的库不一致时拒绝
   writeConfig(vault: string, config: VaultConfig): Promise<void>
@@ -48,23 +51,24 @@ export interface SynoteApi {
   trash(vault: string, path: string): Promise<void>
   showItemMenu(path: string, dir: boolean): Promise<ItemMenuAction>
   reportReady(): void
+  // 以下推送事件都带上来源笔记库的 root，渲染进程只接受当前库的
   // 外部改动：刷新后的条目与变化的路径
-  onVaultChanged(cb: (e: { entries: Entry[]; changed: string[] }) => void): () => void
-  // 索引（S6）
-  backlinks(path: string): Promise<string[]>
-  search(query: string): Promise<SearchHit[]>
-  attachmentRefs(path: string): Promise<number>
-  orphans(): Promise<string[]>
-  rebuildIndex(): Promise<void>
+  onVaultChanged(cb: (e: { root: string; entries: Entry[]; changed: string[] }) => void): () => void
+  // 索引（S6），查询同样带上笔记库
+  backlinks(vault: string, path: string): Promise<string[]>
+  search(vault: string, query: string): Promise<SearchHit[]>
+  attachmentRefs(vault: string, path: string): Promise<number>
+  orphans(vault: string): Promise<string[]>
+  rebuildIndex(vault: string): Promise<void>
   // 索引更新后推送变化的路径；反链、引用计数、孤儿列表据此重新查询
-  onIndexChanged(cb: (paths: string[]) => void): () => void
+  onIndexChanged(cb: (e: { root: string; paths: string[] }) => void): () => void
   // git（S12）
   gitState(): Promise<GitState>
   redetectGit(): Promise<GitState>
   // 弹出文件选择框指定 git 可执行文件，取消时为 null
   chooseGit(): Promise<GitState | null>
   // 工作区或 .git 有变化后推送最新状态
-  onGitChanged(cb: (s: GitState) => void): () => void
+  onGitChanged(cb: (e: { root: string | null; state: GitState }) => void): () => void
 }
 
 declare global {

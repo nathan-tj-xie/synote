@@ -18,6 +18,8 @@ let current: string | null = null // 要显示的文件
 let shown: string | null = null // 视图里实际是哪个文件；读文件期间仍是上一个
 // 每次显示、关闭当前文件、换库都加一；读文件回来时代次变了，说明这次显示已作废，结果丢弃
 let seq = 0
+// 库代次：换库时加一。保存回执只在发起保存的库代次仍是当前时才清 dirty，不按路径误清新库的同名文件
+let vaultGen = 0
 // 搜索结果点击后要定位的位置，文件加载完再应用
 let target: { path: string; line: number; col: number; len: number } | null = null
 
@@ -65,15 +67,24 @@ async function flush(path: string) {
   const text = docOf(path)
   if (text === undefined || !vault) return
   const v = vault // 按发起时所在的库写；之后换了库，主进程会拒绝并报错
+  const g = vaultGen
   const write = (writes.get(path) ?? Promise.resolve()).then(() => window.synote.writeFile(v, path, text))
   writes.set(path, write.catch(() => {}))
   try {
     await write
+    if (g !== vaultGen) return // 已换库：回执不属于当前库
     const now = docOf(path)
     if (now === undefined || now === text) useEditor.getState().setDirty(path, false) // undefined：标签页已关
   } catch (e) {
     useUi.getState().setError(String(e))
   }
+}
+
+// 切库前调用：防抖中的输入立即写，再等所有在途写入落盘；还有没写进去的改动（写失败）就返回 false
+export async function flushAll(): Promise<boolean> {
+  await Promise.all([...timers.keys()].map(flush))
+  await Promise.all(writes.values())
+  return Object.keys(useEditor.getState().dirty).length === 0
 }
 
 // 唯一换视图的入口，维护缓存不变式
@@ -182,9 +193,11 @@ export async function reloadIfClean(path: string) {
   useEditor.getState().setDirty(path, false)
 }
 
-// 换笔记库：旧库没写完的改动按旧库发出（主进程已切库时拒绝并提示），然后清空整个编辑器状态；标签由 store 清
+// 换笔记库（vaults.ts 已先 flushAll）：交接期间又有输入的话按旧库发出（主进程已切库时拒绝并提示），
+// 然后清空整个编辑器状态；标签由 store 清
 function switchVault(root: string | null) {
   for (const p of [...timers.keys()]) flush(p)
+  vaultGen++
   states.clear()
   target = null
   current = null

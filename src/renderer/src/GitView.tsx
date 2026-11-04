@@ -14,7 +14,7 @@ export function GitView() {
 
   // 打开笔记库时查一次，之后靠主进程推送
   useEffect(() => void (root && load(window.synote.gitState())), [root])
-  useEffect(() => window.synote.onGitChanged((v) => useGit.setState({ state: v })), [])
+  useEffect(() => window.synote.onGitChanged((e) => e.root === useVault.getState().vault?.root && useGit.setState({ state: e.state })), [])
 
   if (!state) return null
   return (

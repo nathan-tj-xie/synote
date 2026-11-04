@@ -11,8 +11,9 @@ const subscribe =
   }
 
 const api: SynoteApi = {
-  openVaultDialog: () => ipcRenderer.invoke('vault:openDialog'),
-  openVault: (root) => ipcRenderer.invoke('vault:open', root),
+  pickVault: () => ipcRenderer.invoke('vault:pick'),
+  prepareVault: (root) => ipcRenderer.invoke('vault:prepare', root),
+  commitVault: (root) => ipcRenderer.invoke('vault:commit', root),
   recentVaults: () => ipcRenderer.invoke('vault:recent'),
   writeConfig: (v, c) => ipcRenderer.invoke('vault:writeConfig', v, c),
   readFile: (v, p) => ipcRenderer.invoke('file:read', v, p),
@@ -22,11 +23,11 @@ const api: SynoteApi = {
   showItemMenu: (p, dir) => ipcRenderer.invoke('menu:item', p, dir),
   reportReady: () => ipcRenderer.send('app:ready'),
   onVaultChanged: subscribe('vault:changed'),
-  backlinks: (p) => ipcRenderer.invoke('index:call', 'backlinks', p),
-  search: (q) => ipcRenderer.invoke('index:call', 'search', q),
-  attachmentRefs: (p) => ipcRenderer.invoke('index:call', 'attachmentRefs', p),
-  orphans: () => ipcRenderer.invoke('index:call', 'orphans'),
-  rebuildIndex: () => ipcRenderer.invoke('index:call', 'rebuild'),
+  backlinks: (v, p) => ipcRenderer.invoke('index:call', v, 'backlinks', p),
+  search: (v, q) => ipcRenderer.invoke('index:call', v, 'search', q),
+  attachmentRefs: (v, p) => ipcRenderer.invoke('index:call', v, 'attachmentRefs', p),
+  orphans: (v) => ipcRenderer.invoke('index:call', v, 'orphans'),
+  rebuildIndex: (v) => ipcRenderer.invoke('index:call', v, 'rebuild'),
   onIndexChanged: subscribe('index:changed'),
   gitState: () => ipcRenderer.invoke('git:state'),
   redetectGit: () => ipcRenderer.invoke('git:redetect'),

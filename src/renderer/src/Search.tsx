@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next'
 import type { SearchHit, SearchMatch } from '../../shared/api'
 import { reveal } from './editor'
 import s from './Search.module.css'
-import { useEditor, useUi } from './store'
+import { useEditor, useUi, useVault } from './store'
 import { baseName } from './tree'
 
 const ROW = 22
@@ -19,20 +19,22 @@ export function Search() {
   const [stamp, setStamp] = useState(0)
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  // 索引变化后重新查一次，结果不会停在旧内容上
-  useEffect(() => window.synote.onIndexChanged(() => setStamp((n) => n + 1)), [])
+  const root = useVault((st) => st.vault!.root)
+
+  // 当前库的索引变化后重新查一次，结果不会停在旧内容上
+  useEffect(() => window.synote.onIndexChanged((e) => e.root === useVault.getState().vault?.root && setStamp((n) => n + 1)), [])
   useEffect(() => {
     const q = query.trim()
     if (!q) return setRes({ q, hits: [] })
     let stale = false // 只保留最后一次输入的结果
     window.synote
-      .search(q)
+      .search(root, q)
       .then((hits) => !stale && setRes({ q, hits }))
       .catch((e) => !stale && useUi.getState().setError(String(e)))
     return () => {
       stale = true
     }
-  }, [query, stamp])
+  }, [query, stamp, root])
 
   const rows = useMemo(
     () => res.hits.flatMap((h): Row[] => [{ path: h.path, count: h.matches.length }, ...h.matches.map((match) => ({ path: h.path, match, count: 0 }))]),

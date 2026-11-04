@@ -13,6 +13,7 @@ export const zhCN = {
     close: '关闭',
     emptyEditor: '从左侧选择一篇笔记',
     vaultMissing: '笔记库不存在：{{path}}',
+    switchAborted: '有未保存的改动没能写入，没有切换笔记库',
     vaultSwitched: '笔记库已切换（{{vault}} 已不是当前笔记库），这次读写没有执行',
     saveFailed: '保存失败：{{message}}',
     quickOpen: '快速切换',
