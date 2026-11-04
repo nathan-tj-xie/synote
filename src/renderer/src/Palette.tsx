@@ -49,11 +49,12 @@ function Body({ mode, getIndex, close }: { mode: 'files' | 'commands'; getIndex:
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // 订阅可用条件读到的状态：面板打开期间关掉活动文件等，命令列表跟着变
-  const hasVault = useVault((st) => st.vault !== null) // 只订阅布尔值：文件列表变化不重算命令
-  const active = useEditor((st) => st.active)
+  // 只订阅布尔值：文件列表变化、在文件之间切换都不重算命令
+  const hasVault = useVault((st) => st.vault !== null)
+  const hasActive = useEditor((st) => st.active !== null)
   const cmds = useMemo(
     () => ids.filter((id) => id !== 'commandPalette' && available(id)).map((id) => ({ id, title: t(commands[id].title) })),
-    [t, hasVault, active],
+    [t, hasVault, hasActive],
   )
   const hits: Hit[] = useMemo(() => {
     if (mode === 'files') return searchPaths(query, getIndex())
