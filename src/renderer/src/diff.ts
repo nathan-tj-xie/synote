@@ -6,6 +6,7 @@ import 'monaco-editor/editor/browser/coreCommands.js'
 import 'monaco-editor/editor/browser/widget/diffEditor/diffEditor.contribution.js'
 import 'monaco-editor/editor/contrib/bracketMatching/browser/bracketMatching.js'
 import 'monaco-editor/editor/contrib/caretOperations/browser/caretOperations.js'
+import 'monaco-editor/editor/contrib/caretOperations/browser/transpose.js'
 import 'monaco-editor/editor/contrib/clipboard/browser/clipboard.js'
 import 'monaco-editor/editor/contrib/comment/browser/comment.js'
 import 'monaco-editor/editor/contrib/contextmenu/browser/contextmenu.js'
@@ -13,15 +14,22 @@ import 'monaco-editor/editor/contrib/cursorUndo/browser/cursorUndo.js'
 import 'monaco-editor/editor/contrib/find/browser/findController.js'
 import 'monaco-editor/editor/contrib/hover/browser/hoverContribution.js'
 import 'monaco-editor/editor/contrib/indentation/browser/indentation.js'
+import 'monaco-editor/editor/contrib/lineSelection/browser/lineSelection.js'
 import 'monaco-editor/editor/contrib/linesOperations/browser/linesOperations.js'
 import 'monaco-editor/editor/contrib/multicursor/browser/multicursor.js'
 import 'monaco-editor/editor/contrib/smartSelect/browser/smartSelect.js'
 import 'monaco-editor/editor/contrib/wordOperations/browser/wordOperations.js'
 import 'monaco-editor/editor/contrib/wordPartOperations/browser/wordPartOperations.js'
 import 'monaco-editor/editor/common/standaloneStrings.js'
+import 'monaco-editor/editor/standalone/browser/quickAccess/standaloneGotoLineQuickAccess.js'
+import { StandaloneServices } from 'monaco-editor/editor/standalone/browser/standaloneServices.js'
+import { CommandsRegistry } from 'monaco-editor/platform/commands/common/commands.js'
+import { IKeybindingService } from 'monaco-editor/platform/keybinding/common/keybinding.js'
 import 'monaco-editor/languages/definitions/markdown/register.js'
 import EditorWorker from 'monaco-editor/editor/editor.worker.js?worker'
 import { i18next } from '../../shared/i18n'
+import { fromMonacoLabel, monacoKeyName, parity } from './keymap'
+import { isMac } from './match'
 import { monacoColors } from './tokens'
 import { bomOffset, imageAt, imageMime, minimalEdit } from './diffUtil'
 
@@ -29,17 +37,38 @@ import { bomOffset, imageAt, imageMime, minimalEdit } from './diffUtil'
 self.MonacoEnvironment = { getWorker: () => new EditorWorker() }
 monaco.editor.defineTheme('synote', { base: 'vs-dark', inherit: true, rules: [], colors: monacoColors() })
 
-// CM6 的 VSCode 键位表在 mac 上比 Monaco 多几条（⌘Home / ⌘End 到文首文末、⌘Y 重做），补齐让两边一致
-const { KeyMod: M, KeyCode: K } = monaco
+// 键位与 CM6 对齐（keymap.ts 的对照表）：Monaco 默认没有的那几条显式注册
+const toKeybinding = (key: string) =>
+  key
+    .split(' ')
+    .map((chord) => {
+      const parts = chord.split('-')
+      const code = monaco.KeyCode[monacoKeyName(parts.pop()!) as keyof typeof monaco.KeyCode]
+      const mod = (m: string) =>
+        m === 'Shift' ? M.Shift : m === 'Alt' ? M.Alt : (m === 'Cmd') === isMac ? M.CtrlCmd : M.WinCtrl
+      return parts.reduce((k, m) => k | mod(m), code)
+    })
+    .reduce((a, b) => M.chord(a, b))
+const { KeyMod: M } = monaco
+const table = parity(isMac)
 monaco.editor.addKeybindingRules(
-  [
-    [M.CtrlCmd | K.Home, 'cursorTop'],
-    [M.CtrlCmd | M.Shift | K.Home, 'cursorTopSelect'],
-    [M.CtrlCmd | K.End, 'cursorBottom'],
-    [M.CtrlCmd | M.Shift | K.End, 'cursorBottomSelect'],
-    [M.CtrlCmd | K.KeyY, 'redo'],
-  ].map(([keybinding, command]) => ({ keybinding: keybinding as number, command: command as string })),
+  [...table].flatMap(([key, r]) => ('register' in r ? [{ keybinding: toKeybinding(key), command: r.cmd }] : [])),
 )
+
+// 自检：对照表里每条命令都要存在，且这个键在 Monaco 实际生效的键位里绑到它（防止漏加载 contribution、Monaco 升级改了默认键位）
+function checkKeymap() {
+  const kb = StandaloneServices.get<{ getKeybindings(): { command: string | null; resolvedKeybinding?: { getUserSettingsLabel(): string | null } }[] }>(IKeybindingService)
+  const bound = new Set<string>()
+  for (const it of kb.getKeybindings()) {
+    const label = it.resolvedKeybinding?.getUserSettingsLabel()
+    if (it.command && label) bound.add(`${fromMonacoLabel(label, isMac)}\0${it.command}`)
+  }
+  for (const [key, r] of table) {
+    if (!('cmd' in r)) continue
+    if (!CommandsRegistry.getCommand(r.cmd)) console.error('[diff] monaco command missing', key, r.cmd)
+    else if (!bound.has(`${key}\0${r.cmd}`)) console.error('[diff] keybinding differs from CM6', key, r.cmd)
+  }
+}
 
 export type Change = { from: number; to: number; insert: string }
 
@@ -92,6 +121,7 @@ export function create(parent: HTMLElement, onEdit: (changes: Change[]) => void,
     lineHeight: 1.7,
     renderOverviewRuler: true,
   })
+  checkKeymap()
   editor.getModifiedEditor().onDidChangeModelContent((e) => {
     if (applying || !cur) return
     const doc = docNow()

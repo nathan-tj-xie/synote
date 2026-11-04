@@ -794,6 +794,26 @@ test('workspace diff with double BOM and external BOM changes', async () => {
   await app.close()
 })
 
+// 快捷键与 CM6 一致：进 diff 时按 keymap.ts 的对照表自检（vscodeKeymap 的每个键在 Monaco 里都绑到对应命令、命令存在），
+// 不一致会打 [diff] 日志。CI 双平台跑，mac / Windows 两半对照表都实测
+test('workspace diff keybindings match CM6', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '第一行\n第二行\n' })
+  execFileSync('git', ['init', '-q'], { cwd: vault })
+  const diffLogs: string[] = []
+  win.on('console', (m) => m.text().startsWith('[diff]') && diffLogs.push(m.text()))
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('第二行')
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  const modified = win.locator('.monaco-diff-editor .editor.modified .view-lines')
+  await expect(modified).toContainText('第二行', { timeout: 10_000 })
+  // 抽一条要显式注册的键实际按一下：⌘End（mac 上 Monaco 默认不绑）到文末再输入
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('尾')
+  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('第一行\n第二行\n尾')
+  expect(diffLogs).toEqual([])
+  await app.close()
+})
+
 test('workspace diff outside a git repo reports and stays in prose', async () => {
   const { app, win } = await launch({ 'a.md': 'x' })
   await win.getByRole('treeitem', { name: 'a.md' }).click()
