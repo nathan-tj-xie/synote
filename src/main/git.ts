@@ -128,10 +128,11 @@ export class GitError extends Error {
 export class Git {
   private readonly env: NodeJS.ProcessEnv
   private cat: CatFile | null = null
+  private closed = false
 
   constructor(
     readonly bin: string,
-    PATH: string,
+    readonly PATH: string,
     readonly cwd: string,
     // 改动工作区的 git 操作之后调用，通知索引做 stat 对账
     private readonly onWorktreeChanged: () => void = () => {},
@@ -195,11 +196,14 @@ export class Git {
       if (!oid) return null
       spec = oid
     }
+    // close() 之后（比如 rev-parse 期间重新检测了）不再拉起新进程，否则会泄漏
+    if (this.closed) throw new GitError('unknown', -1, 'git closed')
     if (!this.cat || this.cat.dead) this.cat = new CatFile(this.bin, this.cwd, this.env)
     return this.cat.read(spec)
   }
 
   close() {
+    this.closed = true
     this.cat?.close()
     this.cat = null
   }
@@ -210,6 +214,7 @@ class CatFile {
   private proc: ChildProcessWithoutNullStreams
   private buf = Buffer.alloc(0)
   private queue: { resolve: (b: Buffer | null) => void; reject: (e: Error) => void }[] = []
+  private stderr = ''
   dead = false
 
   constructor(bin: string, cwd: string, env: NodeJS.ProcessEnv) {
@@ -219,20 +224,28 @@ class CatFile {
       this.buf = Buffer.concat([this.buf, d])
       this.drain()
     })
-    let stderr = ''
-    this.proc.stderr.on('data', (d) => (stderr += d))
-    const fail = () => {
-      this.dead = true
-      for (const q of this.queue.splice(0)) q.reject(new GitError(classifyGitError(stderr), -1, stderr || 'cat-file exited'))
-    }
-    this.proc.on('exit', fail)
+    this.proc.stderr.on('data', (d) => (this.stderr += d))
+    const fail = (e?: Error) => this.fail(e)
+    // 用 close 而不是 exit：exit 时 stdout 可能还没读完，会误伤已经返回的响应
+    this.proc.on('close', () => fail())
     this.proc.on('error', fail)
+    // 子进程退出后再写 stdin 会 EPIPE，流上的 error 没有监听会让主进程崩溃
+    for (const s of [this.proc.stdin, this.proc.stdout, this.proc.stderr]) s.on('error', fail)
+  }
+
+  // 统一拒绝所有待处理请求，之后 readBlob 会重新拉起进程
+  private fail(e?: Error | null) {
+    this.dead = true
+    const msg = this.stderr || e?.message || 'cat-file exited'
+    for (const q of this.queue.splice(0)) q.reject(new GitError(classifyGitError(this.stderr), -1, msg))
   }
 
   read(spec: string): Promise<Buffer | null> {
     return new Promise((resolve, reject) => {
+      if (this.dead) return reject(new GitError('unknown', -1, 'cat-file exited'))
       this.queue.push({ resolve, reject })
-      this.proc.stdin.write(`${spec}\n`)
+      // 流已销毁时写入不触发 error 事件，只在回调里报 ERR_STREAM_DESTROYED
+      this.proc.stdin.write(`${spec}\n`, (e) => e && this.fail(e))
     })
   }
 

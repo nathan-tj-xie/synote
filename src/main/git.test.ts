@@ -1,9 +1,9 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, type ChildProcess } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { classifyGitError, findGit, Git, parseStatus, parseVersion, versionOk, type Exec } from './git'
+import { classifyGitError, findGit, Git, GitError, parseStatus, parseVersion, versionOk, type Exec } from './git'
 
 describe('parseStatus', () => {
   it('解析普通改动、重命名、未跟踪、冲突、忽略，路径含空格和中文', () => {
@@ -190,6 +190,32 @@ describe('Git（系统 git）', () => {
     expect(b?.toString()).toBe('b\n')
     expect(c).toBeNull()
     git.close()
+  })
+
+  it('cat-file 进程退出后再读：返回 GitError，不崩溃，下次读自动重启', async () => {
+    const { repo, env, sh } = setup()
+    sh('init', '-q')
+    writeFileSync(path.join(repo, 'a.md'), 'a\n')
+    sh('add', '.')
+    sh('commit', '-qm', '1')
+
+    const git = new Git('git', process.env.PATH!, repo, undefined, env)
+    expect((await git.readBlob('HEAD:a.md'))?.toString()).toBe('a\n')
+    // 杀掉常驻进程并等它彻底退出，再假装还活着去写已销毁的 stdin
+    const cat = (git as unknown as { cat: { proc: ChildProcess; dead: boolean } }).cat
+    cat.proc.kill('SIGKILL')
+    await new Promise((r) => cat.proc.once('close', r))
+    cat.dead = false
+    await expect(git.readBlob('HEAD:a.md')).rejects.toBeInstanceOf(GitError)
+    expect((await git.readBlob('HEAD:a.md'))?.toString()).toBe('a\n')
+    git.close()
+    await expect(git.readBlob('HEAD:a.md')).rejects.toBeInstanceOf(GitError)
+  })
+
+  it('git 可执行文件不存在时 readBlob 返回 GitError', async () => {
+    const { repo, env } = setup()
+    const git = new Git(path.join(repo, 'no-such-git'), process.env.PATH!, repo, undefined, env)
+    await expect(git.readBlob('HEAD:a.md')).rejects.toBeInstanceOf(GitError)
   })
 
   it('合并冲突经 Git.run() 分类为 conflict，保留 stdout', async () => {

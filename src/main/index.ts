@@ -118,32 +118,46 @@ function detectGit() {
       PATH: process.env.PATH ?? '',
       shell: process.env.SHELL,
       exec,
-      isFile: (p) => statSync(p, { throwIfNoEntry: false })?.isFile() ?? false,
+      // PATH 里有一项是普通文件时 statSync 会抛 ENOTDIR，不能让整个检测 reject
+      isFile: (p) => {
+        try {
+          return statSync(p).isFile()
+        } catch {
+          return false
+        }
+      },
     }),
   )
 }
 
+// 过期（期间重新检测或切换了笔记库）的结果和异常都丢弃，按最新的检测结果和笔记库重查
 async function gitState(): Promise<GitState> {
   if (!found) detectGit()
   const gen = gitGen
-  const s = await queryGit(found!)
-  // 过期的结果不返回，按最新的检测结果和笔记库重查
-  return gen === gitGen ? s : gitState()
-}
-
-// 只用本次捕获的 found / 实例，期间全局的 git 被替换或置空也不受影响
-async function queryGit(found: Promise<Found>): Promise<GitState> {
-  const f = await found
+  const f = await found!
+  if (gen !== gitGen) return gitState()
   if (f.status !== 'ok') return f
   if (!root) throw new Error('no vault open')
-  if (git?.cwd !== root) {
+  // 代次已校验，这里到创建实例之间没有 await；检测结果或笔记库不同就换实例
+  if (git?.cwd !== root || git.bin !== f.bin || git.PATH !== f.PATH) {
     git?.close()
     git = new Git(f.bin, f.PATH, root, () => void callIndex('reconcile').catch(() => {}))
   }
-  const g = git
-  if (!(await g.isRepo())) return { status: 'notRepo', version: f.version }
+  let s: GitState
+  try {
+    s = await queryGit(git, f.version)
+  } catch (e) {
+    if (gen === gitGen) throw e
+    return gitState()
+  }
+  return gen === gitGen ? s : gitState()
+}
+
+// 只用传入的实例，期间全局的 git 被替换或置空也不受影响
+async function queryGit(g: Git, version: string): Promise<GitState> {
+  if (!(await g.isRepo())) return { status: 'notRepo', version }
   const [id, changes, lfs] = await Promise.all([g.identity(), g.status(), g.lfsInstalled()])
-  return { status: 'ready', version: f.version, ...id, changes: changes.length, lfs }
+  return { status: 'ready', version, ...id, changes: changes.length, lfs }
 }
 
 // 状态由主进程推送（ADR 0005）：文件改动后防抖重查，渲染进程的 git store 据此更新
