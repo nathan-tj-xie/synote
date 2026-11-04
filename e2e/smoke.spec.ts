@@ -570,40 +570,51 @@ test('files added to the new vault before its watcher starts still show up', asy
   await app.close()
 })
 
-// 切到 B 并编辑 B 的 x.md 之后，才收到 A 的 x.md 的保存回执（同样的正文）：回执不能清掉 B 的未保存标记。
-// 主进程写盘换成按库延迟的版本：A 的写 1 s 后回，B 的写 10 s 内不回
+// A 的保存回执和 B 的编辑：A 的写入确实已发出、回执被扣住时，切库一直等着（不会先显示 B）；
+// 放行回执后才切到 B，再编辑 B 的同名 x.md（同样的正文），B 的未保存标记不受 A 的回执影响。
+// 交接协议保证 A 的回执总在切库之前到达，“编辑 B 之后才收到 A 的回执”已经造不出来；vaultGen 检查作为兜底保留
 test('a save receipt from the old vault does not clear dirty in the new one', async () => {
   test.skip(process.platform === 'win32', 'mkfifo')
   const base = mkdtempSync(path.join(tmpdir(), 'synote-e2e-'))
   const a = blockedVault(base, 'a', { 'x.md': 'S' })
-  const b = blockedVault(base, 'b', { 'x.md': 'S' })
+  const b = blockedVault(base, 'b', { 'x.md': 'S', 'B 独有.md': '' })
   const { app, win } = await launchWelcome([a.dir, b.dir])
   await a.release()
   const editor = win.locator('.cm-content')
   await win.getByRole('treeitem', { name: 'x.md' }).click()
   await expect(editor).toHaveText('S')
+  // A 的写扣住，直到测试放行；B 的写 10 s 内不回
   await app.evaluate(({ ipcMain }, slowA) => {
     const fs = process.getBuiltinModule('node:fs/promises')
+    const g = globalThis as { aWrites?: number; releaseA?: () => void }
+    const gate = new Promise<void>((r) => (g.releaseA = r))
+    g.aWrites = 0
     ipcMain.removeHandler('file:write')
     ipcMain.handle('file:write', async (_e, vault: string, rel: string, content: string) => {
-      await new Promise((r) => setTimeout(r, vault === slowA ? 1000 : 10_000))
+      if (vault === slowA) {
+        g.aWrites!++
+        await gate
+      } else await new Promise((r) => setTimeout(r, 10_000))
       await fs.writeFile(`${vault}/${rel}`, content)
     })
   }, a.dir)
-  const held = await holdRecentWrite(app, 800)
   await editor.click()
   await win.keyboard.press('ControlOrMeta+End')
-  await b.release()
-  await expect.poll(held).toBe(true)
-  await win.keyboard.type('改') // 交接期间的输入（只读时进不去；进得去的话，换库时按 A 发出，1 s 后回执）
-  await expect(win.getByRole('treeitem', { name: 'x.md' })).toBeVisible({ timeout: 5000 })
-  await expect(win.getByRole('tab')).toHaveCount(0)
+  await win.keyboard.type('改')
+  await b.release() // 防抖内：切库的冲刷立即发出 A 的写
+  await expect.poll(() => app.evaluate(() => (globalThis as { aWrites?: number }).aWrites)).toBe(1)
+  await win.waitForTimeout(500)
+  await expect(win.getByRole('treeitem', { name: 'B 独有.md' })).toHaveCount(0) // 回执没到，不切库
+  await app.evaluate(() => (globalThis as { releaseA?: () => void }).releaseA!())
+  await expect(win.getByRole('treeitem', { name: 'B 独有.md' })).toBeVisible({ timeout: 5000 })
+  expect(readFileSync(path.join(a.dir, 'x.md'), 'utf8')).toBe('S改')
+
   await win.getByRole('treeitem', { name: 'x.md' }).click()
   await expect(editor).toHaveText('S')
   await editor.click()
   await win.keyboard.press('ControlOrMeta+End')
   await win.keyboard.type('改')
-  await win.waitForTimeout(1500) // A 的回执（若有）已到，B 的写还没回
+  await win.waitForTimeout(1000) // 过了自动保存的 500 ms，B 的写还没回
   await expect(win.locator('[title="未保存"]')).toHaveCount(1)
   await app.close()
 })
