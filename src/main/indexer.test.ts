@@ -128,13 +128,25 @@ describe('Indexer', () => {
 
   // 验收：外部编辑器改动、删除、改名文件后索引正确更新（走真实 fs.watch）
   test('external edit, delete and rename via watcher', async () => {
-    const { root, idx, write } = setup({ 'a.md': '', 'b.md': '', 'dir/c.md': '[b](../b.md) 旧内容' })
+    const { root, idx, write, onChange } = setup({ 'a.md': '', 'b.md': '', 'dir/c.md': '[b](../b.md) 旧内容' })
     await idx.reconcile()
     idx.watch()
     const settled = async (check: () => void) => {
       await vi.waitFor(check, { timeout: 3000, interval: 50 })
       await idx.idle()
     }
+    // macOS 上 fs.watch 返回时 FSEvents 流还没真正启动（libuv 在另一个线程里异步创建，只报启动之后的事件），
+    // 紧接着的写入会丢；先反复写探针文件，直到 watcher 确实收到一次，再开始验收步骤。间隔要大于 150 ms 的防抖
+    let n = 0
+    await vi.waitFor(
+      () => {
+        if (onChange.mock.calls.some(([paths]) => paths.includes('probe.md'))) return
+        write('probe.md', String(n++))
+        throw new Error('watcher not live yet')
+      },
+      { timeout: 3000, interval: 300 },
+    )
+    await idx.idle()
 
     write('a.md', '[b](b.md) 新内容')
     await settled(() => expect(idx.backlinks('b.md')).toEqual(['a.md', 'dir/c.md']))
