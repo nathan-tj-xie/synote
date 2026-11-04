@@ -4,7 +4,8 @@ import { existsSync, promises as fs, statSync, watch, type FSWatcher } from 'nod
 import path from 'node:path'
 import { i18next, i18nOptions } from '../shared/i18n'
 import { commands } from '../shared/commands'
-import { indexMethods, type GitState, type ItemMenuAction, type VaultInfo } from '../shared/api'
+import { indexMethods, type GitState, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
+import { tokens } from '../shared/tokens'
 import { exec, findGit, Git, type GitDetectionResult } from './git'
 import { isHidden, resolveInVault, scanEntries, toPosix, uniqueNoteName } from './vault'
 
@@ -28,24 +29,59 @@ async function recentVaults(): Promise<string[]> {
   }
 }
 
-async function openVault(dir: string): Promise<VaultInfo> {
+// 切库是一次交接，由渲染进程串行驱动：prepare（只读新库，旧库照常运行）→ 渲染进程把旧库的输入全部落盘 →
+// commit（一次性切换）。任何一步失败，旧库都完好无损
+async function prepareVault(dir: string): Promise<VaultInfo> {
   if (!existsSync(dir)) throw new Error(t('vaultMissing', { path: dir }))
-  root = dir
-  gitGen++ // 进行中的 git 状态查询作废
-  const entries = await scanEntries(dir)
-  const recent = [dir, ...(await recentVaults()).filter((r) => r !== dir)].slice(0, 10)
-  await fs.writeFile(recentFile(), JSON.stringify(recent))
-  startWatching(dir)
-  startIndexer(dir)
-  return { root: dir, name: path.basename(dir), entries }
+  const [entries, config] = await Promise.all([scanEntries(dir), readConfig(dir)])
+  return { root: dir, name: path.basename(dir), entries, config }
 }
 
-function startWatching(dir: string) {
+async function commitVault(dir: string): Promise<void> {
+  if (!existsSync(dir)) throw new Error(t('vaultMissing', { path: dir }))
+  const recent = [dir, ...(await recentVaults()).filter((r) => r !== dir)].slice(0, 10)
+  await fs.writeFile(recentFile(), JSON.stringify(recent))
+  // 先建好新库的 watcher 和索引进程；建不起来（比如 B 刚被删）就抛错，旧库的服务和 root 原样保留
+  const w = watchVault(dir)
+  let proc: UtilityProcess
+  try {
+    proc = forkIndexer(dir)
+  } catch (e) {
+    w.close()
+    throw e
+  }
+  // 以下同步完成：释放旧库的服务、换上新库的、切 root
   watcher?.close()
+  watcher = w
+  useIndexer(proc, dir)
+  root = dir
+  gitGen++ // 进行中的 git 状态查询作废
+  // watcher 建好后补扫一次，补上 prepare 之后的改动。这条推送排在 commit 的回复之后，
+  // 渲染进程先用 prepare 的快照，再被它覆盖
+  scanEntries(dir).then(
+    (entries) => root === dir && win?.webContents.send('vault:changed', { root: dir, entries, changed: [] }),
+    (e) => console.error('[vault] rescan failed', e),
+  )
+}
+
+const configFile = (dir: string) => path.join(dir, '.synote', 'config.json')
+
+// .synote/config.json 入 git：打开库时只读，第一次写配置时才创建（只是打开库不弄脏仓库）；
+// 读不出来时按空配置处理，不覆盖用户的文件
+async function readConfig(dir: string): Promise<VaultConfig> {
+  try {
+    return JSON.parse(await fs.readFile(configFile(dir), 'utf8'))
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') console.error('[vault] cannot read config', e)
+    return {}
+  }
+}
+
+function watchVault(dir: string): FSWatcher {
   const changed = new Set<string>()
   let timer: NodeJS.Timeout | undefined
   // shortcut: 每批外部改动都全量重扫文件树，10k 库约百毫秒；等 S6 索引服务的 stat 对账就绪后改为增量
-  watcher = watch(dir, { recursive: true }, (_event, filename) => {
+  return watch(dir, { recursive: true }, (_event, filename) => {
     if (!filename) return
     pushGitState() // .git 里的 HEAD、index、refs 变化也算，外部 git 操作能及时反映
     const rel = toPosix(filename.toString())
@@ -56,30 +92,36 @@ function startWatching(dir: string) {
       if (root !== dir) return
       const list = [...changed]
       changed.clear()
-      win?.webContents.send('vault:changed', { entries: await scanEntries(dir), changed: list })
+      const entries = await scanEntries(dir)
+      if (root !== dir) return // 扫描期间切了库：迟到的结果不发
+      win?.webContents.send('vault:changed', { root: dir, entries, changed: list })
     }, 150)
   })
 }
 
-// 每个笔记库一个索引库，放在应用数据目录（缓存，不入库）
-function startIndexer(dir: string) {
-  indexer?.kill()
-  for (const c of calls.values()) c.reject(new Error('index restarted'))
-  calls.clear()
+function forkIndexer(dir: string): UtilityProcess {
   const proc = utilityProcess.fork(path.join(__dirname, 'index-worker.js'), [], { serviceName: 'synote-index' })
-  indexer = proc
   proc.on('message', (m: { id?: number; event?: string; paths?: string[]; result?: unknown; error?: string }) => {
-    if (m.event === 'changed') return win?.webContents.send('index:changed', m.paths)
+    if (m.event === 'changed') return win?.webContents.send('index:changed', { root: dir, paths: m.paths })
     const c = calls.get(m.id!)
     calls.delete(m.id!)
     if (m.error) c?.reject(new Error(m.error))
     else c?.resolve(m.result)
   })
   proc.on('exit', () => indexer === proc && (indexer = null))
+  return proc
+}
+
+// 每个笔记库一个索引库，放在应用数据目录（缓存，不入库）
+function useIndexer(proc: UtilityProcess, dir: string) {
+  indexer?.kill()
+  for (const c of calls.values()) c.reject(new Error('index restarted'))
+  calls.clear()
+  indexer = proc
   const dbDir = path.join(app.getPath('userData'), 'index')
   const dbFile = path.join(dbDir, `${createHash('sha1').update(dir).digest('hex')}.db`)
   fs.mkdir(dbDir, { recursive: true })
-    .then(() => callIndex('open', dbFile, dir))
+    .then(() => indexer === proc && callIndex('open', dbFile, dir)) // 等待期间已换库：不能把旧库发给新进程
     .catch((e) => console.error('[index] open failed', e))
 }
 
@@ -165,30 +207,43 @@ let gitTimer: NodeJS.Timeout | undefined
 function pushGitState() {
   clearTimeout(gitTimer)
   // 推送没有调用方可以报错，记日志；渲染进程下次 invoke 时会拿到同样的错误
-  gitTimer = setTimeout(() => gitState().then((s) => win?.webContents.send('git:changed', s), (e) => console.error('[git] push state failed', e)), 300)
+  gitTimer = setTimeout(() => gitState().then((s) => win?.webContents.send('git:changed', { root, state: s }), (e) => console.error('[git] push state failed', e)), 300)
 }
 
-function vaultPath(rel: string): string {
+// 渲染进程的读写都带上它所在的笔记库：和当前库不一致（期间切过库）就拒绝并报错，绝不落到别的库。
+// 在第一个 await 之前调用，目标路径就此定下，之后再切库也不影响
+function checkVault(vault: string): string {
   if (!root) throw new Error('no vault open')
-  return resolveInVault(root, rel)
+  if (vault !== root) throw new Error(t('vaultSwitched', { vault }))
+  return root
 }
+const vaultPath = (vault: string, rel: string) => resolveInVault(checkVault(vault), rel)
 
-ipcMain.handle('vault:openDialog', async () => {
+// 只选目录；打开走和最近列表同一条交接路径
+ipcMain.handle('vault:pick', async () => {
   const r = await dialog.showOpenDialog(win!, { properties: ['openDirectory', 'createDirectory'] })
-  return r.canceled ? null : openVault(r.filePaths[0])
+  return r.canceled ? null : r.filePaths[0]
 })
-ipcMain.handle('vault:open', (_e, dir: string) => openVault(dir))
+ipcMain.handle('vault:prepare', (_e, dir: string) => prepareVault(dir))
+ipcMain.handle('vault:commit', (_e, dir: string) => commitVault(dir))
 ipcMain.handle('vault:recent', () => recentVaults())
-ipcMain.handle('file:read', (_e, rel: string) => fs.readFile(vaultPath(rel), 'utf8'))
-ipcMain.handle('file:write', (_e, rel: string, content: string) => fs.writeFile(vaultPath(rel), content))
-ipcMain.handle('file:createNote', async (_e, dir: string) => {
-  const entries = await scanEntries(root!)
+ipcMain.handle('vault:writeConfig', async (_e, vault: string, config: VaultConfig) => {
+  const file = configFile(checkVault(vault))
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  await fs.writeFile(file, `${JSON.stringify(config, null, 2)}\n`)
+})
+ipcMain.handle('file:read', (_e, vault: string, rel: string) => fs.readFile(vaultPath(vault, rel), 'utf8'))
+ipcMain.handle('file:write', (_e, vault: string, rel: string, content: string) => fs.writeFile(vaultPath(vault, rel), content))
+ipcMain.handle('file:createNote', async (_e, vault: string, dir: string) => {
+  const r = checkVault(vault)
+  const entries = await scanEntries(r)
   const rel = uniqueNoteName(new Set(entries.map((x) => x.path)), dir, t('untitled'))
-  await fs.writeFile(vaultPath(rel), '', { flag: 'wx' }) // wx：不覆盖已有文件
+  await fs.writeFile(resolveInVault(r, rel), '', { flag: 'wx' }) // wx：不覆盖已有文件
   return rel
 })
-ipcMain.handle('index:call', (_e, method: string, ...args: unknown[]) => {
+ipcMain.handle('index:call', (_e, vault: string, method: string, ...args: unknown[]) => {
   if (!(indexMethods as readonly string[]).includes(method)) throw new Error(`unknown index method: ${method}`)
+  checkVault(vault) // 索引进程只服务当前库，查别的库就拒绝
   return callIndex(method, ...args)
 })
 ipcMain.handle('git:state', () => gitState())
@@ -200,7 +255,7 @@ ipcMain.handle('git:choose', async () => {
   detectGit()
   return gitState()
 })
-ipcMain.handle('file:trash', (_e, rel: string) => shell.trashItem(vaultPath(rel)))
+ipcMain.handle('file:trash', (_e, vault: string, rel: string) => shell.trashItem(vaultPath(vault, rel)))
 ipcMain.handle(
   'menu:item',
   (_e, _rel: string, dir: boolean) =>
@@ -222,7 +277,7 @@ function createWindow() {
   win = new BrowserWindow({
     width: 1200,
     height: 800,
-    backgroundColor: '#1e1f22',
+    backgroundColor: tokens.bg,
     title: t('appName'),
     webPreferences: { preload: path.join(__dirname, '../preload/index.js'), sandbox: true, contextIsolation: true },
   })

@@ -5,16 +5,16 @@ import fuzzysort from 'fuzzysort'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { commands, type CommandId } from '../../shared/commands'
-import { available, handlers, ids } from './commands'
+import { available, ids, run } from './commands'
 import s from './Palette.module.css'
 import { formatKey, indexPaths, searchPaths, type Hit, type PathIndex } from './match'
-import { useStore } from './store'
+import { useEditor, useUi, useVault } from './store'
 
 const ROW = 28
 
 export function Palette() {
-  const mode = useStore((st) => st.palette)
-  const entries = useStore((st) => st.vault?.entries)
+  const mode = useUi((st) => st.palette)
+  const entries = useVault((st) => st.vault?.entries)
   const index = useRef<{ entries: typeof entries; index: PathIndex } | null>(null)
   const getIndex = () => {
     if (index.current?.entries !== entries) {
@@ -29,7 +29,7 @@ export function Palette() {
     return () => cancelIdleCallback(id)
   }, [entries])
 
-  const close = () => useStore.getState().setPalette(null)
+  const close = () => useUi.getState().setPalette(null)
   return (
     <Dialog.Root open={mode !== null} onOpenChange={(o) => !o && close()}>
       <Dialog.Portal>
@@ -48,12 +48,19 @@ function Body({ mode, getIndex, close }: { mode: 'files' | 'commands'; getIndex:
   const [sel, setSel] = useState(0)
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  const cmds = useMemo(() => ids.filter((id) => id !== 'commandPalette' && available(id)).map((id) => ({ id, title: t(commands[id].title) })), [t])
+  // 订阅可用条件读到的状态：面板打开期间关掉活动文件等，命令列表跟着变
+  // 只订阅布尔值：文件列表变化、在文件之间切换都不重算命令
+  const hasVault = useVault((st) => st.vault !== null)
+  const hasActive = useEditor((st) => st.active !== null)
+  const cmds = useMemo(
+    () => ids.filter((id) => id !== 'commandPalette' && available(id)).map((id) => ({ id, title: t(commands[id].title) })),
+    [t, hasVault, hasActive],
+  )
   const hits: Hit[] = useMemo(() => {
     if (mode === 'files') return searchPaths(query, getIndex())
     if (!query.trim()) return cmds.map((c) => ({ id: c.id, text: c.title, indexes: [] }))
     return fuzzysort.go(query, cmds, { key: 'title' }).map((r) => ({ id: r.obj.id, text: r.obj.title, indexes: r.indexes }))
-  }, [mode, query, cmds])
+  }, [mode, query, cmds, mode === 'files' && getIndex]) // 命令模式不随文件列表重算
 
   const v = useVirtualizer({ count: hits.length, getScrollElement: () => scrollRef.current, estimateSize: () => ROW, overscan: 10 })
   useEffect(() => setSel(0), [hits])
@@ -62,8 +69,8 @@ function Body({ mode, getIndex, close }: { mode: 'files' | 'commands'; getIndex:
   const pick = (hit: Hit | undefined) => {
     if (!hit) return
     close()
-    if (mode === 'files') useStore.getState().open(hit.id)
-    else handlers[hit.id as CommandId].run()
+    if (mode === 'files') useEditor.getState().open(hit.id)
+    else run(hit.id as CommandId)
   }
 
   const onKey = (e: React.KeyboardEvent) => {

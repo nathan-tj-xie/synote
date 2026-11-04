@@ -21,6 +21,17 @@ describe('extractLinks', () => {
       ['note:b/c d.md', 'att:attachments/p.png', 'att:attachments/q.png', 'wiki:同名', 'note:dir/sub.md', 'wiki:x', 'note:n/r.md'].sort(),
     )
   })
+
+  test('reserved characters are percent-decoded, <img src> may contain spaces', () => {
+    const text = '[b](b%23x.md#h) [q](q%3F.md?v=1) <img src="attachments/a b.png"> <img src=\'../attachments/c%20d.png\'>'
+    const links = extractLinks('note.md', text).map((l) => `${l.kind}:${l.dst}`)
+    expect(links.sort()).toEqual(['note:b#x.md', 'note:q?.md', 'att:attachments/a b.png', 'att:attachments/c d.png'].sort())
+  })
+})
+
+test('<img src> with surrounding whitespace still counts as a reference', () => {
+  const links = extractLinks('note.md', '<img src=" attachments/a.png "> <img src="attachments/b c.png\t">').map((l) => `${l.kind}:${l.dst}`)
+  expect(links.sort()).toEqual(['att:attachments/a.png', 'att:attachments/b c.png'])
 })
 
 describe('findMatches', () => {
@@ -87,6 +98,20 @@ describe('Indexer', () => {
     expect(idx.search('全文索引').map((h) => h.path)).toEqual(['a.md'])
   })
 
+  test('in-memory fallback hits are ranked with indexed hits, not cut off', async () => {
+    const files = Object.fromEntries(Array.from({ length: 51 }, (_, i) => [`n${String(i).padStart(2, '0')}.md`, '关键词']))
+    const { idx } = setup(files)
+    await idx.reconcile()
+    await idx.idle()
+    // 模拟分批写全文的批间状态：n50 的新正文还在内存里，全文索引里是旧的（首批在 reconcile 返回前就同步写完了，没法靠时序构造）
+    idx['pending'].set('n50.md', '关键词 关键词 关键词')
+    for (const q of ['关键词', '关键']) {
+      const hits = idx.search(q)
+      expect(hits).toHaveLength(50)
+      expect(hits[0].path).toBe('n50.md')
+    }
+  })
+
   test('reopening an existing index only re-reads changed files', async () => {
     const { base, root, idx: first, onChange } = setup({ 'a.md': '[b](b.md)', 'b.md': '' })
     await first.reconcile()
@@ -106,15 +131,37 @@ describe('Indexer', () => {
     expect(idx.backlinks('b.md')).toEqual(['a.md'])
   })
 
+  // FSEvents 流启动前的改动收不到事件：watch() 之后补一次对账兜底
+  test('changes in the watcher startup window are caught by a follow-up reconcile', async () => {
+    const { idx, write } = setup({ 'a.md': '', 'b.md': '' })
+    idx.watch()
+    await idx.reconcile()
+    idx['watcher']!.close() // 模拟启动窗口里事件全丢
+    write('a.md', '[b](b.md)')
+    await vi.waitFor(() => expect(idx.backlinks('b.md')).toEqual(['a.md']), { timeout: 3000, interval: 100 })
+  })
+
   // 验收：外部编辑器改动、删除、改名文件后索引正确更新（走真实 fs.watch）
   test('external edit, delete and rename via watcher', async () => {
-    const { root, idx, write } = setup({ 'a.md': '', 'b.md': '', 'dir/c.md': '[b](../b.md) 旧内容' })
+    const { root, idx, write, onChange } = setup({ 'a.md': '', 'b.md': '', 'dir/c.md': '[b](../b.md) 旧内容' })
     await idx.reconcile()
     idx.watch()
     const settled = async (check: () => void) => {
       await vi.waitFor(check, { timeout: 3000, interval: 50 })
       await idx.idle()
     }
+    // macOS 上 fs.watch 返回时 FSEvents 流还没真正启动（libuv 在另一个线程里异步创建，只报启动之后的事件），
+    // 紧接着的写入会丢；先反复写探针文件，直到 watcher 确实收到一次，再开始验收步骤。间隔要大于 150 ms 的防抖
+    let n = 0
+    await vi.waitFor(
+      () => {
+        if (onChange.mock.calls.some(([paths]) => paths.includes('probe.md'))) return
+        write('probe.md', String(n++))
+        throw new Error('watcher not live yet')
+      },
+      { timeout: 3000, interval: 300 },
+    )
+    await idx.idle()
 
     write('a.md', '[b](b.md) 新内容')
     await settled(() => expect(idx.backlinks('b.md')).toEqual(['a.md', 'dir/c.md']))

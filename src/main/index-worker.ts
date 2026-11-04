@@ -10,6 +10,7 @@ port.on('message', async ({ data }) => {
     let result: unknown
     if (method === 'open') {
       const [dbFile, root] = args as [string, string]
+      idx?.close()
       idx = new Indexer(dbFile, root, (paths) => port.postMessage({ event: 'changed', paths }))
       idx.watch()
       await idx.reconcile()

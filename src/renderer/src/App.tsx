@@ -9,20 +9,21 @@ import { FileTree } from './FileTree'
 import { GitView } from './GitView'
 import { Palette } from './Palette'
 import { Search } from './Search'
-import { useStore } from './store'
+import { useUi, useVault } from './store'
 import { Welcome } from './Welcome'
 
 export function App() {
-  const vault = useStore((st) => st.vault)
-  const error = useStore((st) => st.error)
-  const sidebar = useStore((st) => st.sidebar)
+  const vault = useVault((st) => st.vault)
+  const error = useUi((st) => st.error)
+  const sidebar = useUi((st) => st.sidebar)
   const { t } = useTranslation()
 
   useEffect(
     () =>
-      window.synote.onVaultChanged(({ entries, changed }) => {
-        const v = useStore.getState().vault
-        if (v) useStore.getState().setVault({ ...v, entries })
+      window.synote.onVaultChanged(({ root, entries, changed }) => {
+        const v = useVault.getState().vault
+        if (v?.root !== root) return // 别的库（切库前）迟到的事件
+        useVault.getState().setVault({ ...v, entries })
         changed.forEach(reloadIfClean)
       }),
     [],
@@ -33,13 +34,13 @@ export function App() {
   return (
     <div className={s.app}>
       <nav className={s.activity}>
-        <button className={sidebar === 'files' ? s.activityOn : ''} title={t('files')} aria-label={t('files')} onClick={() => useStore.getState().setSidebar('files')}>
+        <button className={sidebar === 'files' ? s.activityOn : ''} title={t('files')} aria-label={t('files')} onClick={() => useUi.getState().setSidebar('files')}>
           ▤
         </button>
         <button className={sidebar === 'search' ? s.activityOn : ''} title={t('search')} aria-label={t('search')} onClick={() => run('search')}>
           ⌕
         </button>
-        <button className={sidebar === 'git' ? s.activityOn : ''} title={t('git')} aria-label={t('git')} onClick={() => useStore.getState().setSidebar('git')}>
+        <button className={sidebar === 'git' ? s.activityOn : ''} title={t('git')} aria-label={t('git')} onClick={() => useUi.getState().setSidebar('git')}>
           ⑂
         </button>
       </nav>
@@ -63,7 +64,7 @@ export function App() {
       </Group>
       <Palette />
       {error && (
-        <div className={s.error} role="alert" onClick={() => useStore.getState().setError(null)}>
+        <div className={s.error} role="alert" onClick={() => useUi.getState().setError(null)}>
           {error}
         </div>
       )}
