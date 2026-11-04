@@ -139,6 +139,26 @@ test('quick open and command palette', async () => {
   await app.close()
 })
 
+// 面板打开期间外部增删文件：文件列表和命令的可用条件跟着变
+test('palette follows file list and command availability while open', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '' })
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+
+  await win.keyboard.press('ControlOrMeta+Shift+p')
+  await expect(win.getByRole('option', { name: '保存' })).toBeVisible()
+  rmSync(path.join(vault, 'a.md'))
+  await expect(win.getByRole('option', { name: '保存' })).toHaveCount(0, { timeout: 5000 })
+  await expect(win.getByRole('option', { name: '移到回收站' })).toHaveCount(0)
+  await win.keyboard.press('Escape')
+
+  await win.keyboard.press('ControlOrMeta+p')
+  await win.getByRole('combobox', { name: '快速切换' }).fill('新来')
+  await expect(win.getByRole('option')).toHaveCount(0)
+  writeFileSync(path.join(vault, '新来的.md'), '')
+  await expect(win.getByRole('option', { name: '新来的.md' })).toBeVisible({ timeout: 5000 })
+  await app.close()
+})
+
 // 索引服务：utility process 里的 node:sqlite 能用，反链 / 搜索 / 孤儿 / 重建索引走通
 test('index service in utility process', async () => {
   const { app, win, vault } = await launch({ 'a.md': '去看 [b](b.md)，实时预览', 'b.md': '', 'attachments/orphan.png': '' })

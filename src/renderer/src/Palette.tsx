@@ -5,7 +5,7 @@ import fuzzysort from 'fuzzysort'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { commands, type CommandId } from '../../shared/commands'
-import { available, handlers, ids } from './commands'
+import { available, ids, run } from './commands'
 import s from './Palette.module.css'
 import { formatKey, indexPaths, searchPaths, type Hit, type PathIndex } from './match'
 import { useStore } from './store'
@@ -48,12 +48,18 @@ function Body({ mode, getIndex, close }: { mode: 'files' | 'commands'; getIndex:
   const [sel, setSel] = useState(0)
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  const cmds = useMemo(() => ids.filter((id) => id !== 'commandPalette' && available(id)).map((id) => ({ id, title: t(commands[id].title) })), [t])
+  // 订阅可用条件读到的状态：面板打开期间关掉活动文件等，命令列表跟着变
+  const vault = useStore((st) => st.vault)
+  const active = useStore((st) => st.active)
+  const cmds = useMemo(
+    () => ids.filter((id) => id !== 'commandPalette' && available(id)).map((id) => ({ id, title: t(commands[id].title) })),
+    [t, vault, active],
+  )
   const hits: Hit[] = useMemo(() => {
     if (mode === 'files') return searchPaths(query, getIndex())
     if (!query.trim()) return cmds.map((c) => ({ id: c.id, text: c.title, indexes: [] }))
     return fuzzysort.go(query, cmds, { key: 'title' }).map((r) => ({ id: r.obj.id, text: r.obj.title, indexes: r.indexes }))
-  }, [mode, query, cmds])
+  }, [mode, query, cmds, getIndex])
 
   const v = useVirtualizer({ count: hits.length, getScrollElement: () => scrollRef.current, estimateSize: () => ROW, overscan: 10 })
   useEffect(() => setSel(0), [hits])
@@ -63,7 +69,7 @@ function Body({ mode, getIndex, close }: { mode: 'files' | 'commands'; getIndex:
     if (!hit) return
     close()
     if (mode === 'files') useStore.getState().open(hit.id)
-    else handlers[hit.id as CommandId].run()
+    else run(hit.id as CommandId)
   }
 
   const onKey = (e: React.KeyboardEvent) => {
