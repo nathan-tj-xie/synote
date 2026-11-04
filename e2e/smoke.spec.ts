@@ -235,6 +235,65 @@ test('typing while another note loads never writes into it', async () => {
   await app.close()
 })
 
+// 新文件读完前继续编辑仍显示着的旧文件：新文件读完后，旧文件的自动保存要写最新正文
+test('edits to the old note while the next one loads are kept', async () => {
+  const { app, win, vault } = await launch({ 'a.md': 'A', 'b.md': 'B' })
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  const editor = win.locator('.cm-content')
+  await expect(editor).toHaveText('A')
+  const slow = await slowFirstCall(app, vault, 'file:read', 1000)
+
+  await win.getByRole('treeitem', { name: 'b.md' }).click()
+  await expect.poll(() => slow('calls')).toBe(1)
+  await editor.click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('后来')
+  await expect.poll(() => slow('done'), { timeout: 5000 }).toBe(1)
+  await expect(editor).toHaveText('B')
+  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('A后来')
+  await win.getByRole('tab', { name: 'a' }).click()
+  await expect(editor).toHaveText('A后来')
+  await expect(win.locator('[title="未保存"]')).toHaveCount(0)
+  await app.close()
+})
+
+// 新文件还在读时关掉视图里的旧文件：编辑器变成只读占位，不留一个能输入却不会保存的视图
+test('closing the shown note while another loads leaves no editable view', async () => {
+  const { app, win, vault } = await launch({ 'a.md': 'A', 'b.md': 'B' })
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  const editor = win.locator('.cm-content')
+  await expect(editor).toHaveText('A')
+  const slow = await slowFirstCall(app, vault, 'file:read', 1500)
+
+  await win.getByRole('treeitem', { name: 'b.md' }).click()
+  await expect.poll(() => slow('calls')).toBe(1)
+  await win.getByRole('tab', { name: 'a' }).hover() // 非活动标签的关闭按钮悬停时才显示
+  await win.getByRole('tab', { name: 'a' }).getByRole('button', { name: '关闭' }).click()
+  await expect(editor).toHaveText('')
+  await expect(editor).toHaveAttribute('contenteditable', 'false')
+  await expect(editor).toHaveText('B', { timeout: 5000 })
+  await app.close()
+})
+
+// 点了搜索结果、文件没读完就关掉标签：之后再打开这个文件不跳到旧的命中处
+test('closing a loading search target drops the pending reveal', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '第一行\n第二行有目标\n' })
+  const slow = await slowFirstCall(app, vault, 'file:read', 1500)
+
+  await win.keyboard.press('ControlOrMeta+Shift+f')
+  await win.getByRole('textbox', { name: '搜索' }).fill('目标')
+  await win.getByRole('list', { name: '搜索' }).getByRole('listitem').filter({ hasText: '第二行有' }).click({ timeout: 5000 })
+  await win.getByRole('tab', { name: 'a' }).getByRole('button', { name: '关闭' }).click()
+  await expect.poll(() => slow('done'), { timeout: 5000 }).toBe(1)
+
+  await win.keyboard.press('ControlOrMeta+p')
+  await win.getByRole('combobox', { name: '快速切换' }).fill('a.md')
+  await win.keyboard.press('Enter')
+  await expect(win.locator('.cm-content')).toContainText('第二行有目标')
+  expect(await win.evaluate(() => getSelection()?.toString())).toBe('')
+  await app.close()
+})
+
 // git 基础（S12）：缺提交身份时给出命令；找不到 git 时显示引导
 test('git view: missing identity and missing git', async () => {
   const base = mkdtempSync(path.join(tmpdir(), 'synote-e2e-'))

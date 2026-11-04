@@ -70,13 +70,18 @@ async function flush(path: string) {
   }
 }
 
+// 换掉视图前把正在显示的文件存回缓存：读新文件期间用户可能还在编辑它，防抖保存要拿到最新正文
 function setView(path: string | null, s: EditorState) {
+  if (shown) states.set(shown, view!.state)
   view!.setState(s)
   shown = path
 }
 
+// 没有文件可显示时的占位：只读，不能输入（输入无处保存）
+const blank = () => EditorState.create({ extensions: [EditorView.editable.of(false), theme] })
+
 export function mount(parent: HTMLElement) {
-  view = new EditorView({ state: makeState(''), parent })
+  view = new EditorView({ state: blank(), parent })
   return () => {
     view?.destroy()
     view = null
@@ -86,13 +91,10 @@ export function mount(parent: HTMLElement) {
 
 export async function show(path: string | null) {
   if (!view || path === current) return
-  if (shown) {
-    states.set(shown, view.state)
-    if (timers.has(shown)) flush(shown)
-  }
+  if (shown && timers.has(shown)) flush(shown)
   current = path
   if (target?.path !== path) target = null // 切到别的文件：放弃还没应用的搜索定位
-  if (!path) return setView(null, makeState(''))
+  if (!path) return setView(null, blank())
   let s = states.get(path)
   if (!s) {
     s = makeState(await window.synote.readFile(path))
@@ -130,8 +132,13 @@ export const saveCurrent = () => shown && flush(shown)
 export function forget(path: string) {
   if (timers.has(path)) flush(path) // flush 同步取走内容，之后才能清掉缓存
   states.delete(path)
+  if (target?.path === path) target = null
   if (path === current) current = null
-  if (path === shown) shown = null
+  if (path === shown) {
+    // 关掉的正是视图里的文件（另一个文件可能还在读）：换成只读占位，不留一个能输入却不会保存的编辑器
+    shown = null
+    if (view) setView(null, blank())
+  }
 }
 
 // 外部改动：没有未保存改动的已打开文件直接重新加载
