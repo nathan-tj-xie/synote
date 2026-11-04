@@ -159,6 +159,26 @@ test('palette follows file list and command availability while open', async () =
   await app.close()
 })
 
+// 连续打开两个笔记库：回复按调用顺序到达，最后一次调用生效（界面、主进程 root、最近列表一致）
+test('opening vaults in quick succession: last call wins', async () => {
+  const { app, win, vault } = await launch({ 'x.md': '' })
+  const slowVault = path.join(path.dirname(vault), 'slow') // 目录嵌套很深，逐层 readdir，扫描慢
+  const fastVault = path.join(path.dirname(vault), 'fast')
+  mkdirSync(path.join(slowVault, ...Array.from({ length: 400 }, () => 'd')), { recursive: true })
+  mkdirSync(fastVault)
+  writeFileSync(path.join(fastVault, '只在快库.md'), '快')
+
+  const order = await win.evaluate(async (dirs) => {
+    const got: string[] = []
+    await Promise.all(dirs.map((d) => window.synote.openVault(d).then((v) => got.push(v.root))))
+    return got
+  }, [slowVault, fastVault])
+  expect(order).toEqual([slowVault, fastVault])
+  expect(await win.evaluate(() => window.synote.readFile('只在快库.md'))).toBe('快')
+  expect((await win.evaluate(() => window.synote.recentVaults()))[0]).toBe(fastVault)
+  await app.close()
+})
+
 // 索引服务：utility process 里的 node:sqlite 能用，反链 / 搜索 / 孤儿 / 重建索引走通
 test('index service in utility process', async () => {
   const { app, win, vault } = await launch({ 'a.md': '去看 [b](b.md)，实时预览', 'b.md': '', 'attachments/orphan.png': '' })

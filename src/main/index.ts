@@ -29,11 +29,18 @@ async function recentVaults(): Promise<string[]> {
   }
 }
 
-async function openVault(dir: string): Promise<VaultInfo> {
+// 打开笔记库串行执行：后一次等前一次返回，回复按调用顺序到达渲染进程，最后一次调用生效（界面、root、最近列表一致）
+let opening: Promise<unknown> = Promise.resolve()
+function openVault(dir: string): Promise<VaultInfo> {
+  const r = opening.then(() => doOpenVault(dir))
+  opening = r.catch(() => {})
+  return r
+}
+
+async function doOpenVault(dir: string): Promise<VaultInfo> {
   if (!existsSync(dir)) throw new Error(t('vaultMissing', { path: dir }))
   root = dir
   gitGen++ // 进行中的 git 状态查询作废
-  // 先于任何 await 启动：快速连开两个库时，按调用顺序最后一个生效
   startWatching(dir)
   startIndexer(dir)
   const [entries, config] = await Promise.all([scanEntries(dir), readConfig(dir)])
