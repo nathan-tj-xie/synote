@@ -36,6 +36,7 @@ export const handlers: Record<CommandId, Handler> = {
       for (const tab of st().tabs) if (tab === path || tab.startsWith(`${path}/`)) forget(tab)
     },
   },
+  rebuildIndex: { when: () => !!st().vault, run: () => window.synote.rebuildIndex().catch(fail) },
 }
 
 export const ids = Object.keys(commands) as CommandId[]

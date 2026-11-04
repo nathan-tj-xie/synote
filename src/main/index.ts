@@ -1,9 +1,10 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell, utilityProcess, type UtilityProcess } from 'electron'
+import { createHash } from 'node:crypto'
 import { existsSync, promises as fs, watch, type FSWatcher } from 'node:fs'
 import path from 'node:path'
 import { i18next, i18nOptions } from '../shared/i18n'
 import { commands } from '../shared/commands'
-import type { ItemMenuAction, VaultInfo } from '../shared/api'
+import { indexMethods, type ItemMenuAction, type VaultInfo } from '../shared/api'
 import { isHidden, resolveInVault, scanEntries, toPosix, uniqueNoteName } from './vault'
 
 i18next.init(i18nOptions)
@@ -12,6 +13,9 @@ const t = i18next.t
 let win: BrowserWindow | null = null
 let root: string | null = null
 let watcher: FSWatcher | null = null
+let indexer: UtilityProcess | null = null
+let callSeq = 0
+const calls = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
 
 const recentFile = () => path.join(app.getPath('userData'), 'recent.json')
 
@@ -30,6 +34,7 @@ async function openVault(dir: string): Promise<VaultInfo> {
   const recent = [dir, ...(await recentVaults()).filter((r) => r !== dir)].slice(0, 10)
   await fs.writeFile(recentFile(), JSON.stringify(recent))
   startWatching(dir)
+  startIndexer(dir)
   return { root: dir, name: path.basename(dir), entries }
 }
 
@@ -53,6 +58,35 @@ function startWatching(dir: string) {
   })
 }
 
+// 每个笔记库一个索引库，放在应用数据目录（缓存，不入库）
+function startIndexer(dir: string) {
+  indexer?.kill()
+  for (const c of calls.values()) c.reject(new Error('index restarted'))
+  calls.clear()
+  const proc = utilityProcess.fork(path.join(__dirname, 'index-worker.js'), [], { serviceName: 'synote-index' })
+  indexer = proc
+  proc.on('message', (m: { id?: number; event?: string; paths?: string[]; result?: unknown; error?: string }) => {
+    if (m.event === 'changed') return win?.webContents.send('index:changed', m.paths)
+    const c = calls.get(m.id!)
+    calls.delete(m.id!)
+    if (m.error) c?.reject(new Error(m.error))
+    else c?.resolve(m.result)
+  })
+  proc.on('exit', () => indexer === proc && (indexer = null))
+  const dbDir = path.join(app.getPath('userData'), 'index')
+  const dbFile = path.join(dbDir, `${createHash('sha1').update(dir).digest('hex')}.db`)
+  fs.mkdir(dbDir, { recursive: true })
+    .then(() => callIndex('open', dbFile, dir))
+    .catch((e) => console.error('[index] open failed', e))
+}
+
+function callIndex(method: string, ...args: unknown[]): Promise<unknown> {
+  if (!indexer) return Promise.reject(new Error('index not running'))
+  const id = ++callSeq
+  indexer.postMessage({ id, method, args })
+  return new Promise((resolve, reject) => calls.set(id, { resolve, reject }))
+}
+
 function vaultPath(rel: string): string {
   if (!root) throw new Error('no vault open')
   return resolveInVault(root, rel)
@@ -71,6 +105,10 @@ ipcMain.handle('file:createNote', async (_e, dir: string) => {
   const rel = uniqueNoteName(new Set(entries.map((x) => x.path)), dir, t('untitled'))
   await fs.writeFile(vaultPath(rel), '', { flag: 'wx' }) // wx：不覆盖已有文件
   return rel
+})
+ipcMain.handle('index:call', (_e, method: string, ...args: unknown[]) => {
+  if (!(indexMethods as readonly string[]).includes(method)) throw new Error(`unknown index method: ${method}`)
+  return callIndex(method, ...args)
 })
 ipcMain.handle('file:trash', (_e, rel: string) => shell.trashItem(vaultPath(rel)))
 ipcMain.handle(
