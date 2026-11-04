@@ -342,6 +342,35 @@ test('closing a loading search target drops the pending reveal', async () => {
   await app.close()
 })
 
+// 关掉加载中的标签后回到之前编辑过的文件：视图里的新正文不能被缓存里的旧快照换掉
+test('closing a loading tab never restores a stale snapshot', async () => {
+  const { app, win, vault } = await launch({ 'a.md': 'A', 'b.md': 'B', 'c.md': 'C' })
+  const editor = win.locator('.cm-content')
+  await win.getByRole('treeitem', { name: 'c.md' }).click()
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(editor).toHaveText('A')
+  await win.getByRole('tab', { name: 'c' }).click()
+  await expect(editor).toHaveText('C')
+  await win.getByRole('tab', { name: 'a' }).click()
+  await expect(editor).toHaveText('A')
+  await editor.click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('新')
+  const slow = await slowFirstCall(app, vault, 'file:read', 1500)
+
+  await win.getByRole('treeitem', { name: 'b.md' }).click()
+  await expect.poll(() => slow('calls')).toBe(1)
+  await win.getByRole('tab', { name: 'b' }).getByRole('button', { name: '关闭' }).click() // 标签顺序 c a b，关 b 回到 a
+  await expect(win.getByRole('tab', { name: 'a', selected: true })).toBeVisible()
+  // 立刻接着输入：旧快照哪怕只显示一瞬间，输入也会落在旧正文上
+  await editor.click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('又')
+  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('A新又')
+  await expect(editor).toHaveText('A新又')
+  await app.close()
+})
+
 // 主进程开新库期间（还没返回），界面上仍是旧库：这时的保存写回旧库；新库开好后旧界面的写入被拒绝并提示
 test('saves during a vault switch go to the vault that issued them', async () => {
   test.skip(process.platform === 'win32', 'mkfifo')

@@ -6,6 +6,8 @@ import { vscodeKeymap } from '@replit/codemirror-vscode-keymap'
 import { minimalSetup } from 'codemirror'
 import { useEditor, useUi, useVault } from './store'
 
+// 缓存不变式：视图里那份（shown）永远是该文件最新的正文，states 只缓存不在视图里的已打开文件。
+// setView 是唯一换视图的入口：换之前把 shown 写回 states，放进视图的那份同时移出 states
 const states = new Map<string, EditorState>()
 const timers = new Map<string, ReturnType<typeof setTimeout>>()
 // 每个文件的写盘串成一条链：后发的保存必须在先发的之后落盘，否则旧内容会覆盖新内容
@@ -14,6 +16,8 @@ let vault: string | null = null // 当前笔记库（VaultInfo.root），读写�
 let view: EditorView | null = null
 let current: string | null = null // 要显示的文件
 let shown: string | null = null // 视图里实际是哪个文件；读文件期间仍是上一个
+// 每次显示、关闭当前文件、换库都加一；读文件回来时代次变了，说明这次显示已作废，结果丢弃
+let seq = 0
 // 搜索结果点击后要定位的位置，文件加载完再应用
 let target: { path: string; line: number; col: number; len: number } | null = null
 
@@ -72,9 +76,10 @@ async function flush(path: string) {
   }
 }
 
-// 换掉视图前把正在显示的文件存回缓存：读新文件期间用户可能还在编辑它，防抖保存要拿到最新正文
+// 唯一换视图的入口，维护缓存不变式
 function setView(path: string | null, s: EditorState) {
   if (shown) states.set(shown, view!.state)
+  if (path) states.delete(path)
   view!.setState(s)
   shown = path
 }
@@ -88,22 +93,33 @@ export function mount(parent: HTMLElement) {
     view?.destroy()
     view = null
     current = shown = null
+    seq++
   }
 }
 
 export async function show(path: string | null) {
   if (!view || path === current) return
+  const my = ++seq
   if (shown && timers.has(shown)) flush(shown)
   current = path
   if (target?.path !== path) target = null // 切到别的文件：放弃还没应用的搜索定位
   if (!path) return setView(null, blank())
-  let s = states.get(path)
-  if (!s) {
-    s = makeState(await window.synote.readFile(vault!, path))
-    if (shown === path || states.has(path)) return // 读文件期间另一次 show 已经读进来了，以先到的为准
-    if (current !== path) return states.set(path, s) // 读文件期间又切走了
+  // 视图里已经是它（读别的文件途中又切回来）：视图那份最新，不动
+  if (path !== shown) {
+    let s = states.get(path)
+    if (!s) {
+      let text: string
+      try {
+        text = await window.synote.readFile(vault!, path)
+      } catch (e) {
+        if (my !== seq) return
+        throw e
+      }
+      if (my !== seq) return // 读文件期间又切走、关掉或换了库
+      s = makeState(text)
+    }
+    setView(path, s)
   }
-  setView(path, s)
   applyTarget()
   view.focus()
 }
@@ -135,7 +151,10 @@ export function forget(path: string) {
   if (timers.has(path)) flush(path) // flush 同步取走内容，之后才能清掉缓存
   states.delete(path)
   if (target?.path === path) target = null
-  if (path === current) current = null
+  if (path === current) {
+    current = null
+    seq++ // 它还在读的话，读回来也不显示
+  }
   if (path === shown) {
     // 关掉的正是视图里的文件（另一个文件可能还在读）：换成只读占位，不留一个能输入却不会保存的编辑器
     shown = null
@@ -169,6 +188,7 @@ function switchVault(root: string | null) {
   states.clear()
   target = null
   current = null
+  seq++
   if (shown) {
     shown = null
     if (view) setView(null, blank())
