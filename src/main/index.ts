@@ -84,7 +84,7 @@ ipcMain.handle(
       Menu.buildFromTemplate(items).popup({ window: win!, callback: () => resolve(picked) })
     }),
 )
-ipcMain.on('app:ready', () => {
+ipcMain.once('app:ready', () => {
   // 首屏耗时：从进程启动到渲染进程画出文件树
   const ms = Math.round(performance.now())
   console.log(`[perf] first-screen ${ms}ms`)
