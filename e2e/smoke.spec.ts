@@ -1,6 +1,6 @@
 import { _electron as electron, expect, test, type ElectronApplication } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -71,12 +71,13 @@ test('open vault, edit, save, reload external change', async () => {
   writeFileSync(file, '# 外部改的\n')
   await expect(editor).toContainText('# 外部改的', { timeout: 5000 })
 
-  // 非 git 目录：上面的笔记库本身就不是 git 仓库，没有报错即可；.synote/config.json 自动创建
+  // 非 git 目录：上面的笔记库本身就不是 git 仓库，没有报错即可；打开库不创建 .synote/config.json，写配置时才创建
   await expect(win.getByRole('alert')).toHaveCount(0)
-  expect(JSON.parse(readFileSync(path.join(vault, '.synote', 'config.json'), 'utf8'))).toEqual({})
-  await expect(tree.getByText('.synote')).toHaveCount(0)
+  expect(existsSync(path.join(vault, '.synote'))).toBe(false)
   await win.evaluate(() => window.synote.writeConfig({ k: 1 }))
   expect(JSON.parse(readFileSync(path.join(vault, '.synote', 'config.json'), 'utf8'))).toEqual({ k: 1 })
+  await win.waitForTimeout(500) // 等 watcher 推送刷新文件树
+  await expect(tree.getByText('.synote')).toHaveCount(0)
   await app.close()
 })
 
