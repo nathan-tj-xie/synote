@@ -32,11 +32,12 @@ async function openVault(dir: string): Promise<VaultInfo> {
   if (!existsSync(dir)) throw new Error(t('vaultMissing', { path: dir }))
   root = dir
   gitGen++ // 进行中的 git 状态查询作废
+  // 先于任何 await 启动：快速连开两个库时，按调用顺序最后一个生效
+  startWatching(dir)
+  startIndexer(dir)
   const entries = await scanEntries(dir)
   const recent = [dir, ...(await recentVaults()).filter((r) => r !== dir)].slice(0, 10)
   await fs.writeFile(recentFile(), JSON.stringify(recent))
-  startWatching(dir)
-  startIndexer(dir)
   return { root: dir, name: path.basename(dir), entries }
 }
 
@@ -79,7 +80,7 @@ function startIndexer(dir: string) {
   const dbDir = path.join(app.getPath('userData'), 'index')
   const dbFile = path.join(dbDir, `${createHash('sha1').update(dir).digest('hex')}.db`)
   fs.mkdir(dbDir, { recursive: true })
-    .then(() => callIndex('open', dbFile, dir))
+    .then(() => indexer === proc && callIndex('open', dbFile, dir)) // 等待期间已换库：不能把旧库发给新进程
     .catch((e) => console.error('[index] open failed', e))
 }
 
