@@ -6,6 +6,7 @@ import { installShortcuts, run } from './commands'
 import { EditorPane } from './EditorPane'
 import { reloadIfClean } from './editor'
 import { FileTree } from './FileTree'
+import { GitView } from './GitView'
 import { Palette } from './Palette'
 import { Search } from './Search'
 import { useStore } from './store'
@@ -38,6 +39,9 @@ export function App() {
         <button className={sidebar === 'search' ? s.activityOn : ''} title={t('search')} aria-label={t('search')} onClick={() => run('search')}>
           ⌕
         </button>
+        <button className={sidebar === 'git' ? s.activityOn : ''} title={t('git')} aria-label={t('git')} onClick={() => useStore.getState().setSidebar('git')}>
+          ⑂
+        </button>
       </nav>
       <Group orientation="horizontal" className={s.main}>
         <Panel defaultSize={280} minSize={160} className={s.sidebar}>
@@ -47,6 +51,9 @@ export function App() {
           </div>
           <div className={s.view} hidden={sidebar !== 'search'}>
             <Search />
+          </div>
+          <div className={s.view} hidden={sidebar !== 'git'}>
+            <GitView />
           </div>
         </Panel>
         <Separator className={s.separator} />

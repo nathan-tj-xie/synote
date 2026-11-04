@@ -1,10 +1,11 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell, utilityProcess, type UtilityProcess } from 'electron'
 import { createHash } from 'node:crypto'
-import { existsSync, promises as fs, watch, type FSWatcher } from 'node:fs'
+import { existsSync, promises as fs, statSync, watch, type FSWatcher } from 'node:fs'
 import path from 'node:path'
 import { i18next, i18nOptions } from '../shared/i18n'
 import { commands } from '../shared/commands'
-import { indexMethods, type ItemMenuAction, type VaultInfo } from '../shared/api'
+import { indexMethods, type GitState, type ItemMenuAction, type VaultInfo } from '../shared/api'
+import { exec, findGit, Git, type Found } from './git'
 import { isHidden, resolveInVault, scanEntries, toPosix, uniqueNoteName } from './vault'
 
 i18next.init(i18nOptions)
@@ -87,6 +88,43 @@ function callIndex(method: string, ...args: unknown[]): Promise<unknown> {
   return new Promise((resolve, reject) => calls.set(id, { resolve, reject }))
 }
 
+// 设置项只有 git 路径，和 recent.json 一样放在应用数据目录
+const settingsFile = () => path.join(app.getPath('userData'), 'settings.json')
+const readSettings = (): Promise<{ gitPath?: string }> =>
+  fs.readFile(settingsFile(), 'utf8').then(JSON.parse, () => ({}))
+
+let found: Promise<Found> | null = null
+let git: Git | null = null
+
+function detectGit() {
+  git?.close()
+  git = null
+  found = readSettings().then((st) =>
+    findGit({
+      setting: st.gitPath,
+      platform: process.platform,
+      PATH: process.env.PATH ?? '',
+      shell: process.env.SHELL,
+      exec,
+      isFile: (p) => statSync(p, { throwIfNoEntry: false })?.isFile() ?? false,
+    }),
+  )
+}
+
+async function gitState(): Promise<GitState> {
+  if (!found) detectGit()
+  const f = await found!
+  if (f.status !== 'ok') return f
+  if (!root) throw new Error('no vault open')
+  if (git?.cwd !== root) {
+    git?.close()
+    git = new Git(f.bin, f.PATH, root, () => void callIndex('reconcile').catch(() => {}))
+  }
+  if (!(await git.isRepo())) return { status: 'notRepo', version: f.version }
+  const [id, changes, lfs] = await Promise.all([git.identity(), git.status(), git.lfsInstalled()])
+  return { status: 'ready', version: f.version, ...id, changes: changes.length, lfs }
+}
+
 function vaultPath(rel: string): string {
   if (!root) throw new Error('no vault open')
   return resolveInVault(root, rel)
@@ -109,6 +147,15 @@ ipcMain.handle('file:createNote', async (_e, dir: string) => {
 ipcMain.handle('index:call', (_e, method: string, ...args: unknown[]) => {
   if (!(indexMethods as readonly string[]).includes(method)) throw new Error(`unknown index method: ${method}`)
   return callIndex(method, ...args)
+})
+ipcMain.handle('git:state', () => gitState())
+ipcMain.handle('git:redetect', () => (detectGit(), gitState()))
+ipcMain.handle('git:choose', async () => {
+  const r = await dialog.showOpenDialog(win!, { properties: ['openFile', 'showHiddenFiles'] })
+  if (r.canceled) return null
+  await fs.writeFile(settingsFile(), JSON.stringify({ ...(await readSettings()), gitPath: r.filePaths[0] }))
+  detectGit()
+  return gitState()
 })
 ipcMain.handle('file:trash', (_e, rel: string) => shell.trashItem(vaultPath(rel)))
 ipcMain.handle(
@@ -144,5 +191,8 @@ function createWindow() {
 // e2e / 性能测试用：指定 userData，避免污染真实的最近打开列表
 if (process.env.SYNOTE_USER_DATA) app.setPath('userData', process.env.SYNOTE_USER_DATA)
 
-app.whenReady().then(createWindow)
+app.whenReady().then(() => {
+  detectGit() // 登录 shell 最多 3 s，启动时就开始查
+  createWindow()
+})
 app.on('window-all-closed', () => app.quit())

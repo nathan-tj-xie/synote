@@ -1,4 +1,5 @@
 import { _electron as electron, expect, test } from '@playwright/test'
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -131,5 +132,38 @@ test('full-text search opens file at match', async () => {
   await expect(win.locator('.cm-content')).toContainText('第三行有实时预览')
   expect(await win.evaluate(() => getSelection()?.toString())).toBe('实时预览')
   await expect(win.getByRole('alert')).toHaveCount(0)
+  await app.close()
+})
+
+// git 基础（S12）：缺提交身份时给出命令；找不到 git 时显示引导
+test('git view: missing identity and missing git', async () => {
+  const base = mkdtempSync(path.join(tmpdir(), 'synote-e2e-'))
+  const vault = path.join(base, 'vault')
+  const userData = path.join(base, 'user-data')
+  const globalConfig = path.join(base, 'gitconfig')
+  mkdirSync(vault)
+  mkdirSync(userData)
+  writeFileSync(globalConfig, '')
+  writeFileSync(path.join(vault, '新 笔记.md'), '')
+  writeFileSync(path.join(userData, 'recent.json'), JSON.stringify([vault]))
+  const env = { ...process.env, SYNOTE_USER_DATA: userData, GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_NOSYSTEM: '1' }
+  execFileSync('git', ['init', '-q'], { cwd: vault, env })
+
+  let app = await electron.launch({ args: ['.'], env })
+  let win = await app.firstWindow()
+  await win.getByRole('button', { name: 'Git' }).click()
+  await expect(win.getByText('1 处更改')).toBeVisible({ timeout: 10_000 })
+  await expect(win.getByText('git config --global user.email')).toBeVisible()
+  await app.close()
+
+  // 登录 shell 失败、当前 PATH 为空：没有可用的 git，文件树照常可用
+  app = await electron.launch({ args: ['.'], env: { ...env, PATH: '', SHELL: '/usr/bin/false' } })
+  win = await app.firstWindow()
+  await expect(win.getByRole('tree')).toBeVisible()
+  await win.getByRole('button', { name: 'Git' }).click()
+  await expect(win.getByText('没有找到 git')).toBeVisible()
+  await win.getByRole('button', { name: '重新检测' }).click()
+  await expect(win.getByText('没有找到 git')).toBeVisible()
+  await expect(win.getByRole('button', { name: '手动指定 git 路径…' })).toBeVisible()
   await app.close()
 })

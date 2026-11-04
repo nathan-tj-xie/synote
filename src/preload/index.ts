@@ -26,6 +26,9 @@ const api: SynoteApi = {
     ipcRenderer.on('index:changed', h)
     return () => ipcRenderer.off('index:changed', h)
   },
+  gitState: () => ipcRenderer.invoke('git:state'),
+  redetectGit: () => ipcRenderer.invoke('git:redetect'),
+  chooseGit: () => ipcRenderer.invoke('git:choose'),
 }
 
 contextBridge.exposeInMainWorld('synote', api)

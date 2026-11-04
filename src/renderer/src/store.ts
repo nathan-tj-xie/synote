@@ -8,7 +8,7 @@ type State = {
   dirty: Record<string, true>
   error: string | null
   palette: 'files' | 'commands' | null
-  sidebar: 'files' | 'search'
+  sidebar: 'files' | 'search' | 'git'
   setVault: (v: VaultInfo | null) => void
   open: (path: string) => void
   close: (path: string) => void
