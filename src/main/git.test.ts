@@ -1,5 +1,5 @@
 import { execFileSync, type ChildProcess } from 'node:child_process'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -42,16 +42,45 @@ describe('version', () => {
   it('不是 git 输出', () => expect(parseVersion('zsh: command not found: git')).toBeNull())
 })
 
+// 都是 git 2.54 / curl / OpenSSH 的真实输出（LC_ALL=C）；能在本地复现的另见下面经 Git.run() 的集成测试
 describe('classifyGitError', () => {
   it.each([
-    ['fatal: could not read Username for \'https://github.com\': terminal prompts disabled', 'noCredentials'],
-    ['git@github.com: Permission denied (publickey).', 'noCredentials'],
-    [' ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs', 'nonFastForward'],
-    ['hint: Updates were rejected because the tip of your current branch is behind', 'nonFastForward'],
-    ['Author identity unknown\n\n*** Please tell me who you are.', 'noIdentity'],
-    ['CONFLICT (content): Merge conflict in a.md\nAutomatic merge failed; fix conflicts', 'conflict'],
-    ['git-lfs filter-process: git-lfs: command not found', 'lfsMissing'],
-    ['fatal: unable to access \'https://x/\': Could not resolve host: x', 'network'],
+    // noCredentials
+    ["fatal: could not read Username for 'https://github.com': terminal prompts disabled", 'noCredentials'],
+    ["remote: Invalid username or token.\nfatal: Authentication failed for 'https://github.com/a/b.git/'", 'noCredentials'],
+    ["remote: Permission to a/b.git denied to c.\nfatal: unable to access 'https://github.com/a/b.git/': The requested URL returned error: 403", 'noCredentials'],
+    ['git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.', 'noCredentials'],
+    // nonFastForward：只有这两种原因
+    [' ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs to \'../r.git\'\nhint: Updates were rejected because the remote contains work that you do not', 'nonFastForward'],
+    [' ! [rejected]        main -> main (non-fast-forward)\nerror: failed to push some refs to \'../r.git\'\nhint: Updates were rejected because the tip of your current branch is behind', 'nonFastForward'],
+    ['fatal: Not possible to fast-forward, aborting.', 'nonFastForward'],
+    // 其它拒绝不是非快进
+    [' ! [rejected]        v1 -> v1 (already exists)\nerror: failed to push some refs to \'../r.git\'\nhint: Updates were rejected because the tag already exists in the remote.', 'unknown'],
+    [' ! [rejected]        main -> main (stale info)\nerror: failed to push some refs to \'../r.git\'', 'unknown'],
+    [' ! [remote rejected] main -> main (pre-receive hook declined)\nerror: failed to push some refs to \'../r.git\'', 'unknown'],
+    ['fatal: Need to specify how to reconcile divergent branches.', 'unknown'],
+    // noIdentity
+    ['Author identity unknown\n\n*** Please tell me who you are.\n\nfatal: no email was given and auto-detection is disabled', 'noIdentity'],
+    ["fatal: unable to auto-detect email address (got 't@host.(none)')", 'noIdentity'],
+    ['fatal: empty ident name (for <t@t>) not allowed', 'noIdentity'],
+    // conflict（rebase 的 CONFLICT 也在 stdout，这里只测文本本身）
+    ['Auto-merging f\nCONFLICT (content): Merge conflict in f\nAutomatic merge failed; fix conflicts and then commit the result.', 'conflict'],
+    ['Auto-merging f\nCONFLICT (modify/delete): f deleted in HEAD and modified in 1a2b3c4 (x).', 'conflict'],
+    // lfsMissing
+    ['git-lfs filter-process: git-lfs: command not found\nfatal: the remote end hung up unexpectedly', 'lfsMissing'],
+    ["git-lfs clean -- 'a.bin': git-lfs: command not found\nfatal: a.bin: clean filter 'lfs' failed", 'lfsMissing'],
+    ["This repository is configured for Git LFS but 'git-lfs' was not found on your path.", 'lfsMissing'],
+    // network
+    ["fatal: unable to access 'https://x.invalid/a/': Could not resolve host: x.invalid", 'network'],
+    ["fatal: unable to access 'https://127.0.0.1:1/x/': Failed to connect to 127.0.0.1 port 1 after 0 ms: Couldn't connect to server", 'network'],
+    ["fatal: unable to access 'https://x/': LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to x:443 ", 'network'],
+    ['ssh: Could not resolve hostname x.invalid: nodename nor servname provided, or not known\nfatal: Could not read from remote repository.', 'network'],
+    ['ssh: connect to host github.com port 22: Operation timed out\nfatal: Could not read from remote repository.', 'network'],
+    ['ssh: connect to host 127.0.0.1 port 1: Connection refused', 'network'],
+    // SSL 证书问题、远端不存在都不是网络不通
+    ["fatal: unable to access 'https://x/': SSL certificate problem: unable to get local issuer certificate", 'unknown'],
+    ["fatal: '/nonexist' does not appear to be a git repository\nfatal: Could not read from remote repository.", 'unknown'],
+    // notRepo
     ['fatal: not a git repository (or any of the parent directories): .git', 'notRepo'],
     ['fatal: something else', 'unknown'],
   ])('%s', (stderr, kind) => expect(classifyGitError(stderr)).toBe(kind))
@@ -85,6 +114,18 @@ describe('findGit', () => {
   it('设置项版本过低时继续找登录 shell PATH', async () => {
     const f = fake({ loginPATH: '/opt/homebrew/bin:/usr/bin', versions: { '/my/git': '2.30.0', '/opt/homebrew/bin/git': '2.56.0' } })
     expect(await findGit({ ...base, ...f, setting: '/my/git' })).toMatchObject({ status: 'ok', bin: '/opt/homebrew/bin/git' })
+  })
+
+  it('登录 shell 的 git 太旧、当前 PATH 的合格：子进程用当前 PATH', async () => {
+    const f = fake({ loginPATH: '/usr/local/bin', versions: { '/usr/local/bin/git': '2.30.0', '/opt/git/bin/git': '2.45.0' } })
+    expect(await findGit({ ...f, platform: 'darwin', PATH: '/opt/git/bin' })).toEqual({
+      status: 'ok',
+      bin: '/opt/git/bin/git',
+      version: '2.45.0',
+      PATH: '/opt/git/bin',
+    })
+    // 探测版本时也用这一级的 PATH
+    expect(f.exec.mock.calls.find(([file]) => file === '/opt/git/bin/git')?.[2]?.env?.PATH).toBe('/opt/git/bin')
   })
 
   it('登录 shell 超时就用当前 PATH', async () => {
@@ -216,6 +257,57 @@ describe('Git（系统 git）', () => {
     const { repo, env } = setup()
     const git = new Git(path.join(repo, 'no-such-git'), process.env.PATH!, repo, undefined, env)
     await expect(git.readBlob('HEAD:a.md')).rejects.toBeInstanceOf(GitError)
+  })
+
+  // 真实的 push / pull 拒绝：本地 bare 仓库当远端
+  it('push / pull 拒绝经 Git.run() 分类', async () => {
+    const { dir, repo, env, sh } = setup()
+    const remote = path.join(dir, 'r.git')
+    execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote], { env })
+    sh('init', '-q', '-b', 'main')
+    writeFileSync(path.join(repo, 'a.md'), '1\n')
+    sh('add', '.')
+    sh('commit', '-qm', '1')
+    sh('remote', 'add', 'o', remote)
+    sh('push', '-q', 'o', 'main')
+    sh('tag', 'v1')
+    sh('push', '-q', 'o', 'v1')
+    // 另一个克隆往远端推一个新提交
+    const other = path.join(dir, 'other')
+    execFileSync('git', ['clone', '-q', remote, other], { env })
+    writeFileSync(path.join(other, 'a.md'), '2\n')
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', '2'], { cwd: other, env })
+    execFileSync('git', ['push', '-q'], { cwd: other, env })
+    writeFileSync(path.join(repo, 'a.md'), '3\n')
+    sh('commit', '-qam', '3')
+
+    const git = new Git('git', process.env.PATH!, repo, undefined, env)
+    const kind = (args: string[]) => git.run(['-c', 'user.name=t', '-c', 'user.email=t@t', ...args]).then(() => 'ok', (e) => e.kind)
+    expect(await kind(['push', 'o', 'main'])).toBe('nonFastForward') // fetch first
+    sh('fetch', '-q', 'o')
+    expect(await kind(['push', 'o', 'main'])).toBe('nonFastForward') // non-fast-forward
+    expect(await kind(['pull', '--ff-only', 'o', 'main'])).toBe('nonFastForward')
+    sh('tag', '-f', 'v1', 'HEAD')
+    expect(await kind(['push', 'o', 'v1'])).toBe('unknown') // tag already exists
+    expect(await kind(['pull', '--rebase', 'o', 'main'])).toBe('conflict') // rebase 的 CONFLICT 也在 stdout
+  })
+
+  it('缺 git-lfs 经 Git.run() 分类为 lfsMissing', async () => {
+    const { dir, repo, env, sh } = setup()
+    sh('init', '-q')
+    writeFileSync(path.join(repo, '.gitattributes'), '*.bin filter=lfs\n')
+    writeFileSync(path.join(repo, 'a.bin'), 'x\n')
+    // PATH 里只有 git 本身，没有 git-lfs
+    const bin = path.join(dir, 'bin')
+    mkdirSync(bin)
+    symlinkSync(execFileSync('git', ['--exec-path']).toString().trim() + '/git', path.join(bin, 'git'))
+    const git = new Git(path.join(bin, 'git'), bin, repo, undefined, env)
+    await expect(git.run(['-c', 'filter.lfs.process=git-lfs filter-process', '-c', 'filter.lfs.required=true', 'add', 'a.bin'])).rejects.toMatchObject({ kind: 'lfsMissing' })
+  })
+
+  it('非仓库目录经 Git.run() 分类为 notRepo', async () => {
+    const { repo, env } = setup()
+    await expect(new Git('git', process.env.PATH!, repo, undefined, { ...env, GIT_CEILING_DIRECTORIES: path.dirname(repo) }).run(['status'])).rejects.toMatchObject({ kind: 'notRepo' })
   })
 
   it('合并冲突经 Git.run() 分类为 conflict，保留 stdout', async () => {

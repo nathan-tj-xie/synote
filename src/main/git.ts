@@ -56,12 +56,16 @@ export async function findGit(o: {
     const r = await o.exec(o.shell || '/bin/zsh', ['-ilc', 'echo "SYNOTE_PATH=$PATH"'], { timeout: 3000 })
     loginPATH = r.code === 0 ? /SYNOTE_PATH=(.*)/.exec(r.stdout)?.[1] : undefined
   }
-  // git 子进程也用这个 PATH，否则 git 能找到、git-lfs 却找不到（research/lfs 2.5）
-  const PATH = loginPATH || o.PATH
+  // git 子进程用选中那一级的 PATH，否则 git 能找到、git-lfs 却找不到（research/lfs 2.5）；设置项优先用登录 shell 的
+  const candidates: [string | undefined, string][] = [
+    [o.setting, loginPATH || o.PATH],
+    [loginPATH && which(loginPATH), loginPATH ?? ''],
+    [which(o.PATH), o.PATH],
+  ]
 
   let clt: boolean | undefined
   let tooOld: Found | undefined
-  for (const bin of [o.setting, loginPATH && which(loginPATH), which(o.PATH)]) {
+  for (const [bin, PATH] of candidates) {
     if (!bin) continue
     // /usr/bin/git 是 shim：没装 Command Line Tools 时一调用就弹安装框，先用 xcode-select -p 确认
     if (mac && bin === '/usr/bin/git' && !(clt ??= (await o.exec('/usr/bin/xcode-select', ['-p'])).code === 0)) continue
@@ -97,17 +101,26 @@ export function parseStatus(out: string): StatusEntry[] {
   return res
 }
 
+// 按 git / curl / ssh 的真实输出逐条收窄（见 git.test.ts）；不确定的归 unknown，让调用方展示原文，而不是给错引导
 const errorPatterns: [GitErrorKind, RegExp][] = [
-  ['noIdentity', /Please tell me who you are|unable to auto-detect email address|empty ident name/i],
+  [
+    'noIdentity',
+    /Please tell me who you are|unable to auto-detect email address|empty ident name|no (name|email) was given and auto-detection is disabled/,
+  ],
   [
     'noCredentials',
-    /could not read (Username|Password)|Authentication failed|terminal prompts disabled|Permission denied \(publickey|Host key verification failed/i,
+    // 401 / 403 也带 "unable to access"，必须排在 network 前面
+    /could not read (Username|Password) for|Authentication failed for|The requested URL returned error: 40[13]|Permission denied \((publickey|password|keyboard-interactive)/,
   ],
-  ['nonFastForward', /\[rejected\]|non-fast-forward|Updates were rejected|Not possible to fast-forward/i],
+  // 只认这几种原因；tag already exists、stale info、remote rejected（hook）等都不算
+  ['nonFastForward', /\[rejected\] .*\((non-fast-forward|fetch first)\)|Not possible to fast-forward/],
   ['conflict', /^CONFLICT \(|Automatic merge failed/m],
-  ['lfsMissing', /git-lfs.*(command not found|not found|No such file)/i],
-  ['network', /Could not resolve host|Connection (timed out|refused)|unable to access/i],
-  ['notRepo', /not a git repository/i],
+  ['lfsMissing', /git-lfs: (command )?not found|'git-lfs' was not found|cannot run git-lfs/],
+  [
+    'network',
+    /Could not resolve host|Failed to connect to|Connection (timed out|refused|reset|closed by)|Operation timed out|Network is unreachable|SSL_ERROR_SYSCALL/,
+  ],
+  ['notRepo', /not a git repository/],
 ]
 
 // 错误分类靠输出文本，子进程统一 LC_ALL=C 保证是英文；merge / pull 的 CONFLICT 提示在 stdout，所以两个通道都要看
