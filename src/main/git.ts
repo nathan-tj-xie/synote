@@ -50,33 +50,37 @@ export async function findGit(o: {
       .map((d) => path.join(d, win ? 'git.exe' : 'git'))
       .find(o.isFile)
 
+  let clt: boolean | undefined
+  let tooOld: Found | undefined
+  // git 子进程用选中那一级的 PATH，否则 git 能找到、git-lfs 却找不到（research/lfs 2.5）
+  const probe = async (bin: string | undefined, PATH: string): Promise<Found | undefined> => {
+    if (!bin) return
+    // /usr/bin/git 是 shim：没装 Command Line Tools 时一调用就弹安装框，先用 xcode-select -p 确认
+    if (mac && bin === '/usr/bin/git' && !(clt ??= (await o.exec('/usr/bin/xcode-select', ['-p'])).code === 0)) return
+    const r = await o.exec(bin, ['--version'], { env: { ...process.env, PATH } })
+    const v = r.code === 0 ? parseVersion(r.stdout) : null
+    if (!v) return
+    const version = v.join('.')
+    if (versionOk(v)) return { status: 'ok', bin, version, PATH }
+    tooOld ??= { status: 'tooOld', bin, version }
+  }
+
+  // 设置项先验证，合法就不必等登录 shell（最多 3 s）
+  // shortcut: 设置项命中时 git-lfs 只在 git 同目录和当前 PATH 里找；有 lfs 误报未安装的反馈时再后台补取登录 shell PATH
+  const set = o.setting && (await probe(o.setting, [path.dirname(o.setting), o.PATH].join(win ? ';' : ':')))
+  if (set) return set
+
   let loginPATH: string | undefined
   if (mac) {
     // 从 Finder / Dock 启动时 PATH 只有系统目录，用登录 shell 的 PATH 才能找到 Homebrew 的 git 和 git-lfs
     const r = await o.exec(o.shell || '/bin/zsh', ['-ilc', 'echo "SYNOTE_PATH=$PATH"'], { timeout: 3000 })
     loginPATH = r.code === 0 ? /SYNOTE_PATH=(.*)/.exec(r.stdout)?.[1] : undefined
   }
-  // git 子进程用选中那一级的 PATH，否则 git 能找到、git-lfs 却找不到（research/lfs 2.5）；设置项优先用登录 shell 的
-  const candidates: [string | undefined, string][] = [
-    [o.setting, loginPATH || o.PATH],
-    [loginPATH && which(loginPATH), loginPATH ?? ''],
-    [which(o.PATH), o.PATH],
-  ]
-
-  let clt: boolean | undefined
-  let tooOld: Found | undefined
-  for (const [bin, PATH] of candidates) {
-    if (!bin) continue
-    // /usr/bin/git 是 shim：没装 Command Line Tools 时一调用就弹安装框，先用 xcode-select -p 确认
-    if (mac && bin === '/usr/bin/git' && !(clt ??= (await o.exec('/usr/bin/xcode-select', ['-p'])).code === 0)) continue
-    const r = await o.exec(bin, ['--version'], { env: { ...process.env, PATH } })
-    const v = r.code === 0 ? parseVersion(r.stdout) : null
-    if (!v) continue
-    const version = v.join('.')
-    if (versionOk(v)) return { status: 'ok', bin, version, PATH }
-    tooOld ??= { status: 'tooOld', bin, version }
-  }
-  return tooOld ?? { status: 'missing' }
+  return (
+    (loginPATH && (await probe(which(loginPATH), loginPATH))) ||
+    (await probe(which(o.PATH), o.PATH)) ||
+    tooOld || { status: 'missing' }
+  )
 }
 
 export type StatusEntry =

@@ -101,19 +101,25 @@ describe('findGit', () => {
   }
   const base = { platform: 'darwin' as const, PATH: '/usr/bin:/bin' }
 
-  it('设置项优先', async () => {
+  it('设置项优先：合法时根本不调用登录 shell，PATH 为 git 所在目录 + 当前 PATH', async () => {
     const f = fake({ loginPATH: '/opt/homebrew/bin', versions: { '/my/git': '2.40.0', '/opt/homebrew/bin/git': '2.56.0' } })
     expect(await findGit({ ...base, ...f, setting: '/my/git' })).toEqual({
       status: 'ok',
       bin: '/my/git',
       version: '2.40.0',
-      PATH: '/opt/homebrew/bin',
+      PATH: '/my:/usr/bin:/bin',
     })
+    expect(f.exec.mock.calls.map(([file]) => file)).toEqual(['/my/git'])
   })
 
-  it('设置项版本过低时继续找登录 shell PATH', async () => {
+  it('设置项版本过低时才去取登录 shell PATH', async () => {
     const f = fake({ loginPATH: '/opt/homebrew/bin:/usr/bin', versions: { '/my/git': '2.30.0', '/opt/homebrew/bin/git': '2.56.0' } })
     expect(await findGit({ ...base, ...f, setting: '/my/git' })).toMatchObject({ status: 'ok', bin: '/opt/homebrew/bin/git' })
+    expect(f.exec.mock.calls.map(([file, args]) => `${file} ${args[0]}`)).toEqual([
+      '/my/git --version',
+      '/bin/zsh -ilc',
+      '/opt/homebrew/bin/git --version',
+    ])
   })
 
   it('登录 shell 的 git 太旧、当前 PATH 的合格：子进程用当前 PATH', async () => {

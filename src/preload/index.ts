@@ -1,5 +1,14 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { GitState, SynoteApi } from '../shared/api'
+import type { SynoteApi } from '../shared/api'
+
+// 订阅主进程推送的事件，返回取消订阅函数
+const subscribe =
+  <T>(channel: string) =>
+  (cb: (payload: T) => void) => {
+    const h = (_e: unknown, payload: T) => cb(payload)
+    ipcRenderer.on(channel, h)
+    return () => void ipcRenderer.off(channel, h)
+  }
 
 const api: SynoteApi = {
   openVaultDialog: () => ipcRenderer.invoke('vault:openDialog'),
@@ -11,29 +20,17 @@ const api: SynoteApi = {
   trash: (p) => ipcRenderer.invoke('file:trash', p),
   showItemMenu: (p, dir) => ipcRenderer.invoke('menu:item', p, dir),
   reportReady: () => ipcRenderer.send('app:ready'),
-  onVaultChanged: (cb) => {
-    const h = (_e: unknown, payload: Parameters<typeof cb>[0]) => cb(payload)
-    ipcRenderer.on('vault:changed', h)
-    return () => ipcRenderer.off('vault:changed', h)
-  },
+  onVaultChanged: subscribe('vault:changed'),
   backlinks: (p) => ipcRenderer.invoke('index:call', 'backlinks', p),
   search: (q) => ipcRenderer.invoke('index:call', 'search', q),
   attachmentRefs: (p) => ipcRenderer.invoke('index:call', 'attachmentRefs', p),
   orphans: () => ipcRenderer.invoke('index:call', 'orphans'),
   rebuildIndex: () => ipcRenderer.invoke('index:call', 'rebuild'),
-  onIndexChanged: (cb) => {
-    const h = (_e: unknown, paths: string[]) => cb(paths)
-    ipcRenderer.on('index:changed', h)
-    return () => ipcRenderer.off('index:changed', h)
-  },
+  onIndexChanged: subscribe('index:changed'),
   gitState: () => ipcRenderer.invoke('git:state'),
   redetectGit: () => ipcRenderer.invoke('git:redetect'),
   chooseGit: () => ipcRenderer.invoke('git:choose'),
-  onGitChanged: (cb) => {
-    const h = (_e: unknown, s: GitState) => cb(s)
-    ipcRenderer.on('git:changed', h)
-    return () => ipcRenderer.off('git:changed', h)
-  },
+  onGitChanged: subscribe('git:changed'),
 }
 
 contextBridge.exposeInMainWorld('synote', api)

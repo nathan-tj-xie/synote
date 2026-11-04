@@ -156,8 +156,8 @@ async function gitState(): Promise<GitState> {
 // 只用传入的实例，期间全局的 git 被替换或置空也不受影响
 async function queryGit(g: Git, version: string): Promise<GitState> {
   if (!(await g.isRepo())) return { status: 'notRepo', version }
-  const [id, changes, lfs] = await Promise.all([g.identity(), g.status(), g.lfsInstalled()])
-  return { status: 'ready', version, ...id, changes: changes.length, lfs }
+  const [identity, changes, lfs] = await Promise.all([g.identity(), g.status(), g.lfsInstalled()])
+  return { status: 'ready', version, ...identity, changes: changes.length, lfs }
 }
 
 // 状态由主进程推送（ADR 0005）：文件改动后防抖重查，渲染进程的 git store 据此更新
