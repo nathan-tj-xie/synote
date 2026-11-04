@@ -54,6 +54,24 @@ async function launchWelcome(dirs: string[]) {
   return { app, win }
 }
 
+// 主进程下一次写 recent.json（切库 commit 的第一步）时停 ms 毫秒，把“commit 进行中”的窗口拉长；返回是否已停住
+async function holdRecentWrite(app: ElectronApplication, ms: number) {
+  await app.evaluate((_m, ms) => {
+    const fs = process.getBuiltinModule('node:fs').promises
+    const orig = fs.writeFile
+    const g = globalThis as { held?: boolean }
+    g.held = false
+    fs.writeFile = (async (file: string, ...rest: unknown[]) => {
+      if (String(file).endsWith('recent.json') && !g.held) {
+        g.held = true
+        await new Promise((r) => setTimeout(r, ms))
+      }
+      return (orig as (...a: unknown[]) => Promise<void>)(file, ...rest)
+    }) as typeof fs.writeFile
+  }, ms)
+  return () => app.evaluate(() => (globalThis as { held?: boolean }).held)
+}
+
 // 把主进程的 file:read / file:write 换成第一次（all 时每次）调用晚 ms 毫秒才回的版本，用来复现 IPC 乱序；
 // read 立即读盘、晚回结果（拿到的是旧快照），write 晚落盘。替换后不经过主进程的笔记库校验
 async function slowFirstCall(app: ElectronApplication, channel: 'file:read' | 'file:write', ms: number, all = false) {
@@ -471,6 +489,31 @@ test('late events from the old vault are ignored', async () => {
   await win.waitForTimeout(500)
   await expect(win.getByRole('treeitem', { name: 'B 的文件.md' })).toBeVisible()
   await expect(win.getByRole('treeitem', { name: 'A 的文件.md' })).toHaveCount(0)
+  await app.close()
+})
+
+// 交接期间（最终冲刷之后、commit 返回之前）编辑器只读：这时的输入不进编辑器，A 的正文完整
+test('the editor is read-only while the vault switch commits', async () => {
+  test.skip(process.platform === 'win32', 'mkfifo')
+  const base = mkdtempSync(path.join(tmpdir(), 'synote-e2e-'))
+  const a = blockedVault(base, 'a', { 'x.md': 'A 的 x' })
+  const b = blockedVault(base, 'b', { 'B 的文件.md': '' })
+  const { app, win } = await launchWelcome([a.dir, b.dir])
+  await a.release()
+  await win.getByRole('treeitem', { name: 'x.md' }).click()
+  const editor = win.locator('.cm-content')
+  await expect(editor).toHaveText('A 的 x')
+  await editor.click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('改')
+  const held = await holdRecentWrite(app, 1500)
+  await b.release()
+  await expect.poll(held).toBe(true) // commit 进行中
+  await win.keyboard.type('丢')
+  await expect(editor).toHaveText('A 的 x改')
+  expect(readFileSync(path.join(a.dir, 'x.md'), 'utf8')).toBe('A 的 x改')
+  await expect(win.getByRole('treeitem', { name: 'B 的文件.md' })).toBeVisible({ timeout: 5000 })
+  await expect(win.getByText('笔记库已切换')).toHaveCount(0)
   await app.close()
 })
 

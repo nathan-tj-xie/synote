@@ -1,6 +1,6 @@
 // CM6 薄封装：一个 EditorView，按标签页缓存 EditorState，不放进 React state（ADR 0005）
 import { markdown } from '@codemirror/lang-markdown'
-import { EditorSelection, EditorState, Transaction } from '@codemirror/state'
+import { Compartment, EditorSelection, EditorState, Transaction } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { vscodeKeymap } from '@replit/codemirror-vscode-keymap'
 import { minimalSetup } from 'codemirror'
@@ -20,6 +20,10 @@ let shown: string | null = null // 视图里实际是哪个文件；读文件期
 let seq = 0
 // 库代次：换库时加一。保存回执只在发起保存的库代次仍是当前时才清 dirty，不按路径误清新库的同名文件
 let vaultGen = 0
+// 切库交接期间（最终冲刷到 commit 返回）编辑器只读：这段时间的输入没有库可写
+const lock = new Compartment()
+let locked = false
+const editable = () => lock.of(EditorView.editable.of(!locked))
 // 搜索结果点击后要定位的位置，文件加载完再应用
 let target: { path: string; line: number; col: number; len: number } | null = null
 
@@ -40,6 +44,7 @@ function makeState(doc: string): EditorState {
     extensions: [
       keymap.of(vscodeKeymap), // 键位贴近 Monaco（ADR 0003），放在前面优先于 minimalSetup 的默认键位
       minimalSetup,
+      editable(),
       EditorState.allowMultipleSelections.of(true), // ⌘D、⌥ 点击等多光标键位需要
       markdown(),
       EditorView.lineWrapping,
@@ -92,6 +97,7 @@ function setView(path: string | null, s: EditorState) {
   if (shown) states.set(shown, view!.state)
   if (path) states.delete(path)
   view!.setState(s)
+  if (locked) view!.dispatch({ effects: lock.reconfigure(EditorView.editable.of(false)) }) // 缓存里的状态建于加锁之前
   shown = path
 }
 
@@ -156,7 +162,12 @@ export function reveal(path: string, line: number, col: number, len: number) {
   useEditor.getState().open(path)
 }
 
-export const saveCurrent = () => shown && flush(shown)
+export const saveCurrent = () => !locked && shown && flush(shown)
+
+export function setLocked(on: boolean) {
+  locked = on
+  view?.dispatch({ effects: lock.reconfigure(EditorView.editable.of(!on)) })
+}
 
 export function forget(path: string) {
   if (timers.has(path)) flush(path) // flush 同步取走内容，之后才能清掉缓存
