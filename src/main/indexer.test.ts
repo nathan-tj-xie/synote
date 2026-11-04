@@ -126,6 +126,16 @@ describe('Indexer', () => {
     expect(idx.backlinks('b.md')).toEqual(['a.md'])
   })
 
+  // FSEvents 流启动前的改动收不到事件：watch() 之后补一次对账兜底
+  test('changes in the watcher startup window are caught by a follow-up reconcile', async () => {
+    const { idx, write } = setup({ 'a.md': '', 'b.md': '' })
+    idx.watch()
+    await idx.reconcile()
+    idx['watcher']!.close() // 模拟启动窗口里事件全丢
+    write('a.md', '[b](b.md)')
+    await vi.waitFor(() => expect(idx.backlinks('b.md')).toEqual(['a.md']), { timeout: 3000, interval: 100 })
+  })
+
   // 验收：外部编辑器改动、删除、改名文件后索引正确更新（走真实 fs.watch）
   test('external edit, delete and rename via watcher', async () => {
     const { root, idx, write, onChange } = setup({ 'a.md': '', 'b.md': '', 'dir/c.md': '[b](../b.md) 旧内容' })

@@ -121,6 +121,7 @@ export class Indexer {
   private flushing: Promise<void> | null = null
   private queue: Promise<unknown> = Promise.resolve()
   private watcher: FSWatcher | null = null
+  private settle: NodeJS.Timeout | undefined
   private closed = false
 
   constructor(
@@ -301,10 +302,14 @@ export class Indexer {
       clearTimeout(timer)
       timer = setTimeout(() => !this.closed && this.reconcile().catch((e) => console.error('[index] reconcile failed', e)), 150)
     })
+    // macOS 上 fs.watch 返回时 FSEvents 流还没启动（libuv 在另一个线程里异步创建），这段时间的改动没有事件；
+    // 等流起来后再对账一次兜底。shortcut: 固定等 1 s（加压实测 300 ms 内已就绪），有就绪信号的 watcher 时改掉
+    this.settle = setTimeout(() => !this.closed && this.reconcile().catch((e) => console.error('[index] reconcile failed', e)), 1000)
   }
 
   close(): void {
     this.closed = true
+    clearTimeout(this.settle)
     this.watcher?.close()
     this.db.close()
   }
