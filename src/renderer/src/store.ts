@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { VaultInfo } from '../../shared/api'
+import type { GitState, VaultInfo } from '../../shared/api'
 
 type State = {
   vault: VaultInfo | null
@@ -8,7 +8,7 @@ type State = {
   dirty: Record<string, true>
   error: string | null
   palette: 'files' | 'commands' | null
-  sidebar: 'files' | 'search'
+  sidebar: 'files' | 'search' | 'git'
   setVault: (v: VaultInfo | null) => void
   open: (path: string) => void
   close: (path: string) => void
@@ -51,3 +51,6 @@ export const useStore = create<State>((set) => ({
   setPalette: (palette) => set({ palette }),
   setSidebar: (sidebar) => set({ sidebar }),
 }))
+
+// git 领域的 store（ADR 0005）：主进程状态的只读镜像，由 git:changed 推送更新
+export const useGit = create<{ state: GitState | null }>(() => ({ state: null }))

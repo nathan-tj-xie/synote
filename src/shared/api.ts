@@ -12,6 +12,25 @@ export type SearchHit = { path: string; matches: SearchMatch[] }
 // 渲染进程可调用的索引查询（主进程按这个白名单转发给索引 utility process）
 export const indexMethods = ['backlinks', 'search', 'attachmentRefs', 'orphans', 'rebuild'] as const
 
+// git 错误分类（S12），S13 起按分类给出引导
+export type GitErrorKind =
+  | 'noCredentials'
+  | 'nonFastForward'
+  | 'noIdentity'
+  | 'conflict'
+  | 'lfsMissing'
+  | 'network'
+  | 'notRepo'
+  | 'unknown'
+
+// 当前笔记库的 git 状态；missing / tooOld / notRepo 时按非 git 目录模式运行
+export type GitState =
+  | { status: 'missing' }
+  | { status: 'tooOld'; bin: string; version: string }
+  | { status: 'notRepo'; version: string }
+  // name / email 有一个为 null 就禁用提交；lfs：本机是否装了 git-lfs（供 S17）
+  | { status: 'ready'; version: string; name: string | null; email: string | null; changes: number; lfs: boolean }
+
 export type ItemMenuAction = Extract<CommandId, 'newNote' | 'trash'> | null
 
 export interface SynoteApi {
@@ -34,6 +53,13 @@ export interface SynoteApi {
   rebuildIndex(): Promise<void>
   // 索引更新后推送变化的路径；反链、引用计数、孤儿列表据此重新查询
   onIndexChanged(cb: (paths: string[]) => void): () => void
+  // git（S12）
+  gitState(): Promise<GitState>
+  redetectGit(): Promise<GitState>
+  // 弹出文件选择框指定 git 可执行文件，取消时为 null
+  chooseGit(): Promise<GitState | null>
+  // 工作区或 .git 有变化后推送最新状态
+  onGitChanged(cb: (s: GitState) => void): () => void
 }
 
 declare global {
