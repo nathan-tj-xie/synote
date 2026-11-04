@@ -40,3 +40,36 @@ test('open vault, edit, save, reload external change', async () => {
   await expect(win.getByRole('alert')).toHaveCount(0)
   await app.close()
 })
+
+// 快速切换与命令面板：快捷键都走命令注册表
+test('quick open and command palette', async () => {
+  const base = mkdtempSync(path.join(tmpdir(), 'synote-e2e-'))
+  const vault = path.join(base, 'vault')
+  const userData = path.join(base, 'user-data')
+  mkdirSync(path.join(vault, '项目', '深层'), { recursive: true })
+  mkdirSync(userData)
+  writeFileSync(path.join(vault, '项目', '深层', '会议纪要.md'), '# 会议纪要\n')
+  writeFileSync(path.join(vault, '随手记.md'), '')
+  writeFileSync(path.join(userData, 'recent.json'), JSON.stringify([vault]))
+
+  const app = await electron.launch({ args: ['.'], env: { ...process.env, SYNOTE_USER_DATA: userData } })
+  const win = await app.firstWindow()
+  await expect(win.getByRole('tree')).toBeVisible()
+
+  await win.keyboard.press('ControlOrMeta+p')
+  const input = win.getByRole('combobox', { name: '快速切换' })
+  await input.fill('会议')
+  await expect(win.getByRole('option')).toHaveCount(1)
+  await input.press('Enter')
+  await expect(input).toHaveCount(0)
+  await expect(win.locator('.cm-content')).toContainText('# 会议纪要')
+
+  await win.keyboard.press('ControlOrMeta+Shift+p')
+  const cmd = win.getByRole('combobox', { name: '命令面板' })
+  await cmd.fill('新建')
+  await cmd.press('Enter')
+  await expect(win.getByRole('tab', { name: '未命名' })).toBeVisible()
+
+  await expect(win.getByRole('alert')).toHaveCount(0)
+  await app.close()
+})

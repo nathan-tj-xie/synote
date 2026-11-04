@@ -4,7 +4,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { useEffect, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import s from './FileTree.module.css'
-import { forget } from './editor'
+import { handlers, run } from './commands'
 import { useStore } from './store'
 import { baseName, buildChildren, ROOT } from './tree'
 
@@ -39,28 +39,16 @@ export function FileTree() {
     requestAnimationFrame(() => window.synote.reportReady())
   }, [])
 
-  const newNote = async (dir: string) => {
-    try {
-      useStore.getState().open(await window.synote.createNote(dir))
-    } catch (e) {
-      useStore.getState().setError(String(e))
-    }
-  }
-
   const onMenu = async (path: string, dir: boolean) => {
     const action = await window.synote.showItemMenu(path, dir)
-    if (action === 'newNote') newNote(path)
-    if (action === 'trash') {
-      await window.synote.trash(path)
-      for (const tab of useStore.getState().tabs) if (tab === path || tab.startsWith(`${path}/`)) forget(tab)
-    }
+    if (action) handlers[action].run(path)
   }
 
   return (
     <div className={s.wrap}>
       <div className={s.header}>
         <span className={s.title}>{vault.name}</span>
-        <button className={s.icon} title={t('newNote')} aria-label={t('newNote')} onClick={() => newNote('')}>
+        <button className={s.icon} title={t('newNote')} aria-label={t('newNote')} onClick={() => run('newNote')}>
           ＋
         </button>
       </div>

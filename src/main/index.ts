@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 import { existsSync, promises as fs, watch, type FSWatcher } from 'node:fs'
 import path from 'node:path'
 import { i18next, i18nOptions } from '../shared/i18n'
+import { commands } from '../shared/commands'
 import type { ItemMenuAction, VaultInfo } from '../shared/api'
 import { isHidden, resolveInVault, scanEntries, toPosix, uniqueNoteName } from './vault'
 
@@ -77,10 +78,8 @@ ipcMain.handle(
   (_e, _rel: string, dir: boolean) =>
     new Promise<ItemMenuAction>((resolve) => {
       let picked: ItemMenuAction = null
-      const items = [
-        ...(dir ? [{ label: t('newNote'), click: () => (picked = 'newNote') }] : []),
-        { label: t('trash'), click: () => (picked = 'trash') },
-      ]
+      const ids: NonNullable<ItemMenuAction>[] = dir ? ['newNote', 'trash'] : ['trash']
+      const items = ids.map((id) => ({ label: t(commands[id].title), click: () => (picked = id) }))
       Menu.buildFromTemplate(items).popup({ window: win!, callback: () => resolve(picked) })
     }),
 )

@@ -2,9 +2,11 @@ import { useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Group, Panel, Separator } from 'react-resizable-panels'
 import s from './App.module.css'
+import { installShortcuts } from './commands'
 import { EditorPane } from './EditorPane'
 import { reloadIfClean } from './editor'
 import { FileTree } from './FileTree'
+import { Palette } from './Palette'
 import { useStore } from './store'
 import { Welcome } from './Welcome'
 
@@ -22,6 +24,7 @@ export function App() {
       }),
     [],
   )
+  useEffect(installShortcuts, [])
 
   if (!vault) return <Welcome />
   return (
@@ -40,6 +43,7 @@ export function App() {
           <EditorPane />
         </Panel>
       </Group>
+      <Palette />
       {error && (
         <div className={s.error} role="alert" onClick={() => useStore.getState().setError(null)}>
           {error}
