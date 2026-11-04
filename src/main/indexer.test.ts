@@ -21,6 +21,12 @@ describe('extractLinks', () => {
       ['note:b/c d.md', 'att:attachments/p.png', 'att:attachments/q.png', 'wiki:同名', 'note:dir/sub.md', 'wiki:x', 'note:n/r.md'].sort(),
     )
   })
+
+  test('reserved characters are percent-decoded, <img src> may contain spaces', () => {
+    const text = '[b](b%23x.md#h) [q](q%3F.md?v=1) <img src="attachments/a b.png"> <img src=\'../attachments/c%20d.png\'>'
+    const links = extractLinks('note.md', text).map((l) => `${l.kind}:${l.dst}`)
+    expect(links.sort()).toEqual(['note:b#x.md', 'note:q?.md', 'att:attachments/a b.png', 'att:attachments/c d.png'].sort())
+  })
 })
 
 describe('findMatches', () => {
@@ -85,6 +91,20 @@ describe('Indexer', () => {
     expect(idx.search('全文索引').map((h) => h.path)).toEqual(['a.md'])
     await idx.idle()
     expect(idx.search('全文索引').map((h) => h.path)).toEqual(['a.md'])
+  })
+
+  test('in-memory fallback hits are ranked with indexed hits, not cut off', async () => {
+    const files = Object.fromEntries(Array.from({ length: 51 }, (_, i) => [`n${String(i).padStart(2, '0')}.md`, '关键词']))
+    const { idx } = setup(files)
+    await idx.reconcile()
+    await idx.idle()
+    // 模拟分批写全文的批间状态：n50 的新正文还在内存里，全文索引里是旧的（首批在 reconcile 返回前就同步写完了，没法靠时序构造）
+    idx['pending'].set('n50.md', '关键词 关键词 关键词')
+    for (const q of ['关键词', '关键']) {
+      const hits = idx.search(q)
+      expect(hits).toHaveLength(50)
+      expect(hits[0].path).toBe('n50.md')
+    }
   })
 
   test('reopening an existing index only re-reads changed files', async () => {

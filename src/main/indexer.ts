@@ -16,9 +16,10 @@ type Stat = { mtime: number; size: number }
 const isNote = (rel: string) => rel.endsWith('.md') && !isHidden(rel)
 const isAtt = (rel: string) => rel.startsWith('attachments/') && !rel.split('/').some((p) => p.startsWith('.'))
 const noteName = (rel: string) => (isNote(rel) ? path.posix.basename(rel, '.md') : null)
+// 按路径组件解码：decodeURI 不解码 %23、%3F 等保留字符，而文件名里可以有 # 和 ?
 const decode = (s: string) => {
   try {
-    return decodeURI(s)
+    return decodeURIComponent(s)
   } catch {
     return s
   }
@@ -52,7 +53,16 @@ export function extractLinks(src: string, text: string): Link[] {
     if (target.includes('/')) add({ dst: path.posix.normalize(target.endsWith('.md') ? target : `${target}.md`), kind: 'note' })
     else add({ dst: target.replace(/\.md$/, ''), kind: 'wiki' })
   }
-  for (const m of text.matchAll(/attachments\/([^\s)"'<>\]|`]+)/g)) add({ dst: `attachments/${decode(m[1])}`, kind: 'att' })
+  // <img src="..."> 有引号界定，路径里可以有空格；先认出来，下面的通用规则跳过这些范围
+  const quoted: [number, number][] = []
+  for (const m of text.matchAll(/\bsrc\s*=\s*(["'])[^"'\n]*?attachments\/([^"'\n]+)\1/gi)) {
+    quoted.push([m.index, m.index + m[0].length])
+    add({ dst: `attachments/${decode(m[2])}`, kind: 'att' })
+  }
+  for (const m of text.matchAll(/attachments\/([^\s)"'<>\]|`]+)/g)) {
+    if (quoted.some(([a, b]) => m.index >= a && m.index < b)) continue
+    add({ dst: `attachments/${decode(m[1])}`, kind: 'att' })
+  }
   return [...out.values()]
 }
 
@@ -265,10 +275,13 @@ export class Indexer {
     if (!fts) params.q = q
     const rows = this.db.prepare(sql).all(params) as { path: string; body: string }[]
     const hits = rows.filter((r) => !this.pending.has(r.path)).map((r) => ({ path: r.path, matches: findMatches(r.body, q) }))
+    const before = hits.length
     for (const [p, body] of this.pending) {
       const matches = findMatches(body, q)
       if (matches.length) hits.push({ path: p, matches })
     }
+    // 有内存兜底的结果时没法和 BM25 比，统一由应用层按命中次数排（同 LIKE 分支），再截断
+    if (hits.length > before) hits.sort((a, b) => b.matches.length - a.matches.length || (a.path < b.path ? -1 : 1))
     return hits.slice(0, limit)
   }
 
