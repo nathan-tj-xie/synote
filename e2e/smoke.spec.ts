@@ -271,3 +271,17 @@ test('git view: missing identity and missing git', async () => {
   await expect(win.getByRole('button', { name: '手动指定 git 路径…' })).toBeVisible()
   await app.close()
 })
+
+// CM6 用 VSCode 键位表（ADR 0003）：⌘D 逐个选中相同的词
+test('editor uses VSCode keymap', async () => {
+  const { app, win, vault } = await launch({ 'a.md': 'ab ab' })
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await win.locator('.cm-content').click()
+  await win.keyboard.press('ControlOrMeta+Home')
+  await win.keyboard.press('ControlOrMeta+d')
+  await win.keyboard.press('ControlOrMeta+d')
+  await win.keyboard.type('x')
+  await expect(win.locator('.cm-content')).toHaveText('x x')
+  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('x x')
+  await app.close()
+})

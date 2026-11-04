@@ -1,7 +1,8 @@
 // CM6 薄封装：一个 EditorView，按标签页缓存 EditorState，不放进 React state（ADR 0005）
 import { markdown } from '@codemirror/lang-markdown'
 import { EditorSelection, EditorState, Transaction } from '@codemirror/state'
-import { EditorView } from '@codemirror/view'
+import { EditorView, keymap } from '@codemirror/view'
+import { vscodeKeymap } from '@replit/codemirror-vscode-keymap'
 import { minimalSetup } from 'codemirror'
 import { useStore } from './store'
 
@@ -30,7 +31,9 @@ function makeState(doc: string): EditorState {
   return EditorState.create({
     doc,
     extensions: [
+      keymap.of(vscodeKeymap), // 键位贴近 Monaco（ADR 0003），放在前面优先于 minimalSetup 的默认键位
       minimalSetup,
+      EditorState.allowMultipleSelections.of(true), // ⌘D、⌥ 点击等多光标键位需要
       markdown(),
       EditorView.lineWrapping,
       theme,
