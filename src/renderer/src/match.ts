@@ -27,11 +27,12 @@ export type Hit = { id: string; text: string; indexes: readonly number[] }
 
 export type PathIndex = { paths: readonly string[]; snap: Snapshot }
 
-// 建索引并预热：fuzzysort 首次查询要完成 snapshot 并触发 JIT，冷启动约 30 ms，放在空闲时做掉
+// 建索引并预热：fuzzysort 首次查询要完成 snapshot 并触发 JIT，冷启动约 30–80 ms，放在空闲时做掉
 export function indexPaths(paths: readonly string[]): PathIndex {
   const snap = fuzzysort.snapshot(paths)
-  const sample = paths[0] ?? ''
-  for (let i = 1; i <= Math.min(3, sample.length); i++) fuzzysort.go(sample.slice(0, i), snap, { limit: 200 })
+  const s = paths[0]
+  // 单字、连续、非连续、带空格的多词各走一条代码路径，都要预热到
+  if (s) for (let r = 0; r < 3; r++) for (const w of [s[0], s.slice(0, 2), s[0] + s.at(-1), `${s[0]} ${s.at(-1)}`]) fuzzysort.go(w, snap, { limit: 200 })
   return { paths, snap }
 }
 
