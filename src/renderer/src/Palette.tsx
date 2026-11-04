@@ -8,13 +8,13 @@ import { commands, type CommandId } from '../../shared/commands'
 import { available, ids, run } from './commands'
 import s from './Palette.module.css'
 import { formatKey, indexPaths, searchPaths, type Hit, type PathIndex } from './match'
-import { useStore } from './store'
+import { useEditor, useUi, useVault } from './store'
 
 const ROW = 28
 
 export function Palette() {
-  const mode = useStore((st) => st.palette)
-  const entries = useStore((st) => st.vault?.entries)
+  const mode = useUi((st) => st.palette)
+  const entries = useVault((st) => st.vault?.entries)
   const index = useRef<{ entries: typeof entries; index: PathIndex } | null>(null)
   const getIndex = () => {
     if (index.current?.entries !== entries) {
@@ -29,7 +29,7 @@ export function Palette() {
     return () => cancelIdleCallback(id)
   }, [entries])
 
-  const close = () => useStore.getState().setPalette(null)
+  const close = () => useUi.getState().setPalette(null)
   return (
     <Dialog.Root open={mode !== null} onOpenChange={(o) => !o && close()}>
       <Dialog.Portal>
@@ -49,8 +49,8 @@ function Body({ mode, getIndex, close }: { mode: 'files' | 'commands'; getIndex:
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // 订阅可用条件读到的状态：面板打开期间关掉活动文件等，命令列表跟着变
-  const vault = useStore((st) => st.vault)
-  const active = useStore((st) => st.active)
+  const vault = useVault((st) => st.vault)
+  const active = useEditor((st) => st.active)
   const cmds = useMemo(
     () => ids.filter((id) => id !== 'commandPalette' && available(id)).map((id) => ({ id, title: t(commands[id].title) })),
     [t, vault, active],
@@ -68,7 +68,7 @@ function Body({ mode, getIndex, close }: { mode: 'files' | 'commands'; getIndex:
   const pick = (hit: Hit | undefined) => {
     if (!hit) return
     close()
-    if (mode === 'files') useStore.getState().open(hit.id)
+    if (mode === 'files') useEditor.getState().open(hit.id)
     else run(hit.id as CommandId)
   }
 

@@ -3,14 +3,14 @@ import { useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { GitState } from '../../shared/api'
 import s from './GitView.module.css'
-import { useGit, useStore } from './store'
+import { useGit, useUi, useVault } from './store'
 
 export function GitView() {
   const { t } = useTranslation()
-  const root = useStore((st) => st.vault?.root)
+  const root = useVault((st) => st.vault?.root)
   const state = useGit((st) => st.state)
   const load = (p: Promise<GitState | null>) =>
-    p.then((v) => v && useGit.setState({ state: v })).catch((e) => useStore.getState().setError(String(e)))
+    p.then((v) => v && useGit.setState({ state: v })).catch((e) => useUi.getState().setError(String(e)))
 
   // 打开笔记库时查一次，之后靠主进程推送
   useEffect(() => void (root && load(window.synote.gitState())), [root])

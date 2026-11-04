@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import s from './Welcome.module.css'
-import { useStore } from './store'
+import { useUi, useVault } from './store'
 
 export function Welcome() {
   const { t } = useTranslation()
   const [recent, setRecent] = useState<string[] | null>(null)
-  const { setVault, setError } = useStore.getState()
+  const { setVault } = useVault.getState()
+  const { setError } = useUi.getState()
 
   const open = (p: Promise<Awaited<ReturnType<typeof window.synote.openVault>> | null>) =>
     p.then((v) => v && setVault(v)).catch((e) => setError(String(e)))

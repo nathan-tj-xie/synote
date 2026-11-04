@@ -2,7 +2,7 @@
 import { commands, type CommandId } from '../../shared/commands'
 import { forget, saveCurrent } from './editor'
 import { matchKey } from './match'
-import { useStore } from './store'
+import { useEditor, useUi, useVault } from './store'
 
 type Handler = {
   when?: () => boolean
@@ -10,40 +10,42 @@ type Handler = {
   run: (arg?: string) => unknown
 }
 
-const st = useStore.getState
-const fail = (e: unknown) => st().setError(String(e))
+const vault = () => !!useVault.getState().vault
+const ed = useEditor.getState
+const ui = useUi.getState
+const fail = (e: unknown) => ui().setError(String(e))
 
 export const handlers: Record<CommandId, Handler> = {
-  quickOpen: { when: () => !!st().vault, run: () => st().setPalette('files') },
-  commandPalette: { when: () => !!st().vault, run: () => st().setPalette('commands') },
-  save: { when: () => !!st().active, run: saveCurrent },
+  quickOpen: { when: vault, run: () => ui().setPalette('files') },
+  commandPalette: { when: vault, run: () => ui().setPalette('commands') },
+  save: { when: () => !!ed().active, run: saveCurrent },
   search: {
-    when: () => !!st().vault,
+    when: vault,
     run: () => {
-      st().setSidebar('search')
+      ui().setSidebar('search')
       requestAnimationFrame(() => document.getElementById('search-input')?.focus())
     },
   },
   newNote: {
-    when: () => !!st().vault,
+    when: vault,
     run: (dir = '') =>
       window.synote
         .createNote(dir)
-        .then((p) => st().open(p))
+        .then((p) => ed().open(p))
         .catch(fail),
   },
   trash: {
-    when: () => !!st().active,
-    run: async (path = st().active!) => {
+    when: () => !!ed().active,
+    run: async (path = ed().active!) => {
       try {
         await window.synote.trash(path)
       } catch (e) {
         return fail(e)
       }
-      for (const tab of st().tabs) if (tab === path || tab.startsWith(`${path}/`)) forget(tab)
+      for (const tab of ed().tabs) if (tab === path || tab.startsWith(`${path}/`)) forget(tab)
     },
   },
-  rebuildIndex: { when: () => !!st().vault, run: () => window.synote.rebuildIndex().catch(fail) },
+  rebuildIndex: { when: vault, run: () => window.synote.rebuildIndex().catch(fail) },
 }
 
 export const ids = Object.keys(commands) as CommandId[]

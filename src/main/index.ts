@@ -5,6 +5,7 @@ import path from 'node:path'
 import { i18next, i18nOptions } from '../shared/i18n'
 import { commands } from '../shared/commands'
 import { indexMethods, type GitState, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
+import { tokens } from '../shared/tokens'
 import { exec, findGit, Git, type GitDetectionResult } from './git'
 import { isHidden, resolveInVault, scanEntries, toPosix, uniqueNoteName } from './vault'
 
@@ -246,7 +247,7 @@ function createWindow() {
   win = new BrowserWindow({
     width: 1200,
     height: 800,
-    backgroundColor: '#1e1f22',
+    backgroundColor: tokens.bg,
     title: t('appName'),
     webPreferences: { preload: path.join(__dirname, '../preload/index.js'), sandbox: true, contextIsolation: true },
   })

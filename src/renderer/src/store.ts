@@ -1,44 +1,56 @@
+// 按领域拆 store（ADR 0005）：vault / editor / ui / git
 import { create } from 'zustand'
 import type { GitState, VaultInfo } from '../../shared/api'
 
-type State = {
+type VaultState = {
   vault: VaultInfo | null
+  setVault: (v: VaultInfo | null) => void
+}
+
+type EditorState = {
   tabs: string[]
   active: string | null
   dirty: Record<string, true>
+  open: (path: string) => void
+  close: (path: string) => void
+  // 只保留仍存在的文件对应的标签页
+  keep: (alive: Set<string>) => void
+  setDirty: (path: string, dirty: boolean) => void
+}
+
+type UiState = {
   error: string | null
   palette: 'files' | 'commands' | null
   sidebar: 'files' | 'search' | 'git'
-  setVault: (v: VaultInfo | null) => void
-  open: (path: string) => void
-  close: (path: string) => void
-  setDirty: (path: string, dirty: boolean) => void
   setError: (e: string | null) => void
-  setPalette: (p: State['palette']) => void
-  setSidebar: (v: State['sidebar']) => void
+  setPalette: (p: UiState['palette']) => void
+  setSidebar: (v: UiState['sidebar']) => void
 }
 
-export const useStore = create<State>((set) => ({
+export const useVault = create<VaultState>((set) => ({
   vault: null,
+  setVault: (vault) => {
+    set({ vault })
+    // 已不存在的文件对应的标签页自动关闭
+    useEditor.getState().keep(new Set(vault?.entries.map((e) => e.path)))
+  },
+}))
+
+export const useEditor = create<EditorState>((set) => ({
   tabs: [],
   active: null,
   dirty: {},
-  error: null,
-  palette: null,
-  sidebar: 'files',
-  setVault: (vault) =>
-    set((s) => {
-      // 已不存在的文件对应的标签页自动关闭
-      const alive = new Set(vault?.entries.map((e) => e.path))
-      const tabs = s.tabs.filter((t) => alive.has(t))
-      return { vault, tabs, active: s.active && alive.has(s.active) ? s.active : (tabs.at(-1) ?? null) }
-    }),
   open: (path) => set((s) => ({ tabs: s.tabs.includes(path) ? s.tabs : [...s.tabs, path], active: path })),
   close: (path) =>
     set((s) => {
       const i = s.tabs.indexOf(path)
       const tabs = s.tabs.filter((t) => t !== path)
       return { tabs, active: s.active === path ? (tabs[Math.min(i, tabs.length - 1)] ?? null) : s.active }
+    }),
+  keep: (alive) =>
+    set((s) => {
+      const tabs = s.tabs.filter((t) => alive.has(t))
+      return { tabs, active: s.active && alive.has(s.active) ? s.active : (tabs.at(-1) ?? null) }
     }),
   setDirty: (path, dirty) =>
     set((s) => {
@@ -47,6 +59,12 @@ export const useStore = create<State>((set) => ({
       else delete d[path]
       return { dirty: d }
     }),
+}))
+
+export const useUi = create<UiState>((set) => ({
+  error: null,
+  palette: null,
+  sidebar: 'files',
   setError: (error) => set({ error }),
   setPalette: (palette) => set({ palette }),
   setSidebar: (sidebar) => set({ sidebar }),

@@ -4,7 +4,7 @@ import { EditorSelection, EditorState, Transaction } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { vscodeKeymap } from '@replit/codemirror-vscode-keymap'
 import { minimalSetup } from 'codemirror'
-import { useStore } from './store'
+import { useEditor, useUi } from './store'
 
 const states = new Map<string, EditorState>()
 const timers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -49,7 +49,7 @@ function docOf(path: string): string | undefined {
 }
 
 function scheduleSave(path: string) {
-  useStore.getState().setDirty(path, true)
+  useEditor.getState().setDirty(path, true)
   clearTimeout(timers.get(path))
   timers.set(path, setTimeout(() => flush(path), 500))
 }
@@ -64,9 +64,9 @@ async function flush(path: string) {
   try {
     await write
     const now = docOf(path)
-    if (now === undefined || now === text) useStore.getState().setDirty(path, false) // undefined：标签页已关
+    if (now === undefined || now === text) useEditor.getState().setDirty(path, false) // undefined：标签页已关
   } catch (e) {
-    useStore.getState().setError(String(e))
+    useUi.getState().setError(String(e))
   }
 }
 
@@ -122,7 +122,7 @@ export function reveal(path: string, line: number, col: number, len: number) {
     applyTarget()
     view?.focus()
   }
-  useStore.getState().open(path)
+  useEditor.getState().open(path)
 }
 
 export const saveCurrent = () => shown && flush(shown)
@@ -137,7 +137,7 @@ export function forget(path: string) {
 // 外部改动：没有未保存改动的已打开文件直接重新加载
 export async function reloadIfClean(path: string) {
   if (!states.has(path) && path !== shown) return
-  if (useStore.getState().dirty[path]) return
+  if (useEditor.getState().dirty[path]) return
   const before = docOf(path)
   let text: string
   try {
@@ -146,9 +146,9 @@ export async function reloadIfClean(path: string) {
     return // 文件已删除，标签页由 setVault 关闭
   }
   // 读文件期间有本地输入（不论是否已存盘），或标签页已关：以本地为准，读到的可能是旧快照
-  if (docOf(path) !== before || useStore.getState().dirty[path]) return
+  if (docOf(path) !== before || useEditor.getState().dirty[path]) return
   if (text === before) return // 自己写入触发的事件
   if (path === shown && view) view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text }, annotations: Transaction.remote.of(true) })
   else states.set(path, makeState(text))
-  useStore.getState().setDirty(path, false)
+  useEditor.getState().setDirty(path, false)
 }

@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next'
 import type { SearchHit, SearchMatch } from '../../shared/api'
 import { reveal } from './editor'
 import s from './Search.module.css'
-import { useStore } from './store'
+import { useEditor, useUi } from './store'
 import { baseName } from './tree'
 
 const ROW = 22
@@ -28,7 +28,7 @@ export function Search() {
     window.synote
       .search(q)
       .then((hits) => !stale && setRes({ q, hits }))
-      .catch((e) => !stale && useStore.getState().setError(String(e)))
+      .catch((e) => !stale && useUi.getState().setError(String(e)))
     return () => {
       stale = true
     }
@@ -65,7 +65,7 @@ export function Search() {
                 title={r.path}
                 className={`${s.row} ${m ? s.match : s.file}`}
                 style={{ transform: `translateY(${vr.start}px)` }}
-                onClick={() => (m ? reveal(r.path, m.line, m.col, len) : useStore.getState().open(r.path))}
+                onClick={() => (m ? reveal(r.path, m.line, m.col, len) : useEditor.getState().open(r.path))}
               >
                 {m ? (
                   <span className={s.text}>

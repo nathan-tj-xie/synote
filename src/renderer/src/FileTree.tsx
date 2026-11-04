@@ -5,15 +5,15 @@ import { useEffect, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import s from './FileTree.module.css'
 import { handlers, run } from './commands'
-import { useStore } from './store'
+import { useEditor, useVault } from './store'
 import { baseName, buildChildren, ROOT } from './tree'
 
 const ROW = 24
 
 export function FileTree() {
   const { t } = useTranslation()
-  const vault = useStore((st) => st.vault)!
-  const active = useStore((st) => st.active)
+  const vault = useVault((st) => st.vault)!
+  const active = useEditor((st) => st.active)
   const children = useMemo(() => buildChildren(vault.entries), [vault.entries])
   const dirs = useMemo(() => new Set(vault.entries.filter((e) => e.dir).map((e) => e.path)), [vault.entries])
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -25,7 +25,7 @@ export function FileTree() {
     isItemFolder: (item) => dirs.has(item.getId()),
     dataLoader: { getItem: (id) => id, getChildren: (id) => children.get(id) ?? [] },
     scrollToItem: (item) => virtualizer.current?.scrollToIndex(item.getItemMeta().index),
-    onPrimaryAction: (item) => !item.isFolder() && useStore.getState().open(item.getId()),
+    onPrimaryAction: (item) => !item.isFolder() && useEditor.getState().open(item.getId()),
     features: [syncDataLoaderFeature, selectionFeature, hotkeysCoreFeature],
   })
   useEffect(() => tree.rebuildTree(), [children])
