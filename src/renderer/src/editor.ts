@@ -23,7 +23,9 @@ let vaultGen = 0
 // 切库交接期间（最终冲刷到 commit 返回）编辑器只读：这段时间的输入没有库可写
 const lock = new Compartment()
 let locked = false
-const editable = () => lock.of(EditorView.editable.of(!locked))
+// editable 管输入和焦点，readOnly 挡住命令（复制行等）对正文的修改
+const lockExt = () => [EditorView.editable.of(!locked), EditorState.readOnly.of(locked)]
+const editable = () => lock.of(lockExt())
 // 搜索结果点击后要定位的位置，文件加载完再应用
 let target: { path: string; line: number; col: number; len: number } | null = null
 
@@ -97,7 +99,7 @@ function setView(path: string | null, s: EditorState) {
   if (shown) states.set(shown, view!.state)
   if (path) states.delete(path)
   view!.setState(s)
-  if (locked) view!.dispatch({ effects: lock.reconfigure(EditorView.editable.of(false)) }) // 缓存里的状态建于加锁之前
+  view!.dispatch({ effects: lock.reconfigure(lockExt()) }) // 缓存里的状态可能建于加锁或解锁之前：总按当前 locked 重配
   shown = path
 }
 
@@ -166,7 +168,7 @@ export const saveCurrent = () => !locked && shown && flush(shown)
 
 export function setLocked(on: boolean) {
   locked = on
-  view?.dispatch({ effects: lock.reconfigure(EditorView.editable.of(!on)) })
+  view?.dispatch({ effects: lock.reconfigure(lockExt()) })
 }
 
 export function forget(path: string) {

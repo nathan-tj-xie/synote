@@ -510,6 +510,8 @@ test('the editor is read-only while the vault switch commits', async () => {
   await b.release()
   await expect.poll(held).toBe(true) // commit 进行中
   await win.keyboard.type('丢')
+  await editor.click()
+  await win.keyboard.press('Shift+Alt+ArrowDown') // 复制当前行这类命令也不能改正文
   await expect(editor).toHaveText('A 的 x改')
   expect(readFileSync(path.join(a.dir, 'x.md'), 'utf8')).toBe('A 的 x改')
   await expect(win.getByRole('treeitem', { name: 'B 的文件.md' })).toBeVisible({ timeout: 5000 })
@@ -521,20 +523,26 @@ test('the editor is read-only while the vault switch commits', async () => {
 test('a failed commit keeps the current vault and makes the editor editable again', async () => {
   test.skip(process.platform === 'win32', 'mkfifo')
   const base = mkdtempSync(path.join(tmpdir(), 'synote-e2e-'))
-  const a = blockedVault(base, 'a', { 'x.md': 'A 的 x' })
+  const a = blockedVault(base, 'a', { 'x.md': 'A 的 x', 'y.md': 'A 的 y' })
   const b = blockedVault(base, 'b', { 'B 的文件.md': '' })
   const { app, win } = await launchWelcome([a.dir, b.dir])
   await a.release()
-  await win.getByRole('treeitem', { name: 'x.md' }).click()
   const editor = win.locator('.cm-content')
+  await win.getByRole('treeitem', { name: 'y.md' }).click()
+  await expect(editor).toHaveText('A 的 y')
+  await win.getByRole('treeitem', { name: 'x.md' }).click()
   await expect(editor).toHaveText('A 的 x')
   const held = await holdRecentWrite(app, 1500)
   await b.release()
   await expect.poll(held).toBe(true)
+  await clickTab(win, 'y') // 锁定期间切走：x 的锁定状态进了缓存
+  await expect(editor).toHaveText('A 的 y')
   rmSync(b.dir, { recursive: true })
   await expect(win.getByRole('alert')).toContainText('ENOENT', { timeout: 5000 })
   await expect(win.getByRole('treeitem', { name: 'x.md' })).toBeVisible()
 
+  await clickTab(win, 'x') // 切回来要能正常输入
+  await expect(editor).toHaveText('A 的 x')
   await editor.click()
   await win.keyboard.press('ControlOrMeta+End')
   await win.keyboard.type('又')
