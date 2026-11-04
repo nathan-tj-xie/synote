@@ -322,7 +322,8 @@ test('edits to the old note while the next one loads are kept', async () => {
   await editor.click()
   await win.keyboard.press('ControlOrMeta+End')
   await win.keyboard.type('后来')
-  await expect.poll(() => slow('done'), { timeout: 5000 }).toBe(1)
+  // a.md 自动保存后外部改动检查会再读一次 a.md（不延迟），完成数可能先到 2；等 b.md 显示出来才说明慢读已返回
+  await expect.poll(() => slow('done'), { timeout: 5000 }).toBeGreaterThanOrEqual(1)
   await expect(editor).toHaveText('B')
   await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('A后来')
   await clickTab(win, 'a')
