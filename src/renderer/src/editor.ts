@@ -7,9 +7,11 @@ import { useStore } from './store'
 
 const states = new Map<string, EditorState>()
 const timers = new Map<string, ReturnType<typeof setTimeout>>()
+// 每个文件的写盘串成一条链：后发的保存必须在先发的之后落盘，否则旧内容会覆盖新内容
+const writes = new Map<string, Promise<unknown>>()
 let view: EditorView | null = null
-let current: string | null = null
-let loading: string | null = null
+let current: string | null = null // 要显示的文件
+let shown: string | null = null // 视图里实际是哪个文件；读文件期间仍是上一个
 // 搜索结果点击后要定位的位置，文件加载完再应用
 let target: { path: string; line: number; col: number; len: number } | null = null
 
@@ -33,14 +35,14 @@ function makeState(doc: string): EditorState {
       EditorView.lineWrapping,
       theme,
       EditorView.updateListener.of((u) => {
-        if (u.docChanged && current && !u.transactions.some((t) => t.annotation(Transaction.remote))) scheduleSave(current)
+        if (u.docChanged && shown && !u.transactions.some((t) => t.annotation(Transaction.remote))) scheduleSave(shown)
       }),
     ],
   })
 }
 
 function docOf(path: string): string | undefined {
-  return (path === current ? view?.state : states.get(path))?.doc.toString()
+  return (path === shown ? view?.state : states.get(path))?.doc.toString()
 }
 
 function scheduleSave(path: string) {
@@ -54,12 +56,20 @@ async function flush(path: string) {
   timers.delete(path)
   const text = docOf(path)
   if (text === undefined) return
+  const write = (writes.get(path) ?? Promise.resolve()).then(() => window.synote.writeFile(path, text))
+  writes.set(path, write.catch(() => {}))
   try {
-    await window.synote.writeFile(path, text)
-    if (docOf(path) === text) useStore.getState().setDirty(path, false)
+    await write
+    const now = docOf(path)
+    if (now === undefined || now === text) useStore.getState().setDirty(path, false) // undefined：标签页已关
   } catch (e) {
     useStore.getState().setError(String(e))
   }
+}
+
+function setView(path: string | null, s: EditorState) {
+  view!.setState(s)
+  shown = path
 }
 
 export function mount(parent: HTMLElement) {
@@ -67,35 +77,32 @@ export function mount(parent: HTMLElement) {
   return () => {
     view?.destroy()
     view = null
-    current = null
+    current = shown = null
   }
 }
 
 export async function show(path: string | null) {
   if (!view || path === current) return
-  if (current) {
-    states.set(current, view.state)
-    if (timers.has(current)) flush(current)
+  if (shown) {
+    states.set(shown, view.state)
+    if (timers.has(shown)) flush(shown)
   }
   current = path
-  if (!path) return view.setState(makeState(''))
+  if (target?.path !== path) target = null // 切到别的文件：放弃还没应用的搜索定位
+  if (!path) return setView(null, makeState(''))
   let s = states.get(path)
   if (!s) {
-    loading = path
-    try {
-      s = makeState(await window.synote.readFile(path))
-    } finally {
-      loading = null
-    }
+    s = makeState(await window.synote.readFile(path))
+    if (shown === path || states.has(path)) return // 读文件期间另一次 show 已经读进来了，以先到的为准
     if (current !== path) return states.set(path, s) // 读文件期间又切走了
   }
-  view.setState(s)
+  setView(path, s)
   applyTarget()
   view.focus()
 }
 
 function applyTarget() {
-  if (!view || !target || target.path !== current) return
+  if (!view || !target || target.path !== shown) return
   const doc = view.state.doc
   // 索引可能比编辑器内容旧：行列越界时夹到文末
   const line = doc.line(Math.min(target.line, doc.lines))
@@ -108,33 +115,37 @@ function applyTarget() {
 // 打开文件并选中第 line 行 col 列起 len 个字符
 export function reveal(path: string, line: number, col: number, len: number) {
   target = { path, line, col, len }
-  if (path === current && loading !== path) {
+  if (path === shown) {
     applyTarget()
     view?.focus()
   }
   useStore.getState().open(path)
 }
 
-export const saveCurrent = () => current && flush(current)
+export const saveCurrent = () => shown && flush(shown)
 
 export function forget(path: string) {
   if (timers.has(path)) flush(path) // flush 同步取走内容，之后才能清掉缓存
   states.delete(path)
   if (path === current) current = null
+  if (path === shown) shown = null
 }
 
 // 外部改动：没有未保存改动的已打开文件直接重新加载
 export async function reloadIfClean(path: string) {
-  if (!states.has(path) && path !== current) return
+  if (!states.has(path) && path !== shown) return
   if (useStore.getState().dirty[path]) return
+  const before = docOf(path)
   let text: string
   try {
     text = await window.synote.readFile(path)
   } catch {
     return // 文件已删除，标签页由 setVault 关闭
   }
-  if (text === docOf(path)) return // 自己写入触发的事件
-  if (path === current && view) view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text }, annotations: Transaction.remote.of(true) })
+  // 读文件期间有本地输入（不论是否已存盘），或标签页已关：以本地为准，读到的可能是旧快照
+  if (docOf(path) !== before || useStore.getState().dirty[path]) return
+  if (text === before) return // 自己写入触发的事件
+  if (path === shown && view) view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text }, annotations: Transaction.remote.of(true) })
   else states.set(path, makeState(text))
   useStore.getState().setDirty(path, false)
 }

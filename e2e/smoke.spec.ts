@@ -1,23 +1,57 @@
-import { _electron as electron, expect, test } from '@playwright/test'
+import { _electron as electron, expect, test, type ElectronApplication } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-// 冒烟测试：打开笔记库 → 文件树 → 编辑并自动保存 → 外部改动重新加载
-test('open vault, edit, save, reload external change', async () => {
+// 临时笔记库 + 独立 userData，启动后等文件树出来
+async function launch(files: Record<string, string>) {
   const base = mkdtempSync(path.join(tmpdir(), 'synote-e2e-'))
   const vault = path.join(base, 'vault')
   const userData = path.join(base, 'user-data')
-  mkdirSync(path.join(vault, '日记'), { recursive: true })
-  mkdirSync(path.join(vault, 'attachments'), { recursive: true })
+  mkdirSync(vault)
   mkdirSync(userData)
-  writeFileSync(path.join(vault, '日记', '今天.md'), '# 今天\n')
-  writeFileSync(path.join(vault, 'attachments', 'a.png'), '')
+  for (const [p, c] of Object.entries(files)) {
+    mkdirSync(path.dirname(path.join(vault, p)), { recursive: true })
+    writeFileSync(path.join(vault, p), c)
+  }
   writeFileSync(path.join(userData, 'recent.json'), JSON.stringify([vault]))
-
   const app = await electron.launch({ args: ['.'], env: { ...process.env, SYNOTE_USER_DATA: userData } })
   const win = await app.firstWindow()
+  await expect(win.getByRole('tree')).toBeVisible()
+  return { app, win, vault }
+}
+
+// 把主进程的 file:read / file:write 换成第一次调用晚 ms 毫秒才回的版本，用来复现 IPC 乱序；
+// read 立即读盘、晚回结果（拿到的是旧快照），write 晚落盘
+async function slowFirstCall(app: ElectronApplication, vault: string, channel: 'file:read' | 'file:write', ms: number) {
+  await app.evaluate(
+    ({ ipcMain }, { vault, channel, ms }) => {
+      const fs = process.getBuiltinModule('node:fs/promises')
+      const g = globalThis as { slow?: { calls: number; done: number } }
+      const slow = (g.slow = { calls: 0, done: 0 })
+      const wait = () => new Promise((r) => setTimeout(r, slow.calls++ === 0 ? ms : 0))
+      ipcMain.removeHandler(channel)
+      ipcMain.handle(channel, async (_e, rel: string, content: string) => {
+        const file = `${vault}/${rel}`
+        try {
+          if (channel === 'file:write') return await wait().then(() => fs.writeFile(file, content))
+          const text = fs.readFile(file, 'utf8')
+          await wait()
+          return await text
+        } finally {
+          slow.done++
+        }
+      })
+    },
+    { vault, channel, ms },
+  )
+  return (key: 'calls' | 'done') => app.evaluate((_m, key) => (globalThis as { slow?: Record<string, number> }).slow![key], key)
+}
+
+// 冒烟测试：打开笔记库 → 文件树 → 编辑并自动保存 → 外部改动重新加载
+test('open vault, edit, save, reload external change', async () => {
+  const { app, win, vault } = await launch({ '日记/今天.md': '# 今天\n', 'attachments/a.png': '' })
 
   const tree = win.getByRole('tree')
   await expect(tree.getByRole('treeitem', { name: '日记' })).toBeVisible()
@@ -42,20 +76,46 @@ test('open vault, edit, save, reload external change', async () => {
   await app.close()
 })
 
+// 自动保存的旧内容晚于 ⌘S 的新内容落盘时，磁盘上不能是旧内容
+test('overlapping saves never leave stale content on disk', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '' })
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  const slow = await slowFirstCall(app, vault, 'file:write', 1500)
+
+  await win.locator('.cm-content').click()
+  await win.keyboard.type('旧')
+  await expect.poll(() => slow('calls')).toBe(1) // 自动保存“旧”已发出，还没落盘
+  await win.keyboard.type('新')
+  await win.keyboard.press('ControlOrMeta+s')
+  await expect.poll(() => slow('done'), { timeout: 5000 }).toBe(2)
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('旧新')
+  await expect(win.locator('[title="未保存"]')).toHaveCount(0)
+  await app.close()
+})
+
+// 外部改动触发重新加载，读文件期间用户输入了：保留用户输入，不用读到的旧快照覆盖
+test('external reload does not clobber input typed while reading', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '原文' })
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  const editor = win.locator('.cm-content')
+  await expect(editor).toHaveText('原文')
+  const slow = await slowFirstCall(app, vault, 'file:read', 1500)
+
+  writeFileSync(path.join(vault, 'a.md'), '外部')
+  await expect.poll(() => slow('calls'), { timeout: 5000 }).toBe(1)
+  await editor.click()
+  await win.keyboard.press('End')
+  await win.keyboard.type('输入')
+  await expect.poll(() => slow('done'), { timeout: 5000 }).toBe(1)
+  await win.waitForTimeout(500) // 给渲染进程处理读到的结果
+  await expect(editor).toHaveText('原文输入')
+  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('原文输入')
+  await app.close()
+})
+
 // 快速切换与命令面板：快捷键都走命令注册表
 test('quick open and command palette', async () => {
-  const base = mkdtempSync(path.join(tmpdir(), 'synote-e2e-'))
-  const vault = path.join(base, 'vault')
-  const userData = path.join(base, 'user-data')
-  mkdirSync(path.join(vault, '项目', '深层'), { recursive: true })
-  mkdirSync(userData)
-  writeFileSync(path.join(vault, '项目', '深层', '会议纪要.md'), '# 会议纪要\n')
-  writeFileSync(path.join(vault, '随手记.md'), '')
-  writeFileSync(path.join(userData, 'recent.json'), JSON.stringify([vault]))
-
-  const app = await electron.launch({ args: ['.'], env: { ...process.env, SYNOTE_USER_DATA: userData } })
-  const win = await app.firstWindow()
-  await expect(win.getByRole('tree')).toBeVisible()
+  const { app, win } = await launch({ '项目/深层/会议纪要.md': '# 会议纪要\n', '随手记.md': '' })
 
   await win.keyboard.press('ControlOrMeta+p')
   const input = win.getByRole('combobox', { name: '快速切换' })
@@ -77,19 +137,7 @@ test('quick open and command palette', async () => {
 
 // 索引服务：utility process 里的 node:sqlite 能用，反链 / 搜索 / 孤儿 / 重建索引走通
 test('index service in utility process', async () => {
-  const base = mkdtempSync(path.join(tmpdir(), 'synote-e2e-'))
-  const vault = path.join(base, 'vault')
-  const userData = path.join(base, 'user-data')
-  mkdirSync(path.join(vault, 'attachments'), { recursive: true })
-  mkdirSync(userData)
-  writeFileSync(path.join(vault, 'a.md'), '去看 [b](b.md)，实时预览')
-  writeFileSync(path.join(vault, 'b.md'), '')
-  writeFileSync(path.join(vault, 'attachments', 'orphan.png'), '')
-  writeFileSync(path.join(userData, 'recent.json'), JSON.stringify([vault]))
-
-  const app = await electron.launch({ args: ['.'], env: { ...process.env, SYNOTE_USER_DATA: userData } })
-  const win = await app.firstWindow()
-  await expect(win.getByRole('tree')).toBeVisible()
+  const { app, win, vault } = await launch({ 'a.md': '去看 [b](b.md)，实时预览', 'b.md': '', 'attachments/orphan.png': '' })
 
   await expect.poll(() => win.evaluate(() => window.synote.backlinks('b.md').catch(() => [])), { timeout: 5000 }).toEqual(['a.md'])
   await expect.poll(() => win.evaluate(() => window.synote.search('实时预览').then((h) => h.map((x) => x.path)))).toEqual(['a.md'])
@@ -107,18 +155,7 @@ test('index service in utility process', async () => {
 
 // 全文搜索（S7）：⌘⇧F 打开搜索视图 → 输入即搜 → 点击命中打开文件并选中命中处
 test('full-text search opens file at match', async () => {
-  const base = mkdtempSync(path.join(tmpdir(), 'synote-e2e-'))
-  const vault = path.join(base, 'vault')
-  const userData = path.join(base, 'user-data')
-  mkdirSync(vault, { recursive: true })
-  mkdirSync(userData)
-  writeFileSync(path.join(vault, 'a.md'), '# 标题\n\n第三行有实时预览\n')
-  writeFileSync(path.join(vault, 'b.md'), '无关内容')
-  writeFileSync(path.join(userData, 'recent.json'), JSON.stringify([vault]))
-
-  const app = await electron.launch({ args: ['.'], env: { ...process.env, SYNOTE_USER_DATA: userData } })
-  const win = await app.firstWindow()
-  await expect(win.getByRole('tree')).toBeVisible()
+  const { app, win } = await launch({ 'a.md': '# 标题\n\n第三行有实时预览\n', 'b.md': '无关内容' })
 
   await win.keyboard.press('ControlOrMeta+Shift+f')
   const input = win.getByRole('textbox', { name: '搜索' })
@@ -132,6 +169,45 @@ test('full-text search opens file at match', async () => {
   await expect(win.locator('.cm-content')).toContainText('第三行有实时预览')
   expect(await win.evaluate(() => getSelection()?.toString())).toBe('实时预览')
   await expect(win.getByRole('alert')).toHaveCount(0)
+  await app.close()
+})
+
+// 点了搜索结果、文件还没读完就切走：之后普通打开这个文件不再跳到旧的命中处
+test('abandoned search reveal does not apply on a later plain open', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '第一行\n第二行有目标\n', 'b.md': '别的' })
+  const slow = await slowFirstCall(app, vault, 'file:read', 3000)
+
+  await win.keyboard.press('ControlOrMeta+Shift+f')
+  await win.getByRole('textbox', { name: '搜索' }).fill('目标')
+  await win.getByRole('list', { name: '搜索' }).getByRole('listitem').filter({ hasText: '第二行有' }).click({ timeout: 5000 })
+  await win.keyboard.press('ControlOrMeta+p')
+  await win.getByRole('combobox', { name: '快速切换' }).fill('b.md')
+  await win.keyboard.press('Enter')
+  await expect(win.locator('.cm-content')).toHaveText('别的')
+  await expect.poll(() => slow('done'), { timeout: 5000 }).toBe(2) // b 先读完，a 后读完
+
+  await win.getByRole('tab', { name: 'a' }).click()
+  await expect(win.locator('.cm-content')).toContainText('第二行有目标')
+  expect(await win.evaluate(() => getSelection()?.toString())).toBe('')
+  await app.close()
+})
+
+// 新打开的文件还没读完时，视图里仍是上一篇：这时的输入和 ⌘S 不能写进新文件
+test('typing while another note loads never writes into it', async () => {
+  const { app, win, vault } = await launch({ 'a.md': 'A 的内容', 'b.md': 'B 的内容' })
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(win.locator('.cm-content')).toHaveText('A 的内容')
+  const slow = await slowFirstCall(app, vault, 'file:read', 2000)
+
+  await win.getByRole('treeitem', { name: 'b.md' }).click()
+  await expect.poll(() => slow('calls')).toBe(1)
+  await win.locator('.cm-content').click()
+  await win.keyboard.type('打字')
+  await win.keyboard.press('ControlOrMeta+s')
+  await expect.poll(() => slow('done'), { timeout: 5000 }).toBe(1)
+  await expect(win.locator('.cm-content')).toHaveText('B 的内容')
+  await win.waitForTimeout(800) // 等过自动保存的 500 ms
+  expect(readFileSync(path.join(vault, 'b.md'), 'utf8')).toBe('B 的内容')
   await app.close()
 })
 
