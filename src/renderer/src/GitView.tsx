@@ -1,20 +1,20 @@
 // git 视图（S12 只有引导状态）：没有 git / 版本过低 / 不是仓库 / 缺提交身份；完整面板见 S13
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { GitState } from '../../shared/api'
 import s from './GitView.module.css'
-import { useStore } from './store'
+import { useGit, useStore } from './store'
 
 export function GitView() {
   const { t } = useTranslation()
   const root = useStore((st) => st.vault?.root)
-  const [state, setState] = useState<GitState | null>(null)
+  const state = useGit((st) => st.state)
   const load = (p: Promise<GitState | null>) =>
-    p.then((v) => v && setState(v)).catch((e) => useStore.getState().setError(String(e)))
+    p.then((v) => v && useGit.setState({ state: v })).catch((e) => useStore.getState().setError(String(e)))
 
-  // 视图一直挂载，切到 git 视图时才查询，保证更改数是最新的
-  const shown = useStore((st) => st.sidebar === 'git')
-  useEffect(() => void (shown && load(window.synote.gitState())), [root, shown])
+  // 打开笔记库时查一次，之后靠主进程推送
+  useEffect(() => void (root && load(window.synote.gitState())), [root])
+  useEffect(() => window.synote.onGitChanged((v) => useGit.setState({ state: v })), [])
 
   if (!state) return null
   return (

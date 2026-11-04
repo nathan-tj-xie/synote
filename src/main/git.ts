@@ -110,17 +110,18 @@ const errorPatterns: [GitErrorKind, RegExp][] = [
   ['notRepo', /not a git repository/i],
 ]
 
-// 错误分类靠 stderr 文本，子进程统一 LC_ALL=C 保证是英文
-export const classifyGitError = (stderr: string): GitErrorKind =>
-  errorPatterns.find(([, re]) => re.test(stderr))?.[0] ?? 'unknown'
+// 错误分类靠输出文本，子进程统一 LC_ALL=C 保证是英文；merge / pull 的 CONFLICT 提示在 stdout，所以两个通道都要看
+export const classifyGitError = (stderr: string, stdout = ''): GitErrorKind =>
+  errorPatterns.find(([, re]) => re.test(stderr) || re.test(stdout))?.[0] ?? 'unknown'
 
 export class GitError extends Error {
   constructor(
     readonly kind: GitErrorKind,
     readonly code: number,
     readonly stderr: string,
+    readonly stdout = '',
   ) {
-    super(stderr.trim() || `git exited with ${code}`)
+    super(stderr.trim() || stdout.trim() || `git exited with ${code}`)
   }
 }
 
@@ -143,7 +144,7 @@ export class Git {
 
   async run(args: string[]): Promise<string> {
     const r = await this.run_(this.bin, args, { cwd: this.cwd, env: this.env })
-    if (r.code !== 0) throw new GitError(classifyGitError(r.stderr), r.code, r.stderr)
+    if (r.code !== 0) throw new GitError(classifyGitError(r.stderr, r.stdout), r.code, r.stderr, r.stdout)
     return r.stdout
   }
 
@@ -161,7 +162,8 @@ export class Git {
   }
 
   async status(): Promise<StatusEntry[]> {
-    return parseStatus(await this.run(['status', '--porcelain=v2', '-z', '--untracked-files=all']))
+    // --no-optional-locks：不顺手刷新 .git/index，否则会触发 watcher 再推一次状态
+    return parseStatus(await this.run(['--no-optional-locks', 'status', '--porcelain=v2', '-z', '--untracked-files=all']))
   }
 
   // 缺失时 git config 退出码为 1，记为 null
@@ -186,7 +188,13 @@ export class Git {
   }
 
   // 读任意版本的 blob（如 `HEAD:a.md`），不存在时为 null；复用常驻的 cat-file --batch 进程
-  readBlob(spec: string): Promise<Buffer | null> {
+  async readBlob(spec: string): Promise<Buffer | null> {
+    // 按行协议传不了含换行的路径（-Z 要 2.42+），先用 rev-parse 换成 oid 再读
+    if (/[\r\n]/.test(spec)) {
+      const oid = (await this.run(['rev-parse', '--verify', '--quiet', spec]).catch(() => '')).trim()
+      if (!oid) return null
+      spec = oid
+    }
     if (!this.cat || this.cat.dead) this.cat = new CatFile(this.bin, this.cwd, this.env)
     return this.cat.read(spec)
   }
@@ -197,7 +205,7 @@ export class Git {
   }
 }
 
-// 常驻 `git cat-file --batch -Z`（2.38+）：请求和响应都以 NUL 分隔，路径里有换行也不会错位
+// 常驻 `git cat-file --batch`：按行协议，2.38 起都可用；请求里不能有换行（由 readBlob 处理）
 class CatFile {
   private proc: ChildProcessWithoutNullStreams
   private buf = Buffer.alloc(0)
@@ -205,7 +213,7 @@ class CatFile {
   dead = false
 
   constructor(bin: string, cwd: string, env: NodeJS.ProcessEnv) {
-    this.proc = spawn(bin, ['cat-file', '--batch', '-Z'], { cwd, env, windowsHide: true })
+    this.proc = spawn(bin, ['cat-file', '--batch'], { cwd, env, windowsHide: true })
     this.proc.stdout.on('data', (d: Buffer) => {
       // shortcut: 每块都 concat，大 blob 分块多时是 O(n²)；读大附件变慢时改成分块列表
       this.buf = Buffer.concat([this.buf, d])
@@ -224,25 +232,25 @@ class CatFile {
   read(spec: string): Promise<Buffer | null> {
     return new Promise((resolve, reject) => {
       this.queue.push({ resolve, reject })
-      this.proc.stdin.write(`${spec}\0`)
+      this.proc.stdin.write(`${spec}\n`)
     })
   }
 
-  // 响应：`<oid> <type> <size> NUL <内容> NUL`，或 `<spec> missing NUL` / `<spec> ambiguous NUL`
+  // 响应：`<oid> <type> <size> LF <内容> LF`，或 `<spec> missing LF` / `<spec> ambiguous LF`
   private drain() {
     while (this.queue.length) {
-      const nul = this.buf.indexOf(0)
-      if (nul < 0) return
-      const header = this.buf.subarray(0, nul).toString()
+      const lf = this.buf.indexOf(10)
+      if (lf < 0) return
+      const header = this.buf.subarray(0, lf).toString()
       if (/ (missing|ambiguous)$/.test(header)) {
-        this.buf = this.buf.subarray(nul + 1)
+        this.buf = this.buf.subarray(lf + 1)
         this.queue.shift()!.resolve(null)
         continue
       }
       const size = Number(header.split(' ')[2])
-      if (this.buf.length < nul + 1 + size + 1) return
-      const content = Buffer.from(this.buf.subarray(nul + 1, nul + 1 + size))
-      this.buf = this.buf.subarray(nul + 2 + size)
+      if (this.buf.length < lf + 1 + size + 1) return
+      const content = Buffer.from(this.buf.subarray(lf + 1, lf + 1 + size))
+      this.buf = this.buf.subarray(lf + 2 + size)
       this.queue.shift()!.resolve(content)
     }
   }

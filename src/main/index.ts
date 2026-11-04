@@ -46,6 +46,7 @@ function startWatching(dir: string) {
   // shortcut: 每批外部改动都全量重扫文件树，10k 库约百毫秒；等 S6 索引服务的 stat 对账就绪后改为增量
   watcher = watch(dir, { recursive: true }, (_event, filename) => {
     if (!filename) return
+    pushGitState() // .git 里的 HEAD、index、refs 变化也算，外部 git 操作能及时反映
     const rel = toPosix(filename.toString())
     if (isHidden(rel)) return
     changed.add(rel)
@@ -123,6 +124,13 @@ async function gitState(): Promise<GitState> {
   if (!(await git.isRepo())) return { status: 'notRepo', version: f.version }
   const [id, changes, lfs] = await Promise.all([git.identity(), git.status(), git.lfsInstalled()])
   return { status: 'ready', version: f.version, ...id, changes: changes.length, lfs }
+}
+
+// 状态由主进程推送（ADR 0005）：文件改动后防抖重查，渲染进程的 git store 据此更新
+let gitTimer: NodeJS.Timeout | undefined
+function pushGitState() {
+  clearTimeout(gitTimer)
+  gitTimer = setTimeout(() => gitState().then((s) => win?.webContents.send('git:changed', s), () => {}), 300)
 }
 
 function vaultPath(rel: string): string {

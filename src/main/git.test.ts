@@ -55,6 +55,7 @@ describe('classifyGitError', () => {
     ['fatal: not a git repository (or any of the parent directories): .git', 'notRepo'],
     ['fatal: something else', 'unknown'],
   ])('%s', (stderr, kind) => expect(classifyGitError(stderr)).toBe(kind))
+  it('只出现在 stdout 的冲突提示', () => expect(classifyGitError('', 'CONFLICT (content): Merge conflict in a.md')).toBe('conflict'))
 })
 
 describe('findGit', () => {
@@ -172,6 +173,41 @@ describe('Git（系统 git）', () => {
     expect(c).toBeNull()
     expect((await git.readBlob('HEAD:中 文.md'))?.toString()).toBe('第二版\n')
     git.close()
+  })
+
+  // 按行协议传不了换行：走 rev-parse 换 oid，不能让后面的请求错位
+  it.skipIf(process.platform === 'win32')('路径含换行', async () => {
+    const { repo, env, sh } = setup()
+    sh('init', '-q')
+    writeFileSync(path.join(repo, '换\n行.md'), '多行\n名字\n')
+    writeFileSync(path.join(repo, 'b.md'), 'b\n')
+    sh('add', '.')
+    sh('commit', '-qm', '1')
+
+    const git = new Git('git', process.env.PATH!, repo, undefined, env)
+    const [a, b, c] = await Promise.all([git.readBlob('HEAD:换\n行.md'), git.readBlob('HEAD:b.md'), git.readBlob('HEAD:没\n有.md')])
+    expect(a?.toString()).toBe('多行\n名字\n')
+    expect(b?.toString()).toBe('b\n')
+    expect(c).toBeNull()
+    git.close()
+  })
+
+  it('合并冲突经 Git.run() 分类为 conflict，保留 stdout', async () => {
+    const { repo, env, sh } = setup()
+    sh('init', '-q', '-b', 'main')
+    writeFileSync(path.join(repo, 'a.md'), '1\n')
+    sh('add', '.')
+    sh('commit', '-qm', '1')
+    sh('checkout', '-qb', 'other')
+    writeFileSync(path.join(repo, 'a.md'), 'other\n')
+    sh('commit', '-qam', 'other')
+    sh('checkout', '-q', 'main')
+    writeFileSync(path.join(repo, 'a.md'), 'main\n')
+    sh('commit', '-qam', 'main')
+
+    const git = new Git('git', process.env.PATH!, repo, undefined, env)
+    const err = await git.run(['-c', 'user.name=t', '-c', 'user.email=t@t', 'merge', 'other']).catch((e) => e)
+    expect(err).toMatchObject({ kind: 'conflict', stdout: expect.stringContaining('CONFLICT (content)') })
   })
 
   it('改工作区的操作之后通知索引；LFS 路径按 .gitattributes 判断', async () => {

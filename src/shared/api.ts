@@ -58,6 +58,8 @@ export interface SynoteApi {
   redetectGit(): Promise<GitState>
   // 弹出文件选择框指定 git 可执行文件，取消时为 null
   chooseGit(): Promise<GitState | null>
+  // 工作区或 .git 有变化后推送最新状态
+  onGitChanged(cb: (s: GitState) => void): () => void
 }
 
 declare global {

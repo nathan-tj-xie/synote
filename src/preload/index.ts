@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { SynoteApi } from '../shared/api'
+import type { GitState, SynoteApi } from '../shared/api'
 
 const api: SynoteApi = {
   openVaultDialog: () => ipcRenderer.invoke('vault:openDialog'),
@@ -29,6 +29,11 @@ const api: SynoteApi = {
   gitState: () => ipcRenderer.invoke('git:state'),
   redetectGit: () => ipcRenderer.invoke('git:redetect'),
   chooseGit: () => ipcRenderer.invoke('git:choose'),
+  onGitChanged: (cb) => {
+    const h = (_e: unknown, s: GitState) => cb(s)
+    ipcRenderer.on('git:changed', h)
+    return () => ipcRenderer.off('git:changed', h)
+  },
 }
 
 contextBridge.exposeInMainWorld('synote', api)
