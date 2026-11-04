@@ -151,8 +151,8 @@ const mac: Record<string, Rule> = {
 }
 
 const win: Record<string, Rule> = {
-  'Ctrl-ArrowLeft': { cmd: 'cursorWordStartLeft' },
-  'Shift-Ctrl-ArrowLeft': { cmd: 'cursorWordStartLeftSelect' },
+  'Ctrl-ArrowLeft': { cmd: 'cursorWordLeft' },
+  'Shift-Ctrl-ArrowLeft': { cmd: 'cursorWordLeftSelect' },
   'Ctrl-ArrowRight': { cmd: 'cursorWordEndRight' },
   'Shift-Ctrl-ArrowRight': { cmd: 'cursorWordEndRightSelect' },
   'Ctrl-Alt-ArrowUp': { cmd: 'editor.action.insertCursorAbove' },
