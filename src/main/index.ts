@@ -31,6 +31,7 @@ async function recentVaults(): Promise<string[]> {
 async function openVault(dir: string): Promise<VaultInfo> {
   if (!existsSync(dir)) throw new Error(t('vaultMissing', { path: dir }))
   root = dir
+  gitGen++ // 进行中的 git 状态查询作废
   const entries = await scanEntries(dir)
   const recent = [dir, ...(await recentVaults()).filter((r) => r !== dir)].slice(0, 10)
   await fs.writeFile(recentFile(), JSON.stringify(recent))
@@ -91,13 +92,23 @@ function callIndex(method: string, ...args: unknown[]): Promise<unknown> {
 
 // 设置项只有 git 路径，和 recent.json 一样放在应用数据目录
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json')
+// 文件损坏或字段类型不对都当作没有设置，否则『重新检测』『手动指定』都会一直失败
 const readSettings = (): Promise<{ gitPath?: string }> =>
-  fs.readFile(settingsFile(), 'utf8').then(JSON.parse, () => ({}))
+  fs
+    .readFile(settingsFile(), 'utf8')
+    .then((s) => {
+      const v = JSON.parse(s)
+      return typeof v?.gitPath === 'string' ? { gitPath: v.gitPath } : {}
+    })
+    .catch(() => ({}))
 
 let found: Promise<Found> | null = null
 let git: Git | null = null
+// 重新检测或切换笔记库时加一，查询途中代次变了说明结果已过期
+let gitGen = 0
 
 function detectGit() {
+  gitGen++
   git?.close()
   git = null
   found = readSettings().then((st) =>
@@ -114,15 +125,24 @@ function detectGit() {
 
 async function gitState(): Promise<GitState> {
   if (!found) detectGit()
-  const f = await found!
+  const gen = gitGen
+  const s = await queryGit(found!)
+  // 过期的结果不返回，按最新的检测结果和笔记库重查
+  return gen === gitGen ? s : gitState()
+}
+
+// 只用本次捕获的 found / 实例，期间全局的 git 被替换或置空也不受影响
+async function queryGit(found: Promise<Found>): Promise<GitState> {
+  const f = await found
   if (f.status !== 'ok') return f
   if (!root) throw new Error('no vault open')
   if (git?.cwd !== root) {
     git?.close()
     git = new Git(f.bin, f.PATH, root, () => void callIndex('reconcile').catch(() => {}))
   }
-  if (!(await git.isRepo())) return { status: 'notRepo', version: f.version }
-  const [id, changes, lfs] = await Promise.all([git.identity(), git.status(), git.lfsInstalled()])
+  const g = git
+  if (!(await g.isRepo())) return { status: 'notRepo', version: f.version }
+  const [id, changes, lfs] = await Promise.all([g.identity(), g.status(), g.lfsInstalled()])
   return { status: 'ready', version: f.version, ...id, changes: changes.length, lfs }
 }
 

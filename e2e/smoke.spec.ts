@@ -146,6 +146,7 @@ test('git view: missing identity and missing git', async () => {
   writeFileSync(globalConfig, '')
   writeFileSync(path.join(vault, '新 笔记.md'), '')
   writeFileSync(path.join(userData, 'recent.json'), JSON.stringify([vault]))
+  writeFileSync(path.join(userData, 'settings.json'), '{损坏') // 设置文件损坏时照常查找 git
   const env = { ...process.env, SYNOTE_USER_DATA: userData, GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_NOSYSTEM: '1' }
   execFileSync('git', ['init', '-q'], { cwd: vault, env })
 
