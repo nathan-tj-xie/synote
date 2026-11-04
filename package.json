@@ -26,6 +26,7 @@
     "codemirror": "^6.0.2",
     "fuzzysort": "^4.0.2",
     "i18next": "^26.7.1",
+    "monaco-editor": "0.57.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "react-i18next": "^17.1.11",

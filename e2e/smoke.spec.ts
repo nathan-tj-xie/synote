@@ -669,3 +669,62 @@ test('editor uses VSCode keymap', async () => {
   await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('x x')
   await app.close()
 })
+
+// 工作区对比（S14）：⌘⇧D 原地切到 HEAD ↔ 工作区，diff 里编辑走同一条保存路径，切回正文内容一致
+test('workspace diff: toggle, edit and save, back to prose', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '# 标题\n第一行\n' })
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(vault, '..', 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' }
+  writeFileSync(env.GIT_CONFIG_GLOBAL, '')
+  const git = (...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: vault, env })
+  git('init', '-q')
+  git('add', '.')
+  git('commit', '-qm', '1')
+  writeFileSync(path.join(vault, 'a.md'), '# 标题\n第一行\n工作区新增\n')
+
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('工作区新增')
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  const diff = win.locator('.monaco-diff-editor')
+  await expect(diff).toBeVisible({ timeout: 10_000 })
+  const original = diff.locator('.editor.original .view-lines')
+  const modified = diff.locator('.editor.modified .view-lines')
+  await expect(original).toContainText('第一行')
+  await expect(original).not.toContainText('工作区新增')
+  await expect(modified).toContainText('工作区新增')
+  await expect(win.locator('.cm-content')).toBeHidden()
+
+  // diff 里编辑工作区一侧：⌘S（命令注册表的快捷键）立即保存
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('在 diff 里写')
+  await win.keyboard.press('ControlOrMeta+s')
+  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('# 标题\n第一行\n工作区新增\n在 diff 里写')
+  await expect(win.locator('[role=tab] [title="未保存"]')).toHaveCount(0)
+
+  // 外部改动（没有未保存改动）重新加载：diff 一侧跟着更新
+  writeFileSync(path.join(vault, 'a.md'), '# 标题\n外部改动\n')
+  await expect(modified).toContainText('外部改动')
+
+  // 切回正文：内容一致，CM6 照常编辑并自动保存
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  await expect(diff).toBeHidden()
+  const editor = win.locator('.cm-content')
+  await expect(editor).toHaveText('# 标题外部改动')
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('！')
+  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('# 标题\n外部改动\n！')
+
+  // 再进 diff：第二次不用重新加载 Monaco，显示的是正文最新内容
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  await expect(modified).toContainText('！')
+  await app.close()
+})
+
+test('workspace diff outside a git repo reports and stays in prose', async () => {
+  const { app, win } = await launch({ 'a.md': 'x' })
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(win.locator('.cm-content')).toHaveText('x')
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  await expect(win.getByRole('alert')).toContainText('不是 git 仓库')
+  await expect(win.locator('.cm-content')).toBeVisible()
+  await app.close()
+})

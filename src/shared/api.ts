@@ -47,6 +47,7 @@ export interface SynoteApi {
   writeConfig(vault: string, config: VaultConfig): Promise<void>
   readFile(vault: string, path: string): Promise<string>
   writeFile(vault: string, path: string, content: string): Promise<void>
+  readBytes(vault: string, path: string): Promise<Uint8Array>
   createNote(vault: string, dir: string): Promise<string>
   trash(vault: string, path: string): Promise<void>
   showItemMenu(path: string, dir: boolean): Promise<ItemMenuAction>
@@ -67,6 +68,8 @@ export interface SynoteApi {
   redetectGit(): Promise<GitState>
   // 弹出文件选择框指定 git 可执行文件，取消时为 null
   chooseGit(): Promise<GitState | null>
+  // 工作区对比（S14）：HEAD 里的文件内容，HEAD 里没有时为 null；没有可用 git 或不是仓库时报错
+  readHead(vault: string, path: string): Promise<Uint8Array | null>
   // 工作区或 .git 有变化后推送最新状态
   onGitChanged(cb: (e: { root: string | null; state: GitState }) => void): () => void
 }

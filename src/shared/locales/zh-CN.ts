@@ -36,5 +36,9 @@ export const zhCN = {
     gitNoIdentity: '还没有设置提交身份，设置前不能提交。在终端运行：',
     gitVersion: 'git {{version}}',
     gitChanges: '{{n}} 处更改',
+    gitUnavailable: '没有可用的 git，无法对比',
+    toggleDiff: '切换工作区对比（HEAD ↔ 工作区）',
+    imageMissing: '图片不存在：{{path}}',
+    imageTooLarge: '图片过大，不显示缩略图',
   },
 } as const

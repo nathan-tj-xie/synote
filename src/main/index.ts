@@ -6,7 +6,7 @@ import { i18next, i18nOptions } from '../shared/i18n'
 import { commands } from '../shared/commands'
 import { indexMethods, type GitState, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
 import { tokens } from '../shared/tokens'
-import { exec, findGit, Git, type GitDetectionResult } from './git'
+import { exec, findGit, Git, GitError, type GitDetectionResult } from './git'
 import { isHidden, resolveInVault, scanEntries, toPosix, uniqueNoteName } from './vault'
 
 i18next.init(i18nOptions)
@@ -172,12 +172,12 @@ function detectGit() {
   )
 }
 
-// 过期（期间重新检测或切换了笔记库）的结果和异常都丢弃，按最新的检测结果和笔记库重查
-async function gitState(): Promise<GitState> {
+// 当前库的 git 实例，没有可用 git 时为检测结果。过期（期间重新检测或切换了笔记库）的结果都丢弃，按最新的重取
+async function repoGit(): Promise<{ g: Git; version: string; gen: number } | Exclude<GitDetectionResult, { status: 'ok' }>> {
   if (!found) detectGit()
   const gen = gitGen
   const f = await found!
-  if (gen !== gitGen) return gitState()
+  if (gen !== gitGen) return repoGit()
   if (f.status !== 'ok') return f
   if (!root) throw new Error('no vault open')
   // 代次已校验，这里到创建实例之间没有 await；检测结果或笔记库不同就换实例
@@ -185,14 +185,21 @@ async function gitState(): Promise<GitState> {
     git?.close()
     git = new Git(f.bin, f.PATH, root, () => void callIndex('reconcile').catch((e) => console.error('[index] reconcile failed', e)))
   }
+  return { g: git, version: f.version, gen }
+}
+
+// 过期的结果和异常都丢弃，按最新的检测结果和笔记库重查
+async function gitState(): Promise<GitState> {
+  const r = await repoGit()
+  if (!('g' in r)) return r
   let s: GitState
   try {
-    s = await queryGit(git, f.version)
+    s = await queryGit(r.g, r.version)
   } catch (e) {
-    if (gen === gitGen) throw e
+    if (r.gen === gitGen) throw e
     return gitState()
   }
-  return gen === gitGen ? s : gitState()
+  return r.gen === gitGen ? s : gitState()
 }
 
 // 只用传入的实例，期间全局的 git 被替换或置空也不受影响
@@ -233,6 +240,21 @@ ipcMain.handle('vault:writeConfig', async (_e, vault: string, config: VaultConfi
   await fs.writeFile(file, `${JSON.stringify(config, null, 2)}\n`)
 })
 ipcMain.handle('file:read', (_e, vault: string, rel: string) => fs.readFile(vaultPath(vault, rel), 'utf8'))
+ipcMain.handle('file:readBytes', (_e, vault: string, rel: string) => fs.readFile(vaultPath(vault, rel)))
+// 工作区对比的 HEAD 一侧（S14）：经常驻 cat-file 读，HEAD 里没有这个文件时为 null。
+// `HEAD:./` 按 git 的工作目录（即笔记库）解析，笔记库是仓库子目录时也对
+ipcMain.handle('git:readHead', async (_e, vault: string, rel: string) => {
+  const r = checkVault(vault)
+  resolveInVault(r, rel)
+  const res = await repoGit()
+  if (!('g' in res)) throw new Error(t('gitUnavailable'))
+  if (res.g.cwd !== r) throw new Error(t('vaultSwitched', { vault })) // 等 git 检测期间切了库
+  try {
+    return await res.g.readBlob(`HEAD:./${rel}`)
+  } catch (e) {
+    throw e instanceof GitError && e.kind === 'notRepo' ? new Error(t('gitNotRepo')) : e
+  }
+})
 ipcMain.handle('file:write', (_e, vault: string, rel: string, content: string) => fs.writeFile(vaultPath(vault, rel), content))
 ipcMain.handle('file:createNote', async (_e, vault: string, dir: string) => {
   const r = checkVault(vault)

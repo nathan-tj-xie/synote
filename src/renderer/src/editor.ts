@@ -1,6 +1,6 @@
 // CM6 薄封装：一个 EditorView，按标签页缓存 EditorState，不放进 React state（ADR 0005）
 import { markdown } from '@codemirror/lang-markdown'
-import { Compartment, EditorSelection, EditorState, Transaction } from '@codemirror/state'
+import { Annotation, Compartment, EditorSelection, EditorState, Transaction, type ChangeSpec } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { vscodeKeymap } from '@replit/codemirror-vscode-keymap'
 import { minimalSetup } from 'codemirror'
@@ -29,6 +29,17 @@ const editable = () => lock.of(lockExt())
 // 搜索结果点击后要定位的位置，文件加载完再应用
 let target: { path: string; line: number; col: number; len: number } | null = null
 
+// 工作区对比（S14）：diff.ts（含 Monaco）第一次进入时才加载。CM6 视图在 diff 期间只是隐藏，仍是 shown 的唯一正文：
+// Monaco 里的输入同步写回视图（带 fromDiff），视图的其它改动推给 Monaco，所以缓存不变式、保存路径都不变
+let diff: typeof import('./diff') | null = null
+const diffMode = new Set<string>() // 处于 diff 形态的已打开文件（按标签页记住）
+let diffWant: string | null = null // 应该显示 diff 的文件（加载中或已显示）
+let diffShown: string | null = null // Monaco 里实际是哪个文件
+let diffSeq = 0
+const fromDiff = Annotation.define<boolean>()
+let cmBox: HTMLElement | null = null
+let diffBox: HTMLElement | null = null
+
 const theme = EditorView.theme(
   {
     '&': { height: '100%', color: 'var(--fg)', backgroundColor: 'var(--bg)' },
@@ -52,7 +63,9 @@ function makeState(doc: string): EditorState {
       EditorView.lineWrapping,
       theme,
       EditorView.updateListener.of((u) => {
-        if (u.docChanged && shown && !u.transactions.some((t) => t.annotation(Transaction.remote))) scheduleSave(shown)
+        if (!u.docChanged || !shown) return
+        if (!u.transactions.some((t) => t.annotation(Transaction.remote))) scheduleSave(shown)
+        if (diffShown === shown && !u.transactions.some((t) => t.annotation(fromDiff))) diff!.replace(u.state.doc.toString())
       }),
     ],
   })
@@ -101,20 +114,91 @@ function setView(path: string | null, s: EditorState) {
   view!.setState(s)
   view!.dispatch({ effects: lock.reconfigure(lockExt()) }) // 缓存里的状态可能建于加锁或解锁之前：总按当前 locked 重配
   shown = path
+  syncDiff()
 }
 
 // 没有文件可显示时的占位：只读，不能输入（输入无处保存）
 const blank = () => EditorState.create({ extensions: [EditorView.editable.of(false), theme] })
 
 export function mount(parent: HTMLElement) {
-  view = new EditorView({ state: blank(), parent })
+  cmBox = parent.appendChild(document.createElement('div'))
+  diffBox = parent.appendChild(document.createElement('div'))
+  cmBox.style.height = diffBox.style.height = '100%'
+  diffBox.hidden = true
+  view = new EditorView({ state: blank(), parent: cmBox })
   return () => {
     view?.destroy()
     view = null
     current = shown = null
     seq++
+    diffSeq++
+    diff?.hide()
+    diffShown = diffWant = null
+    cmBox?.remove()
+    diffBox?.remove()
   }
 }
+
+const decode = (b: Uint8Array | null) => (b ? new TextDecoder().decode(b) : '')
+
+// 让 Monaco 跟上「shown 是否处于 diff 形态」。setView 之后、切换形态时调用；加载期间 CM6 照常可用，
+// 加载完才取视图里的最新正文放进 Monaco。读 HEAD 失败（没有 git、不是仓库）就退回正文并报错
+function syncDiff() {
+  const want = shown && diffMode.has(shown) ? shown : null
+  if (want === diffWant) return
+  diffWant = want
+  const my = ++diffSeq
+  if (diffShown) {
+    diff!.hide()
+    diffShown = null
+    cmBox!.hidden = false
+    diffBox!.hidden = true
+    view!.requestMeasure()
+  }
+  if (!want) return
+  const v = vault!
+  ;(async () => {
+    const [mod, head] = await Promise.all([diff ?? import('./diff'), window.synote.readHead(v, want)])
+    diff = mod
+    if (my !== diffSeq || !view) return // 期间又切了文件 / 形态，或换了库
+    if (!diffBox!.childElementCount) mod.create(diffBox!, applyFromDiff)
+    diffBox!.hidden = false
+    cmBox!.hidden = true
+    mod.show(v, want, decode(head), view.state.doc.toString(), locked)
+    diffShown = want
+    mod.focus()
+  })().catch((e) => {
+    if (my !== diffSeq) return
+    diffMode.delete(want)
+    diffWant = null
+    useUi.getState().setError(String(e))
+  })
+}
+
+function applyFromDiff(changes: ChangeSpec[]) {
+  if (view && diffShown === shown) view.dispatch({ changes, annotations: fromDiff.of(true) })
+}
+
+// ⌘⇧D：当前笔记在正文和 HEAD ↔ 工作区对比之间原地切换
+export function toggleDiff() {
+  if (!shown || locked) return
+  const on = !diffMode.has(shown)
+  if (on) diffMode.add(shown)
+  else diffMode.delete(shown)
+  syncDiff()
+  if (!on) view!.focus()
+}
+
+// HEAD 变了（提交、切分支等）：刷新 diff 左侧
+window.synote.onGitChanged((e) => {
+  const p = diffShown
+  if (!p || !vault || e.root !== vault) return
+  const my = diffSeq
+  window.synote.readHead(vault, p).then(
+    (b) => my === diffSeq && diff!.setHead(decode(b)),
+    () => {},
+  )
+})
 
 export async function show(path: string | null) {
   if (!view || path === current) return
@@ -169,11 +253,13 @@ export const saveCurrent = () => !locked && shown && flush(shown)
 export function setLocked(on: boolean) {
   locked = on
   view?.dispatch({ effects: lock.reconfigure(lockExt()) })
+  diff?.setReadOnly(on)
 }
 
 export function forget(path: string) {
   if (timers.has(path)) flush(path) // flush 同步取走内容，之后才能清掉缓存
   states.delete(path)
+  diffMode.delete(path)
   if (target?.path === path) target = null
   if (path === current) {
     current = null
@@ -212,6 +298,7 @@ function switchVault(root: string | null) {
   for (const p of [...timers.keys()]) flush(p)
   vaultGen++
   states.clear()
+  diffMode.clear()
   target = null
   current = null
   seq++

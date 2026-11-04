@@ -1,6 +1,6 @@
 // 命令注册表的运行时部分：可用条件和执行逻辑；id、标题、快捷键见 shared/commands.ts
 import { commands, type CommandId } from '../../shared/commands'
-import { forget, saveCurrent } from './editor'
+import { forget, saveCurrent, toggleDiff } from './editor'
 import { matchKey } from './match'
 import { useEditor, useUi, useVault } from './store'
 
@@ -20,6 +20,7 @@ export const handlers: Record<CommandId, Handler> = {
   quickOpen: { when: vault, run: () => ui().setPalette('files') },
   commandPalette: { when: vault, run: () => ui().setPalette('commands') },
   save: { when: () => !!ed().active, run: saveCurrent },
+  toggleDiff: { when: () => !!ed().active, run: toggleDiff },
   search: {
     when: vault,
     run: () => {
