@@ -1,4 +1,4 @@
-import { _electron as electron, expect, test, type ElectronApplication } from '@playwright/test'
+import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
 import { closeSync, constants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -75,6 +75,9 @@ async function slowFirstCall(app: ElectronApplication, vault: string, channel: '
   )
   return (key: 'calls' | 'done') => app.evaluate((_m, key) => (globalThis as { slow?: Record<string, number> }).slow![key], key)
 }
+
+// 点标签切换：点左边的文字。点中心的话，悬停后才显示的 × 可能正好在中心（Windows 字体更窄），点成关闭
+const clickTab = (win: Page, name: string) => win.getByRole('tab', { name }).click({ position: { x: 14, y: 17 } })
 
 // 冒烟测试：打开笔记库 → 文件树 → 编辑并自动保存 → 外部改动重新加载
 test('open vault, edit, save, reload external change', async () => {
@@ -258,7 +261,7 @@ test('abandoned search reveal does not apply on a later plain open', async () =>
   await expect(win.locator('.cm-content')).toHaveText('别的')
   await expect.poll(() => slow('done'), { timeout: 5000 }).toBe(2) // b 先读完，a 后读完
 
-  await win.getByRole('tab', { name: 'a' }).click()
+  await clickTab(win, 'a')
   await expect(win.locator('.cm-content')).toContainText('第二行有目标')
   expect(await win.evaluate(() => getSelection()?.toString())).toBe('')
   await app.close()
@@ -299,7 +302,7 @@ test('edits to the old note while the next one loads are kept', async () => {
   await expect.poll(() => slow('done'), { timeout: 5000 }).toBe(1)
   await expect(editor).toHaveText('B')
   await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('A后来')
-  await win.getByRole('tab', { name: 'a' }).click()
+  await clickTab(win, 'a')
   await expect(editor).toHaveText('A后来')
   await expect(win.locator('[title="未保存"]')).toHaveCount(0)
   await app.close()
@@ -349,9 +352,9 @@ test('closing a loading tab never restores a stale snapshot', async () => {
   await win.getByRole('treeitem', { name: 'c.md' }).click()
   await win.getByRole('treeitem', { name: 'a.md' }).click()
   await expect(editor).toHaveText('A')
-  await win.getByRole('tab', { name: 'c' }).click()
+  await clickTab(win, 'c')
   await expect(editor).toHaveText('C')
-  await win.getByRole('tab', { name: 'a' }).click()
+  await clickTab(win, 'a')
   await expect(editor).toHaveText('A')
   await editor.click()
   await win.keyboard.press('ControlOrMeta+End')
