@@ -19,6 +19,15 @@
   #switcher { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px; align-items: center;
     background: #fff; color: #000; padding: 6px 14px; border-radius: 999px; box-shadow: 0 4px 16px #0008; font-weight: 600; z-index: 100; }
   #switcher button { border: 0; background: none; font-size: 16px; cursor: pointer; }
+  .mermaid-modal { position: fixed; inset: 0; background: #000a; display: grid; place-items: center; z-index: 200; }
+  .mm-win { width: min(1100px, 92vw); height: min(640px, 85vh); background: #282c34; border: 1px solid #3e4451; border-radius: 8px; display: flex; flex-direction: column; box-shadow: 0 10px 40px #000c; }
+  .mm-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #181a1f; font-weight: 600; }
+  .mm-hint { margin-left: auto; font-weight: 400; opacity: .6; font-size: 12px; }
+  .mm-bar button { background: #2c313a; color: inherit; border: 1px solid #3e4451; border-radius: 4px; padding: 3px 12px; cursor: pointer; }
+  .mm-bar button.on { background: #4d78cc; color: #fff; }
+  .mm-body { flex: 1; display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+  .mm-code { min-height: 0; border-right: 1px solid #181a1f; }
+  .mm-preview { overflow: auto; padding: 16px; display: grid; place-items: center; }
 </style>
 </head>
 <body>
@@ -30,7 +39,7 @@
     <h4>手测清单</h4>
     <ol id="check">
       <li>编辑模式：标题/粗体/链接源码只在光标处出现</li>
-      <li>点击 mermaid 图 → 露出源码，改完移走光标重渲染</li>
+      <li>点击 mermaid 图 → 弹出独立编辑窗口（左源码右预览），⌘S 保存 / Esc 取消</li>
       <li>系统拼音、微信输入法：在编辑模式和 diff 右侧各输入一段中文（含候选框位置、回车上屏、退格）</li>
       <li>⌘/Ctrl+Shift+D 切 diff；对比 A/B 的对齐、字符高亮、还原按钮、折叠未改区</li>
       <li>两种 diff 的快捷键（⌘D 多光标、⌥↑ 移动行、⌘F 查找）是否一致</li>

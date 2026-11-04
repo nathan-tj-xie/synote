@@ -3,30 +3,40 @@ import { syntaxTree } from '@codemirror/language';
 import { EditorState, Range, StateField } from '@codemirror/state';
 import { Decoration, DecorationSet, EditorView, WidgetType } from '@codemirror/view';
 import mermaid from 'mermaid';
+import { openMermaidEditor } from './mermaidEditor';
 
 mermaid.initialize({ startOnLoad: false, theme: 'dark' });
 
 const svgCache = new Map<string, string>();
 let seq = 0;
 
+export async function renderMermaid(src: string): Promise<string> {
+  const cached = svgCache.get(src);
+  if (cached) return cached;
+  const { svg } = await mermaid.render(`m${seq++}`, src);
+  svgCache.set(src, svg);
+  return svg;
+}
+
 class MermaidWidget extends WidgetType {
-  constructor(readonly src: string, readonly from: number) { super(); }
+  constructor(readonly src: string) { super(); }
   eq(o: MermaidWidget) { return o.src === this.src; }
   get estimatedHeight() { return 200; }
   toDOM(view: EditorView) {
     const el = document.createElement('div');
     el.className = 'cm-mermaid';
-    el.title = '点击编辑 mermaid 源码';
-    const cached = svgCache.get(this.src);
-    if (cached) el.innerHTML = cached;
-    else {
-      el.textContent = 'rendering…';
-      mermaid.render(`m${seq++}`, this.src)
-        .then(({ svg }) => { svgCache.set(this.src, svg); el.innerHTML = svg; view.requestMeasure(); })
-        .catch((e) => { el.textContent = `mermaid error: ${e.message ?? e}`; });
-    }
-    // 点击 widget → 光标移进代码块，露出源码
-    el.onmousedown = (e) => { e.preventDefault(); view.dispatch({ selection: { anchor: this.from + 1 } }); view.focus(); };
+    el.title = '点击在独立窗口中编辑 mermaid 源码';
+    el.textContent = 'rendering…';
+    renderMermaid(this.src)
+      .then((svg) => { el.innerHTML = svg; view.requestMeasure(); })
+      .catch((e) => { el.textContent = `mermaid error: ${e.message ?? e}`; });
+    // 点击图 → 打开独立的编辑窗口，正文里的图保持渲染态；位置在点击时现算，避免 widget 复用后位置过期
+    el.onmousedown = (e) => {
+      e.preventDefault();
+      let node = syntaxTree(view.state).resolveInner(view.posAtDOM(el), 1);
+      while (node.name !== 'FencedCode' && node.parent) node = node.parent;
+      if (node.name === 'FencedCode') openMermaidEditor(view, node.from, node.to, this.src);
+    };
     return el;
   }
   ignoreEvent() { return false; }
@@ -49,10 +59,11 @@ function build(state: EditorState): DecorationSet {
       }
       if (n.name === 'FencedCode') {
         const info = n.node.getChild('CodeInfo');
-        if (info && doc.sliceString(info.from, info.to) === 'mermaid' && !touches(n.from, n.to)) {
+        // mermaid 块始终渲染为图，不随光标切换成源码
+        if (info && doc.sliceString(info.from, info.to) === 'mermaid') {
           const text = n.node.getChild('CodeText');
           const src = text ? doc.sliceString(text.from, text.to) : '';
-          decos.push(Decoration.replace({ widget: new MermaidWidget(src, n.from), block: true }).range(n.from, n.to));
+          decos.push(Decoration.replace({ widget: new MermaidWidget(src), block: true }).range(n.from, n.to));
         }
         return false;
       }
