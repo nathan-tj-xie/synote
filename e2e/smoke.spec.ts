@@ -517,6 +517,51 @@ test('the editor is read-only while the vault switch commits', async () => {
   await app.close()
 })
 
+// commit 前 B 被删：B 的 watcher 建不起来，A 原样保留（外部改动照常重载），编辑器恢复可编辑
+test('a failed commit keeps the current vault and makes the editor editable again', async () => {
+  test.skip(process.platform === 'win32', 'mkfifo')
+  const base = mkdtempSync(path.join(tmpdir(), 'synote-e2e-'))
+  const a = blockedVault(base, 'a', { 'x.md': 'A 的 x' })
+  const b = blockedVault(base, 'b', { 'B 的文件.md': '' })
+  const { app, win } = await launchWelcome([a.dir, b.dir])
+  await a.release()
+  await win.getByRole('treeitem', { name: 'x.md' }).click()
+  const editor = win.locator('.cm-content')
+  await expect(editor).toHaveText('A 的 x')
+  const held = await holdRecentWrite(app, 1500)
+  await b.release()
+  await expect.poll(held).toBe(true)
+  rmSync(b.dir, { recursive: true })
+  await expect(win.getByRole('alert')).toContainText('ENOENT', { timeout: 5000 })
+  await expect(win.getByRole('treeitem', { name: 'x.md' })).toBeVisible()
+
+  await editor.click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('又')
+  await expect.poll(() => readFileSync(path.join(a.dir, 'x.md'), 'utf8')).toBe('A 的 x又')
+  writeFileSync(path.join(a.dir, 'x.md'), '外部改的')
+  await expect(editor).toHaveText('外部改的', { timeout: 5000 })
+  await app.close()
+})
+
+// prepare 扫描之后、B 的 watcher 建立之前新增的文件：切过去后补扫，文件树里能看到
+test('files added to the new vault before its watcher starts still show up', async () => {
+  test.skip(process.platform === 'win32', 'mkfifo')
+  const base = mkdtempSync(path.join(tmpdir(), 'synote-e2e-'))
+  const a = blockedVault(base, 'a', { 'x.md': '' })
+  const b = blockedVault(base, 'b', { 'B 的文件.md': '' })
+  const { app, win } = await launchWelcome([a.dir, b.dir])
+  await a.release()
+  await expect(win.getByRole('treeitem', { name: 'x.md' })).toBeVisible()
+  await win.waitForTimeout(300) // B 的 prepare 已扫完（卡在读配置）
+  writeFileSync(path.join(b.dir, '后来的.md'), '')
+  await win.waitForTimeout(1500) // 拉开时间，免得 B 的 watcher 启动时还能收到这次写入的事件
+  await b.release()
+  await expect(win.getByRole('treeitem', { name: 'B 的文件.md' })).toBeVisible()
+  await expect(win.getByRole('treeitem', { name: '后来的.md' })).toBeVisible({ timeout: 5000 })
+  await app.close()
+})
+
 // A 的 x.md 保存还没回来就切到 B、把 B 的 x.md 改成同样的正文：A 的回执不能清掉 B 的未保存标记
 test('a save receipt from the old vault does not clear dirty in the new one', async () => {
   test.skip(process.platform === 'win32', 'mkfifo')

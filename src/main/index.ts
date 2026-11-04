@@ -41,11 +41,27 @@ async function commitVault(dir: string): Promise<void> {
   if (!existsSync(dir)) throw new Error(t('vaultMissing', { path: dir }))
   const recent = [dir, ...(await recentVaults()).filter((r) => r !== dir)].slice(0, 10)
   await fs.writeFile(recentFile(), JSON.stringify(recent))
-  // 以下同步完成，中间没有 await：停掉旧库的 watcher 和索引、换上新库的、切 root
-  startWatching(dir)
-  startIndexer(dir)
+  // 先建好新库的 watcher 和索引进程；建不起来（比如 B 刚被删）就抛错，旧库的服务和 root 原样保留
+  const w = watchVault(dir)
+  let proc: UtilityProcess
+  try {
+    proc = forkIndexer(dir)
+  } catch (e) {
+    w.close()
+    throw e
+  }
+  // 以下同步完成：释放旧库的服务、换上新库的、切 root
+  watcher?.close()
+  watcher = w
+  useIndexer(proc, dir)
   root = dir
   gitGen++ // 进行中的 git 状态查询作废
+  // watcher 建好后补扫一次，补上 prepare 之后的改动。这条推送排在 commit 的回复之后，
+  // 渲染进程先用 prepare 的快照，再被它覆盖
+  scanEntries(dir).then(
+    (entries) => root === dir && win?.webContents.send('vault:changed', { root: dir, entries, changed: [] }),
+    (e) => console.error('[vault] rescan failed', e),
+  )
 }
 
 const configFile = (dir: string) => path.join(dir, '.synote', 'config.json')
@@ -61,12 +77,11 @@ async function readConfig(dir: string): Promise<VaultConfig> {
   }
 }
 
-function startWatching(dir: string) {
-  watcher?.close()
+function watchVault(dir: string): FSWatcher {
   const changed = new Set<string>()
   let timer: NodeJS.Timeout | undefined
   // shortcut: 每批外部改动都全量重扫文件树，10k 库约百毫秒；等 S6 索引服务的 stat 对账就绪后改为增量
-  watcher = watch(dir, { recursive: true }, (_event, filename) => {
+  return watch(dir, { recursive: true }, (_event, filename) => {
     if (!filename) return
     pushGitState() // .git 里的 HEAD、index、refs 变化也算，外部 git 操作能及时反映
     const rel = toPosix(filename.toString())
@@ -84,13 +99,8 @@ function startWatching(dir: string) {
   })
 }
 
-// 每个笔记库一个索引库，放在应用数据目录（缓存，不入库）
-function startIndexer(dir: string) {
-  indexer?.kill()
-  for (const c of calls.values()) c.reject(new Error('index restarted'))
-  calls.clear()
+function forkIndexer(dir: string): UtilityProcess {
   const proc = utilityProcess.fork(path.join(__dirname, 'index-worker.js'), [], { serviceName: 'synote-index' })
-  indexer = proc
   proc.on('message', (m: { id?: number; event?: string; paths?: string[]; result?: unknown; error?: string }) => {
     if (m.event === 'changed') return win?.webContents.send('index:changed', { root: dir, paths: m.paths })
     const c = calls.get(m.id!)
@@ -99,6 +109,15 @@ function startIndexer(dir: string) {
     else c?.resolve(m.result)
   })
   proc.on('exit', () => indexer === proc && (indexer = null))
+  return proc
+}
+
+// 每个笔记库一个索引库，放在应用数据目录（缓存，不入库）
+function useIndexer(proc: UtilityProcess, dir: string) {
+  indexer?.kill()
+  for (const c of calls.values()) c.reject(new Error('index restarted'))
+  calls.clear()
+  indexer = proc
   const dbDir = path.join(app.getPath('userData'), 'index')
   const dbFile = path.join(dbDir, `${createHash('sha1').update(dir).digest('hex')}.db`)
   fs.mkdir(dbDir, { recursive: true })
