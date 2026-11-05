@@ -293,10 +293,10 @@ function tableWidget(state: EditorState, n: SyntaxNode): TableWidget {
   return new TableWidget(state.sliceDoc(start, n.to), rows, align, quoted, quoted ? 0 : n.from - start)
 }
 
-// 能装下表格的容器：只往这些节点里走，代码块等叶子块整块跳过；段落只在跨行时才往里看
+// 引用定义所在的块级容器（linkRefs 只往这些节点里走）
 const CONTAINERS = new Set(['Document', 'Blockquote', 'BulletList', 'OrderedList', 'ListItem'])
-// 跨行段落里，链接 / 图片可能嵌在这些行内节点里
-const INLINE_CONTAINERS = new Set(['Emphasis', 'StrongEmphasis', 'Strikethrough'])
+// 内容不按 Markdown 渲染的节点：里面的 `[..](..)` 不是链接
+const RAW = new Set(['FencedCode', 'CodeBlock', 'InlineCode', 'HTMLBlock', 'HTMLTag', 'CommentBlock', 'Comment', 'ProcessingInstructionBlock', 'LinkReference'])
 
 // 跨行替换必须由 StateField 提供，ViewPlugin 不能替换换行。这里出两类：
 // - 表格：块级替换按整行，引用、列表里的表格连同行首的 `> ` / 缩进一起替换
@@ -308,13 +308,14 @@ export function buildBlocks(state: EditorState, refs: Map<string, string> = link
   syntaxTree(state).iterate({
     enter(n) {
       const name = n.name
-      if (CONTAINERS.has(name)) return true
+      // 不按节点类型列白名单：除代码等原样节点外，凡是跨行的节点都往里走（任务项、Setext 标题、以后的新容器都覆盖到）；
+      // 单行节点里不可能有跨行的链接 / 图片，整个跳过，所以每次重建只付跨行结构的代价
+      if (RAW.has(name) || !multiLine(n.from, n.to)) return false
       if (name === 'Table') {
         if (!touches(state, n.from, n.to)) out.push(Decoration.replace({ widget: tableWidget(state, n.node), block: true }).range(doc.lineAt(n.from).from, n.to))
         return false
       }
-      if (name === 'Paragraph') return multiLine(n.from, n.to)
-      if ((name === 'Link' || name === 'Image') && multiLine(n.from, n.to)) {
+      if (name === 'Link' || name === 'Image') {
         const parts = touches(state, n.from, n.to) ? null : linkParts(state, n.node, () => refs)
         if (parts && parts.target !== null) {
           const widget = name === 'Image' ? imageWidget(state, parts.text, parts.target) : new LinkText(parts.text.replace(/\s+/g, ' '))
@@ -322,7 +323,6 @@ export function buildBlocks(state: EditorState, refs: Map<string, string> = link
         }
         return false
       }
-      return INLINE_CONTAINERS.has(name)
     },
   })
   return Decoration.set(out, true)

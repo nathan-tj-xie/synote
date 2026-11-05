@@ -30,12 +30,12 @@ import EditorWorker from 'monaco-editor/editor/editor.worker.js?worker'
 import { i18next } from '../../shared/i18n'
 import { fromMonacoLabel, monacoKeyName, parity } from './keymap'
 import { isMac } from './match'
-import { monacoColors } from './tokens'
+import { monacoColors, monacoRules } from './tokens'
 import { bomOffset, dataUrl, imageAt, imageMime, MAX_IMAGE, minimalEdit } from './diffUtil'
 
 // diff 计算放在 worker 里，不卡输入
 self.MonacoEnvironment = { getWorker: () => new EditorWorker() }
-monaco.editor.defineTheme('synote', { base: 'vs-dark', inherit: true, rules: [], colors: monacoColors() })
+monaco.editor.defineTheme('synote', { base: 'vs-dark', inherit: true, rules: monacoRules(), colors: monacoColors() })
 
 // 键位与 CM6 对齐（keymap.ts 的对照表）：Monaco 默认没有的那几条显式注册
 const toKeybinding = (key: string) =>

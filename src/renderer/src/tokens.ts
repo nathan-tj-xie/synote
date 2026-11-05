@@ -26,3 +26,19 @@ export const monacoColors = (): Record<string, string> => ({
   'diffEditor.removedTextBackground': tokens.diffRemoved,
   'diffEditor.border': tokens.border,
 })
+
+// 语法高亮色同样取这份 token（与 CM6 实时预览的代码块一致）；Monaco 规则的颜色不带 #
+export const monacoRules = (): { token: string; foreground: string; fontStyle?: string }[] =>
+  (
+    [
+      ['keyword', tokens.synKeyword],
+      ['string', tokens.synString],
+      ['number', tokens.synNumber],
+      ['comment', tokens.synComment, 'italic'],
+      ['type', tokens.synType],
+      ['tag', tokens.synTag],
+      ['attribute.name', tokens.synTag],
+      ['predefined', tokens.synFunction],
+    ] as const
+  ).map(([token, c, fontStyle]) => ({ token, foreground: c.slice(1), ...(fontStyle && { fontStyle }) }))
+

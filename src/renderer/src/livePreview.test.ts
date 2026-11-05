@@ -121,3 +121,23 @@ describe('引用式链接与图片', () => {
     expect(replaced(s, buildBlocks(s))).toEqual(['![跨\n行][跨]'])
   })
 })
+
+describe('各种容器里的跨行链接与图片', () => {
+  const blocksOf = (text: string) => {
+    const s = state(1, `首行\n\n${text}`)
+    return replaced(s, buildBlocks(s))
+  }
+  it('任务项', () => expect(blocksOf('- [ ] [跨\n  行](a.md)')).toEqual(['[跨\n  行](a.md)']))
+  it('Setext 标题', () => expect(blocksOf('[跨\n行](a.md)\n===')).toEqual(['[跨\n行](a.md)']))
+  it('引用、有序列表、嵌套列表、引用里的任务项', () => {
+    expect(blocksOf('> ![替\n> 代](a.png)')).toEqual(['![替\n> 代](a.png)'])
+    expect(blocksOf('1. [跨\n   行](a.md)')).toEqual(['[跨\n   行](a.md)'])
+    expect(blocksOf('- 外\n  - [跨\n    行](a.md)')).toEqual(['[跨\n    行](a.md)'])
+    expect(blocksOf('> - [ ] *[跨\n>   行](a.md)*')).toEqual(['[跨\n>   行](a.md)'])
+  })
+  it('代码块、HTML 块里的不是链接', () => {
+    expect(blocksOf('```\n[跨\n行](a.md)\n```')).toEqual([])
+    expect(blocksOf('<div>\n[跨\n行](a.md)\n</div>')).toEqual([])
+  })
+})
+
