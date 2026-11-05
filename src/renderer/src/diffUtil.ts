@@ -1,4 +1,5 @@
 // 工作区对比用到的纯函数（不依赖 Monaco），便于单测
+import { decodeComponent } from '../../shared/url'
 
 // a 变成 b 的最小单段替换（去掉公共前后缀），外部重载推给 Monaco 时用，保住光标和撤销栈。
 // 边界只落在码点上：切开代理对的话 Monaco 会把范围扩到整个码点，插入文本却没扩，两边就错位了
@@ -75,13 +76,12 @@ export const normalizeLabel = (s: string) =>
 export function resolveImage(src: string, note: string): string | null {
   src = src.replace(/[?#].*$/, '') // 尖括号、转义、实体已由 destination 处理
   if (/^[a-z][a-z0-9+.-]*:/i.test(src)) return null
-  try {
-    src = decodeURI(src)
-  } catch {
-    // 不是合法的百分号编码：按原文
-  }
   const parts = src.startsWith('/') ? [] : note.split('/').slice(0, -1)
-  for (const seg of src.split('/')) {
+  for (const raw of src.split('/')) {
+    // 按段解码（%23 → #、%26 → &）。解出 / 或 \ 的段（如 %2e%2e%2f）会改变路径结构，整条拒绝；
+    // 解出的 `..` 和字面 `..` 一样按上一级处理，越出笔记库就拒绝。主进程读之前还会按真实路径再校验
+    const seg = decodeComponent(raw)
+    if (/[/\\]/.test(seg)) return null
     if (seg === '..') {
       if (!parts.length) return null
       parts.pop()

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bomOffset, decodeEntities, destination, imageAt, minimalEdit, normalizeLabel } from './diffUtil'
+import { bomOffset, decodeEntities, destination, imageAt, minimalEdit, normalizeLabel, resolveImage } from './diffUtil'
 
 const apply = (a: string, e: ReturnType<typeof minimalEdit>) => (e ? a.slice(0, e.from) + e.insert + a.slice(e.to) : a)
 
@@ -70,5 +70,22 @@ describe('destination / normalizeLabel', () => {
     expect(normalizeLabel('a\\*b')).not.toBe(normalizeLabel('a*b'))
   })
   it('diff 悬停的图片同样先解码', () => expect(imageAt('![](a\\(1\\).png)', 2, 'n.md')?.path).toBe('a(1).png'))
+})
+
+// 图片路径按段 decodeURIComponent（审查第 7 轮）
+describe('resolveImage 百分号解码', () => {
+  it('保留字符也解码', () => {
+    expect(resolveImage('a%23b.png', '笔记/n.md')).toBe('笔记/a#b.png')
+    expect(resolveImage('a%26b.png', 'n.md')).toBe('a&b.png')
+    expect(resolveImage('a%20b%3Fc.png', 'n.md')).toBe('a b?c.png')
+  })
+  it('解出 / 的段整条拒绝，解出的 .. 越界也拒绝', () => {
+    expect(resolveImage('%2e%2e%2fx.png', 'n.md')).toBeNull()
+    expect(resolveImage('a%2Fb.png', 'n.md')).toBeNull()
+    expect(resolveImage('%5c..%5cx.png', 'n.md')).toBeNull()
+    expect(resolveImage('%2e%2e/x.png', 'n.md')).toBeNull()
+    expect(resolveImage('%2e%2e/x.png', 'd/n.md')).toBe('x.png') // 库内的上一级照常
+  })
+  it('不是合法编码时按原文', () => expect(resolveImage('a%zz.png', 'n.md')).toBe('a%zz.png'))
 })
 

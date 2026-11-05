@@ -835,7 +835,7 @@ const allSyntax = [
   '正文 [名字](其他.md) 和 ![图](../attachments/a.png) 还有 ![外链](https://example.com/x.png)',
   '',
   '跨行的 [链',
-  '接](其他.md) 和引用式 ![引用图][图] 与 [引用链接][图] 及 ![转义](../attachments/a\\(1\\)&amp;b.png)',
+  '接](其他.md) 和引用式 ![引用图][图] 与 [引用链接][图] 及 ![转义](../attachments/a\\(1\\)&amp;b.png) ![百分号](../attachments/a%23b%26c.png)',
   '',
   '[图]: ../attachments/a.png',
   '',
@@ -881,6 +881,7 @@ test('live preview renders every syntax and never changes source bytes', async (
   mkdirSync(path.join(vault, 'attachments'))
   writeFileSync(path.join(vault, 'attachments/a.png'), PNG)
   writeFileSync(path.join(vault, 'attachments/a(1)&b.png'), PNG) // 地址里的转义和实体要先解码
+  writeFileSync(path.join(vault, 'attachments/a#b&c.png'), PNG) // %23、%26 按段 decodeURIComponent
   const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(vault, '..', 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' }
   writeFileSync(env.GIT_CONFIG_GLOBAL, '')
   const git = (...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: vault, env })
@@ -898,7 +899,7 @@ test('live preview renders every syntax and never changes source bytes', async (
   await expect(editor).toContainText('自动链接 https://example.com 与 & 和 *转义')
   await expect(editor).not.toContainText('其他.md')
   // 内联写法和引用式写法的图片都按笔记目录解析、内联显示
-  await expect(win.locator('.cm-lp-image img')).toHaveCount(3)
+  await expect(win.locator('.cm-lp-image img')).toHaveCount(4)
   for (const img of await win.locator('.cm-lp-image img').all()) await expect(img).toHaveAttribute('src', /^data:image\/png;base64,/)
   await expect(win.locator('.cm-lp-image-missing')).toHaveText('外链')
   await expect(win.locator('.cm-lp-bullet').first()).toHaveText('•') // 行内装饰只建视口，后面的列表不一定已渲染

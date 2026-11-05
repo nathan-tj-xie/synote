@@ -289,9 +289,79 @@ describe('引用里的块不残留引用标记', () => {
   })
   it('引用里的列表续行：缩进不动', () => expect(visible('> - a\n>   b')).toEqual(['▢ a', '  b']))
   it('引用里的 ATX 标题', () => expect(visible('> # 题')).toEqual(['题']))
+  it('列表里的引用：内层 > 也藏', () => {
+    expect(visible('- > 引用')).toEqual(['▢ 引用'])
+    expect(visible('1. > 引用')).toEqual(['1. 引用'])
+    expect(visible('> - > 引用\n>   > 续')).toEqual(['▢ 引用', '  续'])
+  })
   it('光标在这行时显示源码', () => {
     const s = state(4, '首行\n\n> ```js\n> let x = 1\n> ```')
     expect(replaced(s, buildInline(s, 0, s.doc.length))).toEqual([])
   })
 })
 
+
+// 生成式：随机组合 3 层以内的引用 / 有序列表 / 无序列表 / 任务项，里面放各种块（审查第 7 轮）。
+// 光标不在其中时，用户可见文字里没有作为引用标记的 `>`（代码内容 `a > b` 里的除外）；光标所在行显示源码
+describe('容器嵌套的生成式测试', () => {
+  // mulberry32：固定种子，结果可复现
+  let seed = 0x5eed23
+  const rand = () => {
+    seed = (seed + 0x6d2b79f5) | 0
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+  const pick = <T,>(xs: readonly T[]) => xs[Math.floor(rand() * xs.length)]
+  // 容器：首行标记、续行前缀
+  const containers = [
+    { first: '> ', cont: '> ' },
+    { first: '- ', cont: '  ' },
+    { first: '1. ', cont: '   ' },
+    { first: '- [ ] ', cont: '  ' },
+  ] as const
+  const blocks = [
+    ['段落', ['p 文字 **粗**', '续行 *斜*']],
+    ['围栏代码块', ['```js', 'a > b', '```']],
+    ['表格', ['| h |', '|---|', '| c |']],
+    ['Setext 标题', ['题', '===']],
+    ['ATX 标题', ['## 题']],
+  ] as const
+
+  for (let i = 0; i < 1200; i++) {
+    const depth = 1 + Math.floor(rand() * 3)
+    const stack = Array.from({ length: depth }, () => pick(containers))
+    const [kind, body] = pick(blocks)
+    // 任务标记后面只能是段落文字：`- [ ] > x`、`- [ ] ```js` 里的 `>`、围栏都是普通文字，不是嵌套块。
+    // 所以任务项只作最内层，且只放段落
+    const task = stack.findIndex((c) => c.first === '- [ ] ')
+    if (task !== -1 && (task !== depth - 1 || kind !== '段落')) continue
+    const lines = body.map((text, j) => stack.map((c) => (j === 0 ? c.first : c.cont)).join('') + text)
+    const name = `#${i} ${stack.map((c) => c.first.trim()).join(' ')} ${kind}`
+    if (!stack.some((c) => c.first === '> ')) continue
+    it(name, () => {
+      const src = `首行\n\n${lines.join('\n')}`
+      // 光标在首行：可见文字里不应有引用标记
+      const s = state(1, src)
+      const cuts: [number, number][] = []
+      for (const set of [buildInline(s, 0, s.doc.length), buildBlocks(s)])
+        set.between(0, s.doc.length, (a, b, d) => void (a < b && !d.spec.class && !d.spec.attributes && cuts.push([a, b])))
+      cuts.sort((x, y) => x[0] - y[0])
+      let shown = ''
+      let pos = 0
+      for (const [a, b] of cuts) {
+        if (a < pos) continue
+        shown += s.sliceDoc(pos, a)
+        pos = Math.max(pos, b)
+      }
+      shown += s.sliceDoc(pos)
+      expect(shown.replace(/a > b/g, '')).not.toContain('>')
+      // 光标在块的第一行：这一行原样显示源码
+      const t = state(3, src)
+      const hidden: string[] = []
+      for (const set of [buildInline(t, 0, t.doc.length), buildBlocks(t)])
+        set.between(t.doc.line(3).from, t.doc.line(3).to, (a, b, d) => void (a < b && !d.spec.class && !d.spec.attributes && hidden.push(t.sliceDoc(a, b))))
+      expect(hidden).toEqual([])
+    })
+  }
+})

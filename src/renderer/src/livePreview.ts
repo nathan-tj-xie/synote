@@ -225,17 +225,34 @@ export function linkRefs(state: EditorState): Map<string, string> {
   return refs
 }
 
-// 一行行首的引用标记（`> `，嵌套时多个）到哪里结束：按这一行所在的 Blockquote 层数从行首数 `>`，
-// 不依赖 QuoteMark 节点（lezer 在 Setext 下划线等处不出这个节点）。列表续行的缩进不算，保持不动
-export function quotePrefixEnd(state: EditorState, line: { from: number; text: string }): number {
-  // 层数看这一行正文开头处的节点（嵌套引用开始的那一行，内层 Blockquote 从行中间才开始）
-  const content = line.from + /^(?:[ \t]{0,3}>[ \t]?)*/.exec(line.text)![0].length
-  let depth = 0
-  const tree = syntaxTree(state)
-  for (let n: SyntaxNode | null = tree.resolveInner(content, content < line.from + line.text.length ? 1 : -1); n; n = n.parent) if (n.name === 'Blockquote') depth++
-  if (!depth) return line.from
-  const m = new RegExp(`^(?:[ \\t]{0,3}>[ \\t]?){1,${depth}}`).exec(line.text)
-  return line.from + (m ? m[0].length : 0)
+// 一行上各层引用标记 `>`（连同其后一个空格）的位置。按语法树确定：取这一行末尾处节点的 Blockquote / ListItem 祖先，
+// 由外到内逐层定位——容器从这一行开始时，`>` 就在 Blockquote 的起点、列表标记在 ListMark；续行时跳过缩进再找 `>`。
+// 不从行首数 `>`（`- > 引用` 这种列表里的引用，`>` 前面是列表标记），也不依赖 QuoteMark 节点（Setext 下划线等处没有）。
+// 懒续行（没写 `>`）在那一层停下
+export function quoteMarks(state: EditorState, line: { from: number; to: number }): [number, number][] {
+  const doc = state.doc
+  const chain: SyntaxNode[] = []
+  for (let n: SyntaxNode | null = syntaxTree(state).resolveInner(line.to, -1); n; n = n.parent)
+    if (n.name === 'Blockquote' || n.name === 'ListItem') chain.unshift(n)
+  const ch = (p: number) => doc.sliceString(p, p + 1)
+  const skipWs = (p: number) => {
+    while (p < line.to && (ch(p) === ' ' || ch(p) === '\t')) p++
+    return p
+  }
+  const out: [number, number][] = []
+  let pos = line.from
+  for (const c of chain) {
+    if (c.name === 'ListItem') {
+      const mark = c.from >= line.from ? c.getChild('ListMark') : null
+      pos = mark ? mark.to : skipWs(pos) // 列表标记本身由 ListMark 分支处理，续行缩进不动
+      continue
+    }
+    const p = c.from >= line.from ? c.from : skipWs(pos)
+    if (ch(p) !== '>') break
+    pos = ch(p + 1) === ' ' || ch(p + 1) === '\t' ? p + 2 : p + 1
+    out.push([p, pos])
+  }
+  return out
 }
 
 // [from, to] 里属于这段文字的源码：跨行时去掉续行行首的引用标记和缩进，换行折成一个空格；不反转义
@@ -246,7 +263,7 @@ function sourceText(state: EditorState, from: number, to: number): string {
     const line = doc.lineAt(pos)
     let start = pos
     if (pos !== from) {
-      start = Math.max(start, quotePrefixEnd(state, line))
+      start = Math.max(start, quoteMarks(state, line).at(-1)?.[1] ?? start)
       while (start < line.to && /\s/.test(doc.sliceString(start, start + 1))) start++
     }
     parts.push(doc.sliceString(start, Math.min(line.to, to)))
@@ -434,15 +451,17 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
   const spaceAfter = (p: number) => (doc.sliceString(p, p + 1) === ' ' ? p + 1 : p)
 
   // 容器的行首标记逐行统一处理，不依赖遍历进入哪个子节点（引用里的代码块、Setext 标题、表格等都一样）：
-  // 这一行所属的块（引用的直接子块，如整个代码块）碰到光标时显示源码，否则藏掉 `> `；已被 blocks 整段替换的跳过
+  // 这一行所属的块（引用的直接子块，如整个代码块）碰到光标时显示源码，否则藏掉各层 `> `；已被 blocks 整段替换的跳过
   for (let i = doc.lineAt(from).number; i <= doc.lineAt(to).number; i++) {
     const l = doc.line(i)
-    const end = quotePrefixEnd(state, l)
-    if (end === l.from || inTable(l.from, end)) continue
-    let block: SyntaxNode | null = syntaxTree(state).resolveInner(end, 1)
+    const marks = quoteMarks(state, l)
+    if (!marks.length) continue
+    // 所属的块：这一行末尾处节点往上，直到父节点是 Blockquote 的那一层
+    let block: SyntaxNode | null = syntaxTree(state).resolveInner(l.to, -1)
     while (block?.parent && block.parent.name !== 'Blockquote') block = block.parent
     const [a, b] = block?.parent ? [Math.min(block.from, l.from), Math.max(block.to, l.to)] : [l.from, l.to]
-    if (!touches(state, a, b)) hide(l.from, end)
+    if (touches(state, a, b)) continue
+    for (const [x, y] of marks) if (!inTable(x, y)) hide(x, y)
   }
 
   syntaxTree(state).iterate({
