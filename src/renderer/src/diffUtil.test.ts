@@ -57,6 +57,12 @@ describe('destination / normalizeLabel', () => {
     expect(destination('a&amp;b&#35;&#x41;.png')).toBe('a&b#A.png')
     expect(destination('a\\b.png')).toBe('a\\b.png') // 反斜杠后不是标点：保留
   })
+  it('一次扫描：转义和实体产出的字符不再被重新解释', () => {
+    expect(destination('a\\&amp;b.png')).toBe('a&amp;b.png') // 转义的 & 不再开启实体
+    expect(destination('a&amp;b.png')).toBe('a&b.png')
+    expect(destination('a\\\\&amp;b')).toBe('a\\&b') // 转义的反斜杠之后照常解实体
+    expect(destination('&amp;lt;')).toBe('&lt;') // 实体解出的 & 不再开启实体
+  })
   it('没有 DOM 时未知命名实体保留原文', () => expect(decodeEntities('&copy;')).toBe('&copy;'))
   it('标签：折叠空白、case fold、不反转义', () => {
     expect(normalizeLabel('[ Foo \n Bar ]')).toBe(normalizeLabel('foo bar'))

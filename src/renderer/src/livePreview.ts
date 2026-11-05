@@ -225,21 +225,30 @@ export function linkRefs(state: EditorState): Map<string, string> {
   return refs
 }
 
-// [from, to] 里属于这段文字的源码：跨行时去掉续行行首的容器标记（引用的 `>`）和缩进，换行折成一个空格；不反转义
+// 一行行首的引用标记（`> `，嵌套时多个）到哪里结束：按这一行所在的 Blockquote 层数从行首数 `>`，
+// 不依赖 QuoteMark 节点（lezer 在 Setext 下划线等处不出这个节点）。列表续行的缩进不算，保持不动
+export function quotePrefixEnd(state: EditorState, line: { from: number; text: string }): number {
+  // 层数看这一行正文开头处的节点（嵌套引用开始的那一行，内层 Blockquote 从行中间才开始）
+  const content = line.from + /^(?:[ \t]{0,3}>[ \t]?)*/.exec(line.text)![0].length
+  let depth = 0
+  const tree = syntaxTree(state)
+  for (let n: SyntaxNode | null = tree.resolveInner(content, content < line.from + line.text.length ? 1 : -1); n; n = n.parent) if (n.name === 'Blockquote') depth++
+  if (!depth) return line.from
+  const m = new RegExp(`^(?:[ \\t]{0,3}>[ \\t]?){1,${depth}}`).exec(line.text)
+  return line.from + (m ? m[0].length : 0)
+}
+
+// [from, to] 里属于这段文字的源码：跨行时去掉续行行首的引用标记和缩进，换行折成一个空格；不反转义
 function sourceText(state: EditorState, from: number, to: number): string {
-  const quotes: number[] = []
-  syntaxTree(state).iterate({ from, to, enter: (n) => void (n.name === 'QuoteMark' && quotes.push(n.from)) })
   const doc = state.doc
   const parts: string[] = []
   for (let pos = from; pos <= to; ) {
     const line = doc.lineAt(pos)
     let start = pos
-    if (pos !== from)
-      for (;;) {
-        while (start < line.to && /\s/.test(doc.sliceString(start, start + 1))) start++
-        if (!quotes.includes(start)) break
-        start++ // 跳过 `>`，后面的空格由下一轮跳过
-      }
+    if (pos !== from) {
+      start = Math.max(start, quotePrefixEnd(state, line))
+      while (start < line.to && /\s/.test(doc.sliceString(start, start + 1))) start++
+    }
     parts.push(doc.sliceString(start, Math.min(line.to, to)))
     pos = line.to + 1
   }
@@ -424,6 +433,18 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
   // 标记连带一侧的一个空格一起隐藏（`# `、`> `、`- `）
   const spaceAfter = (p: number) => (doc.sliceString(p, p + 1) === ' ' ? p + 1 : p)
 
+  // 容器的行首标记逐行统一处理，不依赖遍历进入哪个子节点（引用里的代码块、Setext 标题、表格等都一样）：
+  // 这一行所属的块（引用的直接子块，如整个代码块）碰到光标时显示源码，否则藏掉 `> `；已被 blocks 整段替换的跳过
+  for (let i = doc.lineAt(from).number; i <= doc.lineAt(to).number; i++) {
+    const l = doc.line(i)
+    const end = quotePrefixEnd(state, l)
+    if (end === l.from || inTable(l.from, end)) continue
+    let block: SyntaxNode | null = syntaxTree(state).resolveInner(end, 1)
+    while (block?.parent && block.parent.name !== 'Blockquote') block = block.parent
+    const [a, b] = block?.parent ? [Math.min(block.from, l.from), Math.max(block.to, l.to)] : [l.from, l.to]
+    if (!touches(state, a, b)) hide(l.from, end)
+  }
+
   syntaxTree(state).iterate({
     from,
     to,
@@ -436,12 +457,8 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
         out.push(line(`cm-lp-h${h[2]}`).range(doc.lineAt(n.from).from))
         if (active()) return false
         for (const m of n.node.getChildren('HeaderMark')) {
-          if (h[1] === 'Setext') {
-            // 引用里的 Setext 下划线行，lezer 不给行首的 `>` 出 QuoteMark 节点：连同它一起藏
-            const start = doc.lineAt(m.from).from
-            hide(/^[\s>]*$/.test(doc.sliceString(start, m.from)) ? start : m.from, m.to)
-          }
-          else if (m.from === doc.lineAt(n.from).from) hide(m.from, spaceAfter(m.to))
+          if (h[1] === 'Setext') hide(m.from, m.to)
+          else if (m.from === n.from) hide(m.from, spaceAfter(m.to)) // 开头的 `#`（引用里时在 `> ` 之后）
           else hide(doc.sliceString(m.from - 1, m.from) === ' ' ? m.from - 1 : m.from, m.to) // 结尾的 `##`
         }
         return
@@ -463,9 +480,6 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
         }
         case 'Blockquote':
           lines(n.from, n.to, () => 'cm-lp-quote')
-          return
-        case 'QuoteMark':
-          if (!active()) hide(n.from, spaceAfter(n.to))
           return
         case 'HorizontalRule':
           if (!active()) replace(n.from, n.to, Decoration.replace({ widget: new Rule() }))

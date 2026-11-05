@@ -43,24 +43,27 @@ export const unescapeMd = (s: string) => s.replace(/\\([!-/:-@[-`{-~])/g, '$1')
 
 // HTML 实体解码：数字实体和常用命名实体自己解；其余命名实体有 DOM 时交给浏览器（渲染进程），没有就保留原文
 const named: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0' }
-export function decodeEntities(s: string): string {
-  return s.replace(/&(#\d{1,7}|#x[\da-f]{1,6}|[a-z][a-z\d]{0,31});/gi, (m, e: string) => {
-    if (e[0] === '#') {
-      const n = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10)
-      return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : '\ufffd'
-    }
-    if (named[e]) return named[e]
-    if (typeof document === 'undefined') return m
-    const t = document.createElement('textarea')
-    t.innerHTML = m // 已校验只是一个实体，不会带出标签
-    return t.value
-  })
+const ENTITY = '&(#\\d{1,7}|#x[\\da-f]{1,6}|[a-z][a-z\\d]{0,31});'
+function decodeEntity(m: string, e: string): string {
+  if (e[0] === '#') {
+    const n = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10)
+    return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : '\ufffd'
+  }
+  if (named[e]) return named[e]
+  if (typeof document === 'undefined') return m
+  const t = document.createElement('textarea')
+  t.innerHTML = m // 已校验只是一个实体，不会带出标签
+  return t.value
 }
+export const decodeEntities = (s: string) => s.replace(new RegExp(ENTITY, 'gi'), decodeEntity)
 
-// 链接目标（CommonMark 的 link destination）：去尖括号、反转义、解码实体。内联、引用式、自动链接、diff 悬停都走它
+// 链接目标（CommonMark 的 link destination）：去尖括号，再一次扫描同时处理反斜杠转义和实体——
+// 两者产出的字符不再被重新解释（`\&amp;` 是字面的 `&amp;`，`\\&amp;` 是 `\&`）。内联、引用式、diff 悬停都走它
 export function destination(raw: string): string {
   const s = raw.startsWith('<') && raw.endsWith('>') ? raw.slice(1, -1) : raw
-  return decodeEntities(unescapeMd(s))
+  return s.replace(new RegExp(`\\\\([!-/:-@[-\`{-~])|${ENTITY}`, 'gi'), (m, esc: string | undefined, e: string | undefined) =>
+    esc !== undefined ? esc : decodeEntity(m, e!),
+  )
 }
 
 // 引用标签的匹配键（CommonMark）：去外层方括号，折叠空白，Unicode case fold；不反转义（`[a\*b]` 只匹配 `[a\*b]`）

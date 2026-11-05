@@ -3,7 +3,7 @@ import { ensureSyntaxTree } from '@codemirror/language'
 import { EditorState } from '@codemirror/state'
 import type { DecorationSet } from '@codemirror/view'
 import { describe, expect, it } from 'vitest'
-import { buildBlocks, buildInline } from './livePreview'
+import { buildBlocks, buildInline, livePreview } from './livePreview'
 
 const doc = [
   '# 标题', // 0
@@ -23,7 +23,8 @@ const doc = [
 
 // 光标放在第 cursorLine 行（从 1 起）行首
 function state(cursorLine: number, text = doc) {
-  const s0 = EditorState.create({ doc: text, extensions: [markdown({ base: markdownLanguage })] })
+  // 带上 livePreview：buildInline 跳过 blocks 字段已整段替换的范围，和运行时一致
+  const s0 = EditorState.create({ doc: text, extensions: [markdown({ base: markdownLanguage }), livePreview(null)] })
   const s = s0.update({ selection: { anchor: s0.doc.line(cursorLine).from } }).state
   ensureSyntaxTree(s, s.doc.length)
   return s
@@ -179,7 +180,7 @@ const coverage: [string, string, string[], string[]][] = [
   ['列表里跨行的删除线 / 行内代码', '- ~~a\n  b~~ `c\n  d`', ['-', '~~', '~~', '`', '`'], []],
   ['引用里跨行的链接', '> [跨\n> 行](a.md)', ['> '], ['[跨\n> 行](a.md)']],
   ['列表里跨行的图片', '- ![替\n  代](a.png)', ['-'], ['![替\n  代](a.png)']],
-  ['引用里的 Setext 标题', '> 题\n> ===', ['> ', '> ==='], []],
+  ['引用里的 Setext 标题', '> 题\n> ===', ['> ', '> ', '==='], []],
   ['任务项里跨行的引用式链接', '- [ ] [跨\n  行][r]\n\n[r]: a.md', ['- ', '[ ]'], ['[跨\n  行][r]']],
 ]
 
@@ -249,6 +250,48 @@ describe('目标解码与标签匹配', () => {
     expect(srcs('![x][Foo  Bar]\n\n[foo bar]: a.png')).toEqual(['a.png'])
     expect(srcs('![x][ẞ]\n\n[ss]: b.png')).toEqual(['b.png']) // Unicode case fold：ẞ ≡ ss
     expect(srcs('![x][跨\n行]\n\n[跨 行]: c.png')).toEqual([])  // 跨行图片由 blocks 处理，行内插件不出
+  })
+})
+
+// 容器行首标记逐行统一处理（审查第 6 轮）：光标移开后，引用里的各种块都不残留 `>`
+describe('引用里的块不残留引用标记', () => {
+  // 光标在首行时用户看到的文字：去掉替换范围（widget 记为 ▢）
+  const visible = (text: string) => {
+    const s = state(1, `首行\n\n${text}`)
+    const cuts: [number, number, string][] = []
+    for (const set of [buildInline(s, 0, s.doc.length), buildBlocks(s)])
+      set.between(0, s.doc.length, (a, b, d) => void (a < b && !d.spec.class && !d.spec.attributes && cuts.push([a, b, d.spec.widget ? '▢' : ''])))
+    cuts.sort((x, y) => x[0] - y[0])
+    let out = ''
+    let pos = 0
+    for (const [a, b, w] of cuts) {
+      if (a < pos) continue // 被更大的范围盖住
+      out += s.sliceDoc(pos, a) + w
+      pos = b
+    }
+    return (out + s.sliceDoc(pos)).split('\n').slice(2)
+  }
+  const noQuote = (lines: string[]) => expect(lines.filter((l) => /^\s*>/.test(l))).toEqual([])
+  it('围栏代码块', () => {
+    const v = visible('> ```js\n> let x = 1\n> ```')
+    noQuote(v)
+    expect(v).toEqual(['▢', 'let x = 1', '']) // 开围栏换成语言标签，闭围栏藏掉
+  })
+  it('缩进代码块（代码内的缩进保留）', () => {
+    const v = visible('>     code\n>     more')
+    noQuote(v)
+    expect(v).toEqual(['    code', '    more'])
+  })
+  it('表格', () => noQuote(visible('> | a |\n> |---|\n> | 1 |')))
+  it('Setext 标题', () => expect(visible('> 题\n> ===')).toEqual(['题', '']))
+  it('嵌套引用里的代码块：只藏容器标记，代码里的 > 保留', () => {
+    expect(visible('> > ```\n> > > x\n> > ```')).toEqual(['▢', '> x', ''])
+  })
+  it('引用里的列表续行：缩进不动', () => expect(visible('> - a\n>   b')).toEqual(['▢ a', '  b']))
+  it('引用里的 ATX 标题', () => expect(visible('> # 题')).toEqual(['题']))
+  it('光标在这行时显示源码', () => {
+    const s = state(4, '首行\n\n> ```js\n> let x = 1\n> ```')
+    expect(replaced(s, buildInline(s, 0, s.doc.length))).toEqual([])
   })
 })
 
