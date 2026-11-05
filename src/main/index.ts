@@ -4,9 +4,10 @@ import { existsSync, promises as fs, statSync, watch, type FSWatcher } from 'nod
 import path from 'node:path'
 import { i18next, i18nOptions } from '../shared/i18n'
 import { commands } from '../shared/commands'
-import { indexMethods, type GitState, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
+import { indexMethods, type GitState, type OrphanAttachment, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
 import { tokens } from '../shared/tokens'
 import { exec, findGit, Git, GitError, type GitDetectionResult } from './git'
+import { checkOrphans, removeOrphans, trackedOf } from './orphans'
 import { attachmentName, isHidden, realInVault, realParentInVault, resolveInVault, saveAttachment, scanEntries, toPosix, uniqueNoteName, writeTarget } from './vault'
 
 i18next.init(i18nOptions)
@@ -102,7 +103,10 @@ function watchVault(dir: string): FSWatcher {
 function forkIndexer(dir: string): UtilityProcess {
   const proc = utilityProcess.fork(path.join(__dirname, 'index-worker.js'), [], { serviceName: 'synote-index' })
   proc.on('message', (m: { id?: number; event?: string; paths?: string[]; result?: unknown; error?: string }) => {
-    if (m.event === 'changed') return win?.webContents.send('index:changed', { root: dir, paths: m.paths })
+    if (m.event === 'changed') {
+      if (root === dir) pruneFresh(dir).catch((e) => console.error('[orphans] prune failed', e))
+      return win?.webContents.send('index:changed', { root: dir, paths: m.paths })
+    }
     const c = calls.get(m.id!)
     calls.delete(m.id!)
     if (m.error) c?.reject(new Error(m.error))
@@ -261,7 +265,11 @@ ipcMain.handle('git:readHead', async (_e, vault: string, rel: string) => {
   }
 })
 // 写入、新建、回收同样按真实路径校验：父目录（或被跟随的链接）被换成指向库外时拒绝
-ipcMain.handle('file:write', async (_e, vault: string, rel: string, content: string) => fs.writeFile(await writeTarget(checkVault(vault), rel), content))
+ipcMain.handle('file:write', async (_e, vault: string, rel: string, content: string) => {
+  await fs.writeFile(await writeTarget(checkVault(vault), rel), content)
+  // 不等 watcher 防抖，写完立即对账：删掉或撤销最后一处引用后，孤儿状态 1 s 内更新（S11）
+  callIndex('reconcile').catch((e) => console.error('[index] reconcile failed', e))
+})
 ipcMain.handle('file:createNote', async (_e, vault: string, dir: string) => {
   const r = checkVault(vault)
   const entries = await scanEntries(r)
@@ -271,12 +279,77 @@ ipcMain.handle('file:createNote', async (_e, vault: string, dir: string) => {
 })
 // 粘贴 / 拖入的附件（S10）：串成一条链，并发的两次粘贴不会都没查到对方而写出两份同样的文件
 let attaching: Promise<unknown> = Promise.resolve()
+// 在途附件（S11）：本会话粘贴 / 拖入（含复用已有文件）、还没被任何已落盘笔记引用的，按库记。
+// 清理时不列、不删：链接可能还没插进去或还没自动保存。三种情况移出：索引发现它被引用；渲染进程报告插入任务结束且
+// 笔记已落盘（file:attachmentSettled，插完又撤销的这时就能清理）；超时兜底。值为保护到期的时间
+// shortcut: 兜底固定 10 分钟，防渲染进程崩溃或漏报时永远不释放；有超长的插入（如超大文件）时再按大小放宽
+const FRESH_MS = 10 * 60_000
+const fresh = new Map<string, Map<string, number>>()
+const isFresh = (dir: string, p: string) => (fresh.get(dir)?.get(p) ?? 0) > Date.now()
+async function pruneFresh(dir: string): Promise<void> {
+  const s = fresh.get(dir)
+  if (!s?.size) return
+  for (const [p, until] of s) if (until <= Date.now()) s.delete(p)
+  for (const p of (await callIndex('referenced', [...s.keys()])) as string[]) s.delete(p)
+}
+ipcMain.handle('file:attachmentSettled', (_e, vault: string, paths: string[]) => {
+  if (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string')) throw new Error('invalid paths')
+  for (const p of paths) fresh.get(vault)?.delete(p) // 只动内存里的保护表，期间切了库也无妨
+})
 ipcMain.handle('file:saveAttachment', (_e, vault: string, name: string | null, bytes: Uint8Array) => {
   const r = checkVault(vault)
   if (!(bytes instanceof Uint8Array) || (name !== null && typeof name !== 'string')) throw new Error('invalid attachment')
   const job = attaching.then(async () => {
     const rel = await saveAttachment(r, attachmentName(name, new Date()), bytes)
+    if (!fresh.has(r)) fresh.set(r, new Map())
+    fresh.get(r)!.set(rel, Date.now() + FRESH_MS)
     return { path: rel, warn: await sizeWarning(r, rel, bytes.length) }
+  })
+  attaching = job.catch(() => {})
+  return job
+})
+
+// 孤儿附件（S11）以落盘内容为准：先对账一次，补上 watcher 防抖里还没进索引的改动，再取孤儿列表
+async function currentOrphans(): Promise<string[]> {
+  await callIndex('reconcile')
+  return (await callIndex('orphans')) as string[]
+}
+
+// 当前库是 git 仓库时返回它的 git；没有可用的 git、不是仓库都按非 git 目录处理（返回 null）
+async function vaultRepo(r: string): Promise<Git | null> {
+  const res = await repoGit()
+  if (!('g' in res)) return null
+  if (res.g.cwd !== r) throw new Error(t('vaultSwitched', { vault: r })) // 等 git 检测期间切了库
+  return (await res.g.isRepo()) ? res.g : null
+}
+
+// "将删除的孤儿附件"清单：清理命令的确认框和 S13 的 commit 面板分组都用它
+ipcMain.handle('orphans:list', async (_e, vault: string): Promise<OrphanAttachment[]> => {
+  const r = checkVault(vault)
+  const all = await currentOrphans()
+  await pruneFresh(r) // 对账之后再修剪：刚保存的引用已进索引
+  const list = all.filter((p) => !isFresh(r, p))
+  const tracked = await trackedOf(await vaultRepo(r), list)
+  return list.map((p) => ({ path: p, tracked: tracked.has(p) }))
+})
+// 删除用户确认过的孤儿附件：以删除时刻的索引复核（期间加了引用的不删），路径再按真实路径校验；
+// 文件名仍出现在某篇笔记正文里的（第二道防线，防引用解析漏判）、在途附件也不删，放进 kept 告诉用户。
+// 和附件写入串在同一条链上：粘贴复用某个孤儿文件时，不会在写入途中被删
+ipcMain.handle('orphans:delete', (_e, vault: string, paths: string[]) => {
+  const r = checkVault(vault)
+  if (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string')) throw new Error('invalid paths')
+  const job = attaching.then(async () => {
+    const checked = await checkOrphans(r, paths, new Set(await currentOrphans()))
+    await pruneFresh(r)
+    const pending = checked.map(([p]) => p).filter((p) => isFresh(r, p))
+    const mentioned = (await callIndex('mentioned', checked.map(([p]) => p).filter((p) => !pending.includes(p)))) as string[]
+    const kept = [...pending.map((path) => ({ path, reason: 'pending' as const })), ...mentioned.map((path) => ({ path, reason: 'mentioned' as const }))]
+    const targets = checked.filter(([p]) => !kept.some((k) => k.path === p))
+    try {
+      return { deleted: await removeOrphans(targets, await vaultRepo(r), (p) => shell.trashItem(p)), kept }
+    } finally {
+      callIndex('reconcile').catch((e) => console.error('[index] reconcile failed', e))
+    }
   })
   attaching = job.catch(() => {})
   return job

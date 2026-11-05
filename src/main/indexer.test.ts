@@ -21,7 +21,8 @@ describe('extractLinks', () => {
     ].join('\n')
     const links = extractLinks('n/note.md', text).map((l) => `${l.kind}:${l.dst}`)
     expect(links.sort()).toEqual(
-      ['note:b/c d.md', 'att:attachments/p.png', 'att:attachments/q.png', 'wiki:同名', 'note:dir/sub.md', 'wiki:x', 'note:n/r.md'].sort(),
+      // 宽松规则在每个可能的切点都算一处（p.png) 是多出来的，多算不会误判孤儿）
+      ['note:b/c d.md', 'att:attachments/p.png', 'att:attachments/p.png)', 'att:attachments/q.png', 'wiki:同名', 'note:dir/sub.md', 'wiki:x', 'note:n/r.md'].sort(),
     )
   })
 
@@ -36,6 +37,24 @@ describe('extractLinks', () => {
     const links = extractLinks('note.md', text).map((l) => `${l.kind}:${l.dst}`)
     expect(links.sort()).toEqual(['note:b#x.md', 'note:q?.md', 'att:attachments/a b.png', 'att:attachments/c d.png'].sort())
   })
+})
+
+// 附件引用和渲染进程同一套解析：文件名里的 [ ] ( )、?query / #fragment、百分号编码、尖括号、实体、引用式、按笔记目录解析；
+// 代码块里的同样要算上（只能走宽松规则）
+test('attachment refs keep brackets and parens, drop query and fragment', () => {
+  const files = ['report[1].pdf', 'a(1).png', 'book.pdf', 'x.png', 'y z.png', 'r&d.png', 'ref.png', 'img.png']
+  const text = [
+    '[报告](../attachments/report[1].pdf) ![](../attachments/a(1).png) [书](/attachments/book.pdf#page=2)',
+    '![](../attachments/x.png?v=1) ![](<../attachments/y z.png>) ![](../attachments/r&amp;d.png) ![图][id]',
+    '<img src="../attachments/img.png?w=1">',
+    '',
+    '[id]: ../attachments/ref.png "标题"',
+  ].join('\n')
+  const atts = (src: string, t: string) => new Set(extractLinks(src, t).filter((l) => l.kind === 'att').map((l) => l.dst))
+  const got = atts('sub/n.md', text)
+  for (const f of files) expect(got).toContain(`attachments/${f}`)
+  const fenced = atts('n.md', '```\n![](attachments/report[1].pdf) ![](attachments/a(1).png) [](attachments/book.pdf#p=2) ![](attachments/y%20z.png)\n```')
+  for (const f of ['report[1].pdf', 'a(1).png', 'book.pdf', 'y z.png']) expect(fenced).toContain(`attachments/${f}`)
 })
 
 test('<img src> with surrounding whitespace still counts as a reference', () => {
@@ -118,6 +137,51 @@ describe('Indexer', () => {
       { path: 'w.md', line: 3, text: '见 [[b b|别名]]' },
     ])
     expect(idx.backlinks('x/b b.md').map((b) => b.path)).toEqual(['c.md'])
+  })
+
+  // 孤儿 = 全库引用计数为 0（S11）：删掉最后一处引用变孤儿，撤销、挪到别的笔记、代码块里的引用都算回来；删笔记也会让附件变孤儿
+  test('orphans follow reference edits', async () => {
+    const { idx, write, root } = setup({
+      'a.md': '![](attachments/p.png)',
+      'sub/b.md': '```\n![](../attachments/q.png)\n```',
+      'c.md': '[文档](attachments/r.pdf)',
+      'attachments/p.png': '',
+      'attachments/q.png': '',
+      'attachments/r.pdf': '',
+    })
+    await idx.reconcile()
+    expect(idx.orphans()).toEqual([])
+    write('a.md', '没有引用了')
+    await idx.reconcile()
+    expect(idx.orphans()).toEqual(['attachments/p.png'])
+    write('sub/b.md', '![](../attachments/p.png) ```\n![](../attachments/q.png)\n```')
+    await idx.reconcile()
+    expect(idx.orphans()).toEqual([])
+    rmSync(path.join(root, 'c.md'))
+    await idx.reconcile()
+    expect(idx.orphans()).toEqual(['attachments/r.pdf'])
+  })
+
+  // 大小写别名（codex #47 第二轮）：不区分大小写的文件系统上 report.png 也指向 Report.PNG，统一按引用存在处理
+  test('references match attachments case-insensitively', async () => {
+    const { idx } = setup({ 'a.md': '![](attachments/report.png)', 'b.md': '见 PHOTO.jpg', 'attachments/Report.PNG': '', 'attachments/photo.JPG': '' })
+    await idx.reconcile()
+    await idx.idle()
+    expect(idx.orphans()).toEqual(['attachments/photo.JPG'])
+    expect(idx.referenced(['attachments/Report.PNG', 'attachments/photo.JPG'])).toEqual(['attachments/Report.PNG'])
+    expect(idx.mentioned(['attachments/photo.JPG'])).toEqual(['attachments/photo.JPG'])
+  })
+
+  // 第二道防线：文件名原样或百分号编码出现在任一正文里就算提到（含还没写进全文索引的）
+  test('mentioned finds attachment names anywhere in note text', async () => {
+    const { idx, write } = setup({ 'a.md': '截图见 shot.png', 'b.md': 'y%20z.png', 'attachments/shot.png': '', 'attachments/y z.png': '', 'attachments/none.png': '' })
+    await idx.reconcile()
+    await idx.idle()
+    expect(idx.orphans()).toEqual(['attachments/none.png', 'attachments/shot.png', 'attachments/y z.png'])
+    expect(idx.mentioned(idx.orphans())).toEqual(['attachments/shot.png', 'attachments/y z.png'])
+    write('a.md', '提到 none.png')
+    await idx.reconcile() // 不等 idle：新正文可能还在内存里
+    expect(idx.mentioned(['attachments/none.png'])).toEqual(['attachments/none.png'])
   })
 
   test('short queries are ranked by occurrence count', async () => {

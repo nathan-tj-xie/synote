@@ -1,6 +1,6 @@
 // 按领域拆 store（ADR 0005）：vault / editor / ui / git
 import { create } from 'zustand'
-import type { GitState, VaultInfo } from '../../shared/api'
+import type { GitState, OrphanAttachment, VaultInfo } from '../../shared/api'
 
 type VaultState = {
   vault: VaultInfo | null
@@ -24,9 +24,12 @@ type UiState = {
   error: string | null
   palette: 'files' | 'commands' | null
   sidebar: 'files' | 'search' | 'git'
+  // "清理孤儿附件"确认框：清单来自哪个库（确认时按它删，期间切了库主进程会拒绝）
+  orphans: { root: string; list: OrphanAttachment[] } | null
   setError: (e: string | null) => void
   setPalette: (p: UiState['palette']) => void
   setSidebar: (v: UiState['sidebar']) => void
+  setOrphans: (o: UiState['orphans']) => void
 }
 
 export const useVault = create<VaultState>((set, get) => ({
@@ -70,9 +73,11 @@ export const useUi = create<UiState>((set) => ({
   error: null,
   palette: null,
   sidebar: 'files',
+  orphans: null,
   setError: (error) => set({ error }),
   setPalette: (palette) => set({ palette }),
   setSidebar: (sidebar) => set({ sidebar }),
+  setOrphans: (orphans) => set({ orphans }),
 }))
 
 // git 领域的 store（ADR 0005）：主进程状态的只读镜像，由 git:changed 推送更新

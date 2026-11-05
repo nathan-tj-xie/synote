@@ -1,0 +1,10 @@
+.overlay { position: fixed; inset: 0; } /* 同 Palette：不加遮罩色（ADR 0005 不硬编码颜色） */
+.content { position: fixed; top: 12%; left: 50%; transform: translateX(-50%); width: min(600px, 90vw); display: flex; flex-direction: column; gap: 10px; padding: 14px; box-sizing: border-box; background: var(--bg-raised); border: 1px solid var(--border); border-radius: 8px; outline: none; }
+.title { margin: 0; font-size: 14px; font-weight: 600; }
+.muted { margin: 0; color: var(--fg-muted); }
+.list { margin: 0; padding: 0; list-style: none; max-height: 360px; overflow: auto; }
+.list li { display: flex; gap: 12px; padding: 3px 0; }
+.path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.actions { display: flex; justify-content: flex-end; gap: 8px; }
+.actions button { border: 1px solid var(--border); background: none; color: inherit; padding: 4px 12px; border-radius: 4px; cursor: pointer; font: inherit; }
+.actions .primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }

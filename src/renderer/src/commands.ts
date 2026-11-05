@@ -1,6 +1,7 @@
 // 命令注册表的运行时部分：可用条件和执行逻辑；id、标题、快捷键见 shared/commands.ts
 import { commands, type CommandId } from '../../shared/commands'
-import { forget, saveCurrent, toggleDiff } from './editor'
+import { i18next } from '../../shared/i18n'
+import { attachmentsSettled, flushAll, forget, saveCurrent, toggleDiff } from './editor'
 import { matchKey } from './match'
 import { useEditor, useUi, useVault } from './store'
 
@@ -52,6 +53,21 @@ export const handlers: Record<CommandId, Handler> = {
     },
   },
   rebuildIndex: { when: vault, run: () => window.synote.rebuildIndex(root()).catch(fail) },
+  // 孤儿以落盘内容为准（GLOSSARY：由索引推导）：先把编辑器里未保存的引用写下去，再取清单
+  cleanOrphans: {
+    when: vault,
+    run: async () => {
+      const r = root()
+      try {
+        await attachmentsSettled() // 在途的粘贴 / 拖入先插完链接，再一起落盘
+        if (!(await flushAll())) return fail(i18next.t('orphansUnsaved'))
+        const list = await window.synote.listOrphans(r)
+        if (useVault.getState().vault?.root === r) ui().setOrphans({ root: r, list })
+      } catch (e) {
+        fail(e)
+      }
+    },
+  },
 }
 
 export const ids = Object.keys(commands) as CommandId[]

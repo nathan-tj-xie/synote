@@ -1189,3 +1189,153 @@ test('cmd-click follows links to anchors, broken links, backlinks panel', async 
   await expect(win.getByRole('tab', { name: 'b b' })).toHaveAttribute('aria-selected', 'true')
   await app.close()
 })
+
+// 孤儿附件（S11）：删掉最后一处引用后 1 s 内变孤儿，撤销后恢复（自动保存 500 ms + 写盘后立即对账）
+test('removing the last reference makes an orphan within 1 s; undo restores it', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '首行\n![图](attachments/x.png)\n', 'b.md': '', 'attachments/x.png': 'png' })
+  await expect.poll(() => win.evaluate((v) => window.synote.attachmentRefs(v, 'attachments/x.png').catch(() => 0), vault), { timeout: 5000 }).toBe(1)
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await win.locator('.cm-content').click()
+  await win.keyboard.press('ControlOrMeta+a')
+  await win.keyboard.press('Backspace')
+  const orphans = () => win.evaluate((v) => window.synote.orphans(v), vault)
+  await expect.poll(orphans, { timeout: 1000, intervals: [50] }).toEqual(['attachments/x.png'])
+  await win.keyboard.press('ControlOrMeta+z')
+  await expect.poll(orphans, { timeout: 1000, intervals: [50] }).toEqual([])
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('首行\n![图](attachments/x.png)\n')
+  await app.close()
+})
+
+async function cleanOrphans(win: Page) {
+  await win.keyboard.press('ControlOrMeta+Shift+p')
+  await win.keyboard.type('清理孤儿附件')
+  await win.keyboard.press('Enter')
+  return win.getByRole('dialog', { name: '清理孤儿附件' })
+}
+
+// 非 git 目录：确认后移到回收站；确认框打开期间新加了引用的不删，attachments/ 以外的从不删
+test('clean orphans in a plain folder trashes only orphans confirmed at delete time', async () => {
+  const { app, win, vault } = await launch({
+    'a.md': '![](attachments/keep.png)',
+    'attachments/keep.png': 'k',
+    'attachments/gone.png': 'g',
+    'attachments/late.png': 'l',
+    'loose.png': 'x',
+  })
+  await expect.poll(() => win.evaluate((v) => window.synote.orphans(v).catch(() => []), vault), { timeout: 5000 }).toEqual(['attachments/gone.png', 'attachments/late.png'])
+  const dialog = await cleanOrphans(win)
+  await expect(dialog.getByRole('listitem')).toHaveText(['attachments/gone.png回收站', 'attachments/late.png回收站'])
+  writeFileSync(path.join(vault, 'b.md'), '[刚加的](attachments/late.png)')
+  await dialog.getByRole('button', { name: '删除 2 个' }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(existsSync(path.join(vault, 'attachments/gone.png'))).toBe(false)
+  expect(['keep.png', 'late.png'].map((f) => existsSync(path.join(vault, 'attachments', f)))).toEqual([true, true])
+  expect(existsSync(path.join(vault, 'loose.png'))).toBe(true)
+  await expect.poll(() => win.evaluate((v) => window.synote.orphans(v), vault)).toEqual([])
+  // 没有孤儿时只提示
+  await expect(await cleanOrphans(win)).toContainText('没有孤儿附件')
+  await win.keyboard.press('Escape')
+  await app.close()
+})
+
+// 引用解析的回归（codex #47 P1）：文件名里有 [ ] ( )、带 ?query / #fragment、%20、引用式、<img src> 的在用附件都不算孤儿，
+// 清理不删；只在正文里提到文件名（引用解析认不出）的，第二道防线拦下并提示
+test('clean orphans never deletes attachments referenced in unusual forms', async () => {
+  const used = ['report[1].pdf', 'a(1).png', 'book.pdf', 'x.png', 'y z.png', 'ref.png', 'img.png']
+  const { app, win, vault } = await launch({
+    'sub/n.md': [
+      '[报告](../attachments/report[1].pdf) ![](../attachments/a(1).png) [书](../attachments/book.pdf#page=2)',
+      '![](../attachments/x.png?v=1) ![](../attachments/y%20z.png) ![图][id] <img src="../attachments/img.png">',
+      '',
+      '[id]: ../attachments/ref.png',
+      '',
+      '截图另见 attachments 目录里的 shot.png',
+    ].join('\n'),
+    ...Object.fromEntries([...used, 'shot.png', 'gone.png'].map((f) => [`attachments/${f}`, f])),
+  })
+  await expect.poll(() => win.evaluate((v) => window.synote.orphans(v).catch(() => []), vault), { timeout: 5000 }).toEqual(['attachments/gone.png', 'attachments/shot.png'])
+  const dialog = await cleanOrphans(win)
+  await dialog.getByRole('button', { name: '删除 2 个' }).click()
+  await expect(win.getByRole('alert')).toContainText('attachments/shot.png')
+  expect(readdirSync(path.join(vault, 'attachments')).sort()).toEqual([...used, 'shot.png'].sort())
+  await app.close()
+})
+
+// 在途附件（codex #47 第二轮）：拖入两个文件，第二个写盘被拖慢；期间第一个已落盘但链接还没插。
+// 主进程直接删也拦下（pending），清理命令等插完、保存后再列，附件不被删，链接有效
+test('attachments still being inserted are never cleaned', async () => {
+  const { app, win, vault } = await launch({ 'n.md': '开头' })
+  await win.getByRole('treeitem', { name: 'n.md' }).click()
+  await win.locator('.cm-content').click()
+  await win.keyboard.press('End')
+  const held = await holdRecentWrite(app, 2000, 'second.pdf')
+  await win.evaluate(() => {
+    const dt = new DataTransfer()
+    for (const name of ['first.pdf', 'second.pdf']) dt.items.add(new File([new Uint8Array([name.length, 1])], name, { type: 'application/pdf' }))
+    const el = document.querySelector('.cm-content')!
+    const r = el.getBoundingClientRect()
+    el.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true, clientX: r.right - 2, clientY: r.bottom - 2 }))
+  })
+  await expect.poll(held).toBe(true)
+  expect(existsSync(path.join(vault, 'attachments/first.pdf'))).toBe(true)
+  // 不经过 UI 直接删（模拟没等插入的调用方）：主进程的在途保护拦下
+  const r = await win.evaluate((v) => window.synote.deleteOrphans(v, ['attachments/first.pdf']), vault)
+  expect(r).toEqual({ deleted: [], kept: [{ path: 'attachments/first.pdf', reason: 'pending' }] })
+  const dialog = await cleanOrphans(win) // 等插完链接、落盘后才列
+  await expect(dialog).toContainText('没有孤儿附件', { timeout: 10_000 })
+  await win.keyboard.press('Escape')
+  const text = readFileSync(path.join(vault, 'n.md'), 'utf8')
+  expect(text).toContain('[first](attachments/first.pdf)')
+  expect(text).toContain('[second](attachments/second.pdf)')
+  expect(readdirSync(path.join(vault, 'attachments')).sort()).toEqual(['first.pdf', 'second.pdf'])
+  await app.close()
+})
+
+// 误粘后撤销（codex #47 第三轮）：插入任务结束后在途保护就解除，撤销掉链接的附件能被清理
+test('an attachment pasted and then undone can be cleaned', async () => {
+  const { app, win, vault } = await launch({ 'n.md': '开头' })
+  await win.getByRole('treeitem', { name: 'n.md' }).click()
+  await win.locator('.cm-content').click()
+  await win.keyboard.press('End')
+  await fire(win, 'drop', 'oops.pdf', [9, 9], 'application/pdf')
+  const file = path.join(vault, 'n.md')
+  await expect.poll(() => readFileSync(file, 'utf8')).toBe('开头[oops](attachments/oops.pdf)')
+  await win.keyboard.press('ControlOrMeta+z')
+  await expect.poll(() => readFileSync(file, 'utf8')).toBe('开头')
+  const dialog = await cleanOrphans(win)
+  await expect(dialog.getByRole('listitem')).toHaveText(['attachments/oops.pdf回收站'])
+  await dialog.getByRole('button', { name: '删除 1 个' }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(win.getByRole('alert')).toHaveCount(0)
+  expect(existsSync(path.join(vault, 'attachments/oops.pdf'))).toBe(false)
+  await app.close()
+})
+
+// 大小写别名：引用写成小写也不删
+test('clean orphans keeps attachments referenced with different case', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '![](attachments/report.png)', 'attachments/Report.PNG': 'r', 'attachments/gone.png': 'g' })
+  await expect.poll(() => win.evaluate((v) => window.synote.orphans(v).catch(() => []), vault), { timeout: 5000 }).toEqual(['attachments/gone.png'])
+  const dialog = await cleanOrphans(win)
+  await dialog.getByRole('button', { name: '删除 1 个' }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(readdirSync(path.join(vault, 'attachments'))).toEqual(['Report.PNG'])
+  await app.close()
+})
+
+// git 仓库：已跟踪的 git rm（暂存删除），未跟踪的移到回收站
+test('clean orphans in a git repo: tracked are git rm-ed, untracked are trashed', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '![](attachments/keep.png)', 'attachments/keep.png': 'k', 'attachments/old.png': 'o' })
+  const git = (...args: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: vault }).toString()
+  git('init', '-q')
+  git('add', '.')
+  git('commit', '-qm', 'init')
+  writeFileSync(path.join(vault, 'attachments/new.png'), 'n')
+  await expect.poll(() => win.evaluate((v) => window.synote.orphans(v).catch(() => []), vault), { timeout: 5000 }).toEqual(['attachments/new.png', 'attachments/old.png'])
+  const dialog = await cleanOrphans(win)
+  await expect(dialog.getByRole('listitem')).toHaveText(['attachments/new.png回收站', 'attachments/old.pnggit rm'], { timeout: 10_000 })
+  await dialog.getByRole('button', { name: '删除 2 个' }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(readdirSync(path.join(vault, 'attachments'))).toEqual(['keep.png'])
+  expect(git('status', '--porcelain')).toBe('D  attachments/old.png\n')
+  await app.close()
+})

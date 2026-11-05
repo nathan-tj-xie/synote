@@ -166,6 +166,10 @@ async function flush(path: string) {
 
 // 粘贴 / 拖入文件（S10）：经主进程写进 attachments/，写完把相对链接插进发起时那篇笔记的光标处，走普通编辑事务和保存路径。
 // 交接锁期间拒绝（吞掉事件，什么都不写）；写盘期间换了库或进入交接就不插链接，已写的附件成为孤儿，由孤儿清理处理
+// 进行中的粘贴 / 拖入：清理孤儿附件前等它们插完链接（之后的自动保存由 flushAll 冲刷）
+const attaching = new Set<Promise<void>>()
+export const attachmentsSettled = () => Promise.all(attaching)
+
 function attach(e: Event, files: FileList | undefined, paste: boolean, at?: number | null): boolean {
   if (!files?.length) return false
   e.preventDefault()
@@ -176,13 +180,15 @@ function attach(e: Event, files: FileList | undefined, paste: boolean, at?: numb
   const v = vault
   const g = vaultGen
   const note = shown
-  ;(async () => {
+  const job = (async () => {
     const links: string[] = []
+    const saved: string[] = []
     try {
       for (const f of [...files]) {
         // Chromium 里截图等剪贴板位图的文件名固定是 image.png，按剪贴板图片命名
         const r = await window.synote.saveAttachment(v, paste && f.name === 'image.png' ? null : f.name, new Uint8Array(await f.arrayBuffer()))
         if (r.warn) useUi.getState().setError(i18next.t(r.warn === 'huge' ? 'attachmentHuge' : 'attachmentLarge', { path: r.path }))
+        saved.push(r.path)
         forgetFiles(v, [r.path]) // 之前按缺失缓存过的同名附件
         const alt = r.path.split('/').pop()!.replace(/\.[^.]*$/, '').replace(/[\\[\]]/g, '\\$&')
         links.push(`${imageMime(r.path) ? '!' : ''}[${alt}](${relativeLink(note, r.path)})`)
@@ -190,10 +196,21 @@ function attach(e: Event, files: FileList | undefined, paste: boolean, at?: numb
     } catch (err) {
       useUi.getState().setError(String(err))
     }
-    if (g !== vaultGen) return
+    // 插入任务结束（插入、取消或丢弃）：插了链接就立即落盘，再通知主进程解除这些附件的在途保护（S11）。
+    // 之后撤销掉链接的话，它们就是普通孤儿，可以清理
+    if (place(links) && g === vaultGen) await flush(note)
+    if (saved.length) await window.synote.attachmentSettled(v, saved).catch((e) => console.error('[attach] settle failed', e))
+  })()
+  attaching.add(job)
+  job.finally(() => attaching.delete(job))
+  return true
+
+  // 把链接插进发起时的位置，返回是否改了正文
+  function place(links: string[]): boolean {
+    if (g !== vaultGen) return false
     const s = note === shown ? view?.state : states.get(note)
     const r = s?.field(pending, false)?.get(id)
-    if (!s || !r) return // 标签页已关，或外部改动重新加载过（位置已作废）
+    if (!s || !r) return false // 标签页已关，或外部改动重新加载过（位置已作废）
     const spec: TransactionSpec = { effects: dropPending.of(id) }
     if (links.length && !locked) {
       const insert = links.join('\n')
@@ -208,8 +225,8 @@ function attach(e: Event, files: FileList | undefined, paste: boolean, at?: numb
       states.set(note, s.update(spec).state)
       if (spec.changes) scheduleSave(note)
     }
-  })()
-  return true
+    return !!spec.changes
+  }
 }
 
 // 切库前调用：防抖中的输入立即写，再等所有在途写入落盘；还有没写进去的改动（写失败）就返回 false
