@@ -13,4 +13,13 @@ export const tokens = {
   // diff 的增删底色（带透明度，叠在 bg 上）
   diffInserted: '#3fb95026',
   diffRemoved: '#ef5b5b26',
+  // 实时预览：代码块 / 行内代码底色，代码块语法高亮
+  codeBg: '#2a2b30',
+  synKeyword: '#c792ea',
+  synString: '#a5d68a',
+  synNumber: '#f2a65a',
+  synComment: '#7f848e',
+  synFunction: '#82aaff',
+  synType: '#ffcb6b',
+  synTag: '#f07178',
 } as const

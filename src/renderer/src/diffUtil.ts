@@ -38,29 +38,47 @@ const mimes: Record<string, string> = {
 
 export const imageMime = (p: string): string | undefined => mimes[p.split('.').pop()!.toLowerCase()]
 
-// 第 col 列（从 0 起）所在的 Markdown 图片引用 `![alt](src "title")`，返回图片相对笔记库根的路径。
-// src 按笔记所在目录解析（ADR 0001 的相对链接），以 / 开头的按库根；外链、越出笔记库、不是图片时为 null
+// 图片引用的 src 解析成相对笔记库根的路径（ADR 0001 的相对链接）：按笔记所在目录解析，以 / 开头的按库根；
+// 外链、越出笔记库、不是图片时为 null。diff 悬停和实时预览共用
+export function resolveImage(src: string, note: string): string | null {
+  src = src.replace(/^<|>$/g, '').replace(/[?#].*$/, '')
+  if (/^[a-z][a-z0-9+.-]*:/i.test(src)) return null
+  try {
+    src = decodeURI(src)
+  } catch {
+    // 不是合法的百分号编码：按原文
+  }
+  const parts = src.startsWith('/') ? [] : note.split('/').slice(0, -1)
+  for (const seg of src.split('/')) {
+    if (seg === '..') {
+      if (!parts.length) return null
+      parts.pop()
+    } else if (seg && seg !== '.') parts.push(seg)
+  }
+  const path = parts.join('/')
+  return path && imageMime(path) ? path : null
+}
+
+// 第 col 列（从 0 起）所在的 Markdown 图片引用 `![alt](src "title")`，返回图片相对笔记库根的路径
 export function imageAt(line: string, col: number, note: string): { path: string; start: number; end: number } | null {
   for (const m of line.matchAll(/!\[[^\]]*\]\(\s*(<[^>]*>|[^)\s]+)(?:\s+"[^"]*")?\s*\)/g)) {
     const start = m.index
     const end = start + m[0].length
     if (col < start || col >= end) continue
-    let src = m[1].replace(/^<|>$/g, '').replace(/[?#].*$/, '')
-    if (/^[a-z][a-z0-9+.-]*:/i.test(src)) return null
-    try {
-      src = decodeURI(src)
-    } catch {
-      // 不是合法的百分号编码：按原文
-    }
-    const parts = src.startsWith('/') ? [] : note.split('/').slice(0, -1)
-    for (const seg of src.split('/')) {
-      if (seg === '..') {
-        if (!parts.length) return null
-        parts.pop()
-      } else if (seg && seg !== '.') parts.push(seg)
-    }
-    const path = parts.join('/')
-    return path && imageMime(path) ? { path, start, end } : null
+    const path = resolveImage(m[1], note)
+    return path ? { path, start, end } : null
   }
   return null
 }
+
+// 图片字节 → data URL（CSP 只放行 'self' 和 data:，不能用 blob:）
+export const dataUrl = (bytes: Uint8Array, type: string) =>
+  new Promise<string>((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(r.result as string)
+    r.onerror = () => reject(r.error)
+    r.readAsDataURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type }))
+  })
+
+// shortcut: 直接用整张原图的 data URL，超过 8 MiB 不显示；有大图需求时再在主进程缩放
+export const MAX_IMAGE = 8 << 20

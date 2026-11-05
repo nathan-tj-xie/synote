@@ -1,9 +1,11 @@
 // CM6 薄封装：一个 EditorView，按标签页缓存 EditorState，不放进 React state（ADR 0005）
-import { markdown } from '@codemirror/lang-markdown'
+import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
+import { languages } from '@codemirror/language-data'
 import { Annotation, Compartment, EditorSelection, EditorState, Transaction, type ChangeSpec } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { vscodeKeymap } from '@replit/codemirror-vscode-keymap'
 import { minimalSetup } from 'codemirror'
+import { livePreview } from './livePreview'
 import { useEditor, useUi, useVault } from './store'
 
 // 缓存不变式：视图里那份（shown）永远是该文件最新的正文，states 只缓存不在视图里的已打开文件。
@@ -51,7 +53,7 @@ const theme = EditorView.theme(
   { dark: true },
 )
 
-function makeState(doc: string): EditorState {
+function makeState(doc: string, path: string): EditorState {
   return EditorState.create({
     doc,
     extensions: [
@@ -59,7 +61,8 @@ function makeState(doc: string): EditorState {
       minimalSetup,
       editable(),
       EditorState.allowMultipleSelections.of(true), // ⌘D、⌥ 点击等多光标键位需要
-      markdown(),
+      markdown({ base: markdownLanguage, codeLanguages: languages }), // GFM（表格、任务列表、删除线）；代码块按语言懒加载高亮
+      livePreview(vault ? { vault, path } : null),
       EditorView.lineWrapping,
       theme,
       EditorView.updateListener.of((u) => {
@@ -219,7 +222,7 @@ export async function show(path: string | null) {
         throw e
       }
       if (my !== seq) return // 读文件期间又切走、关掉或换了库
-      s = makeState(text)
+      s = makeState(text, path)
     }
     setView(path, s)
   }
@@ -288,7 +291,7 @@ export async function reloadIfClean(path: string) {
   if (vault !== v || docOf(path) !== before || useEditor.getState().dirty[path]) return
   if (text === before) return // 自己写入触发的事件
   if (path === shown && view) view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text }, annotations: Transaction.remote.of(true) })
-  else states.set(path, makeState(text))
+  else states.set(path, makeState(text, path))
   useEditor.getState().setDirty(path, false)
 }
 

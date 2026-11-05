@@ -31,7 +31,7 @@ import { i18next } from '../../shared/i18n'
 import { fromMonacoLabel, monacoKeyName, parity } from './keymap'
 import { isMac } from './match'
 import { monacoColors } from './tokens'
-import { bomOffset, imageAt, imageMime, minimalEdit } from './diffUtil'
+import { bomOffset, dataUrl, imageAt, imageMime, MAX_IMAGE, minimalEdit } from './diffUtil'
 
 // diff 计算放在 worker 里，不卡输入
 self.MonacoEnvironment = { getWorker: () => new EditorWorker() }
@@ -184,16 +184,6 @@ export const setHead = (head: string) => cur && cur.original.setValue(head)
 export const setReadOnly = (on: boolean) => editor?.getModifiedEditor().updateOptions({ readOnly: on })
 export const focus = () => editor?.getModifiedEditor().focus()
 
-const dataUrl = (bytes: Uint8Array, type: string) =>
-  new Promise<string>((resolve, reject) => {
-    const r = new FileReader()
-    r.onload = () => resolve(r.result as string)
-    r.onerror = () => reject(r.error)
-    r.readAsDataURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type }))
-  })
-
-// shortcut: 缩略图直接用整张原图的 data URL，超过 8 MiB 不显示；有大图需求时再在主进程缩放
-const MAX_IMAGE = 8 << 20
 
 // diff 里的图片只显示源码，悬停弹出缩略图（#9 决定 6）：左边读 HEAD 里的 blob（文件已删也能看到），右边读工作区
 monaco.languages.registerHoverProvider('markdown', {
