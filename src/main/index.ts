@@ -316,9 +316,26 @@ ipcMain.handle('git:restore', (_e, vault: string, rel: string, hash: string) => 
   attaching = job.catch(() => {})
   return job
 })
+// 孤儿删除的互斥边界（codex #49）：从最终对账复核到最后一个文件删完，应用内的正文写入在边界外排队，
+// 删除看到的引用快照在删完之前不会被应用内写入改变。只推迟落盘，不丢内容（渲染进程 await 保存，dirty 保持）。
+// 外部进程的写入不在范围内
+let deleting: Promise<void> | null = null
+const writing = new Set<Promise<unknown>>() // 已过边界、还没落盘的写入，进入边界前要等它们
+async function noteWrite<T>(f: () => Promise<T>): Promise<T> {
+  while (deleting) await deleting
+  const p = f() // 同步登记：检查边界和登记之间没有 await，删除一侧不会漏等
+  writing.add(p)
+  try {
+    return await p
+  } finally {
+    writing.delete(p)
+  }
+}
+
 // 写入、新建、回收同样按真实路径校验：父目录（或被跟随的链接）被换成指向库外时拒绝
 ipcMain.handle('file:write', async (_e, vault: string, rel: string, content: string) => {
-  await fs.writeFile(await writeTarget(checkVault(vault), rel), content)
+  const r = checkVault(vault)
+  await noteWrite(async () => fs.writeFile(await writeTarget(r, rel), content))
   // 不等 watcher 防抖，写完立即对账：删掉或撤销最后一处引用后，孤儿状态 1 s 内更新（S11）
   callIndex('reconcile').catch((e) => console.error('[index] reconcile failed', e))
 })
@@ -326,7 +343,7 @@ ipcMain.handle('file:createNote', async (_e, vault: string, dir: string) => {
   const r = checkVault(vault)
   const entries = await scanEntries(r)
   const rel = uniqueNoteName(new Set(entries.map((x) => x.path)), dir, t('untitled'))
-  await fs.writeFile(await realParentInVault(r, rel), '', { flag: 'wx' }) // wx：不覆盖已有文件，也不跟随末级链接
+  await noteWrite(async () => fs.writeFile(await realParentInVault(r, rel), '', { flag: 'wx' })) // wx：不覆盖已有文件，也不跟随末级链接
   return rel
 })
 // 粘贴 / 拖入的附件（S10）：串成一条链，并发的两次粘贴不会都没查到对方而写出两份同样的文件
@@ -404,13 +421,18 @@ ipcMain.handle('orphans:delete', (_e, vault: string, paths: string[]) => {
     const mentioned = (await callIndex('mentioned', checked.map(([p]) => p).filter((p) => !pending.includes(p)))) as string[]
     const kept = [...pending.map((path) => ({ path, reason: 'pending' as const })), ...mentioned.map((path) => ({ path, reason: 'mentioned' as const }))]
     const candidates = checked.filter(([p]) => !kept.some((k) => k.path === p))
-    // 删之前最后一刻再复核：检查期间保存的正文（file:write 不在这条链上）先对账进索引，被引用或又成了在途的静默跳过
-    await callIndex('reconcile')
-    const late = new Set((await callIndex('referenced', candidates.map(([p]) => p))) as string[])
-    const targets = candidates.filter(([p]) => !late.has(p) && !isFresh(r, p))
+    // 进入互斥边界：先等已在途的正文写入落盘，再对账复核，被引用或又成了在途的静默跳过；删完才放行新的写入
+    let open!: () => void
+    deleting = new Promise((res) => (open = res))
     try {
+      await Promise.allSettled([...writing])
+      await callIndex('reconcile')
+      const late = new Set((await callIndex('referenced', candidates.map(([p]) => p))) as string[])
+      const targets = candidates.filter(([p]) => !late.has(p) && !isFresh(r, p))
       return { deleted: await removeOrphans(targets, await vaultRepo(r), (p) => shell.trashItem(p)), kept }
     } finally {
+      deleting = null
+      open()
       callIndex('reconcile').catch((e) => console.error('[index] reconcile failed', e))
     }
   })
