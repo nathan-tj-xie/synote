@@ -1,7 +1,9 @@
 // git 服务（ADR 0004）：只用系统 git CLI 子进程；查找、porcelain 解析、错误分类、常驻 cat-file
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { GitBranch, GitErrorKind, GitFile, LogEntry } from '../shared/api'
+import { parseLfsPointer, type LfsPointer } from '../shared/lfs'
 import { encodeSegment } from '../shared/url'
 
 export type ExecResult = { code: number; stdout: string; stderr: string }
@@ -156,7 +158,10 @@ const errorPatterns: [GitErrorKind, RegExp][] = [
   // 只认这几种原因；tag already exists、stale info、remote rejected（hook）等都不算
   ['nonFastForward', /\[rejected\] .*\((non-fast-forward|fetch first)\)|Not possible to fast-forward/],
   ['conflict', /^CONFLICT \(|Automatic merge failed/m],
-  ['lfsMissing', /git-lfs: (command )?not found|'git-lfs' was not found|cannot run git-lfs/],
+  ['lfsMissing', /git-lfs: (command )?not found|'git-lfs' was not found|cannot run git-lfs|git: 'lfs' is not a git command/],
+  // LFS 的 smudge / clean filter 或下载失败（离线、LFS 远端不可达等）。排在 lfsMissing 之后（缺二进制时也报 filter failed），
+  // network 之前（LFS 的报错里也会带 Could not resolve host 之类）
+  ['lfsFilter', /Smudge error|smudge filter '?lfs'? failed|clean filter '?lfs'? failed|Error downloading object|Failed to fetch some objects|external filter '?git-lfs[^']*'? failed/],
   [
     'network',
     /Could not resolve host|Failed to connect to|Connection (timed out|refused|reset|closed by)|Operation timed out|Network is unreachable|SSL_ERROR_SYSCALL/,
@@ -360,6 +365,14 @@ export class Git {
     return this.run(['lfs', 'version']).then(() => true, () => false)
   }
 
+  // 笔记库里是否有路径按 .gitattributes 走 LFS：已跟踪文件里有 filter=lfs 的，或 attachments/ 下的新文件会走 LFS。
+  // 只看属性、不需要 git-lfs，用来在没装 git-lfs 时提示
+  async lfsUsed(): Promise<boolean> {
+    // attr 魔法要求不加 --literal-pathspecs；不带路径时只列 cwd（笔记库）以内
+    const [files, att] = await Promise.all([this.run(['ls-files', '-z', '--', ':(attr:filter=lfs)']), this.lfsPaths(['attachments/x'])])
+    return files.length > 0 || att.length > 0
+  }
+
   async lfsPaths(paths: string[]): Promise<string[]> {
     if (!paths.length) return []
     // -z 输出：path NUL attr NUL value NUL
@@ -417,6 +430,52 @@ export class Git {
   // 只写工作区，结果是一处未提交的改动
   restore(hash: string, rel: string): Promise<string> {
     return this.mutate(['--literal-pathspecs', 'restore', `--source=${hash}`, '--worktree', '--', rel])
+  }
+
+  // 读历史版本里的文件内容（S15、S17）：blob 是 LFS 指针、且对象已在本地 .git/lfs/objects 里时换成真实内容；
+  // 不在本地时原样返回指针，由调用方显示占位、用户点了才 lfsSmudge。这里绝不联网
+  async readFileAt(spec: string): Promise<Buffer | null> {
+    const b = await this.readBlob(spec)
+    const p = b && parseLfsPointer(b)
+    return (p && (await this.lfsLocal(p))) || b
+  }
+
+  // 本地 LFS 对象：<git-common-dir>/lfs/objects/oid[0:2]/oid[2:4]/oid（common dir 兼容 worktree）；大小对不上的当作没有。
+  // shortcut: 不读 lfs.storage / `git lfs env` 的 LocalMediaDir，自定义了存储目录的仓库总是走 lfsSmudge；有人这样配时再查
+  private commonDir: Promise<string> | null = null
+  private async lfsLocal(p: LfsPointer): Promise<Buffer | null> {
+    this.commonDir ??= this.run(['rev-parse', '--git-common-dir']).then((d) => path.resolve(this.cwd, d.trim()))
+    const dir = await this.commonDir.catch((e) => {
+      this.commonDir = null
+      throw e
+    })
+    const b = await fs.readFile(path.join(dir, 'lfs', 'objects', p.oid.slice(0, 2), p.oid.slice(2, 4), p.oid)).catch(() => null)
+    return b?.length === p.size ? b : null
+  }
+
+  // 用户点了"下载"才调用：把历史里的指针经 `git lfs smudge` 换成真实内容（会联网、走系统凭据），对象顺带存进本地 LFS 存储。
+  // 不是指针时原样返回；失败时 smudge 退出码 2、stdout 是指针本身，按 stderr 分类抛出
+  async lfsSmudge(spec: string, rel: string): Promise<Buffer | null> {
+    const b = await this.readBlob(spec)
+    if (!b || !parseLfsPointer(b)) return b
+    return new Promise((resolve, reject) => {
+      const proc = spawn(this.bin, [...CONFIG_OVERRIDES, 'lfs', 'smudge', '--', rel], { cwd: this.cwd, env: this.env, windowsHide: true })
+      const out: Buffer[] = []
+      let err = ''
+      proc.stdout.on('data', (d: Buffer) => out.push(d))
+      proc.stderr.on('data', (d) => (err += d))
+      proc.stdin.on('error', () => {}) // 进程提前退出时写 stdin 会 EPIPE，结果以退出码为准
+      proc.on('error', (e) => reject(new GitError(classifyGitError(err), -1, err || e.message)))
+      proc.on('close', (code) => (code === 0 ? resolve(Buffer.concat(out)) : reject(new GitError(classifyGitError(err), code ?? -1, err))))
+      proc.stdin.end(b)
+    })
+  }
+
+  // 工作区里是指针的文件，下载真实内容写回工作区：`git lfs pull --include=<仓库根相对路径>`。--include 是 gitignore 式的模式，
+  // 通配符和反斜杠逐个转义；逗号是多个模式的分隔符且没有转义写法，换成只匹配单个字符的 ?（最多多下同目录里只差这一位的文件）
+  async lfsPull(rel: string): Promise<string> {
+    const pattern = (await this.prefix()) + rel
+    return this.mutate(['lfs', 'pull', `--include=${pattern.replace(/[\\*?[\]]/g, '\\$&').replace(/,/g, '?')}`])
   }
 
   // 读任意版本的 blob（如 `HEAD:a.md`），不存在时为 null；复用常驻的 cat-file --batch 进程

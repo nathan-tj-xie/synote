@@ -28,8 +28,10 @@ import { IKeybindingService } from 'monaco-editor/platform/keybinding/common/key
 import 'monaco-editor/languages/definitions/markdown/register.js'
 import EditorWorker from 'monaco-editor/editor/editor.worker.js?worker'
 import { i18next } from '../../shared/i18n'
+import { parseLfsPointer, sizeLabel } from '../../shared/lfs'
 import { fromMonacoLabel, monacoKeyName, parity } from './keymap'
 import { isMac } from './match'
+import { useUi } from './store'
 import { monacoColors, monacoRules } from './tokens'
 import { bomOffset, dataUrl, imageAt, imageMime, MAX_IMAGE, minimalEdit } from './diffUtil'
 
@@ -220,7 +222,35 @@ export const setReadOnly = (on: boolean) => editor?.getModifiedEditor().updateOp
 export const focus = () => editor?.getModifiedEditor().focus()
 
 
-// diff 里的图片只显示源码，悬停弹出缩略图（#9 决定 6）：左边读那个版本里的 blob（文件已删也能看到），右边读工作区
+// 用户在悬停里点了"下载"的 LFS 图片（S17）：左侧按版本 smudge（对象顺带存进本地 LFS 存储，readRev 下次就能直接读到），
+// 右侧（工作区）git lfs pull。下好后在原处重新弹出悬停。smudge 的结果也记一份，自定义了 lfs.storage 的仓库靠它
+// shortcut: 只增不减，一次会话里下载的历史图片极多时再加上限
+const smudged = new Map<string, Uint8Array>()
+monaco.editor.registerCommand('synote.lfsDownload', async (_acc, side: 'original' | 'modified', line: number, column: number) => {
+  const c = cur
+  if (!c) return
+  const model = side === 'original' ? c.original : c.modified
+  const ref = imageAt(model.getLineContent(line), column - 1, side === 'original' ? c.base : c.path)
+  if (!ref) return
+  try {
+    if (side === 'original') {
+      const b = await window.synote.lfsSmudge(c.vault, c.rev, ref.path)
+      if (b) smudged.set(`${c.vault}\0${c.rev}\0${ref.path}`, b)
+    } else await window.synote.lfsPull(c.vault, ref.path)
+  } catch (e) {
+    return useUi.getState().setError(String(e))
+  }
+  if (cur !== c) return
+  const ed = side === 'original' ? editor!.getOriginalEditor() : editor!.getModifiedEditor()
+  ed.focus()
+  ed.setPosition({ lineNumber: line, column })
+  // 原来的悬停还开着时 showHover 只会聚焦它、不重新取内容，先关掉
+  ed.trigger('lfs', 'editor.action.hideHover', {})
+  ed.trigger('lfs', 'editor.action.showHover', {})
+})
+
+// diff 里的图片只显示源码，悬停弹出缩略图（#9 决定 6）：左边读那个版本里的 blob（文件已删也能看到），右边读工作区。
+// 读到 LFS 指针（内容没下载，S17）时显示占位和"下载"链接，悬停本身绝不下载
 monaco.languages.registerHoverProvider('markdown', {
   async provideHover(model, pos) {
     const c = cur
@@ -228,9 +258,19 @@ monaco.languages.registerHoverProvider('markdown', {
     const ref = imageAt(model.getLineContent(pos.lineNumber), pos.column - 1, model === c.original ? c.base : c.path)
     if (!ref) return null
     const range = new monaco.Range(pos.lineNumber, ref.start + 1, pos.lineNumber, ref.end + 1)
-    const bytes = await (model === c.original ? window.synote.readRev(c.vault, c.rev, ref.path) : window.synote.readBytes(c.vault, ref.path)).catch(() => null)
+    const side = model === c.original ? 'original' : 'modified'
+    const bytes =
+      (side === 'original' && smudged.get(`${c.vault}\0${c.rev}\0${ref.path}`)) ||
+      (await (side === 'original' ? window.synote.readRev(c.vault, c.rev, ref.path) : window.synote.readBytes(c.vault, ref.path)).catch(() => null))
     const text = (value: string) => ({ range, contents: [{ value }] })
     if (!bytes) return text(i18next.t('imageMissing', { path: ref.path }))
+    const ptr = parseLfsPointer(bytes)
+    if (ptr) {
+      // command 链接要 isTrusted；参数是悬停的位置，命令执行时按当前模型重新解析，不把路径塞进链接
+      const args = encodeURIComponent(JSON.stringify([side, pos.lineNumber, pos.column]))
+      const value = `${i18next.t('lfsNotDownloaded', { size: sizeLabel(ptr.size), path: ref.path })} [${i18next.t('lfsDownload')}](command:synote.lfsDownload?${args})`
+      return { range, contents: [{ value, isTrusted: true }] }
+    }
     if (bytes.length > MAX_IMAGE) return text(i18next.t('imageTooLarge'))
     return text(`![](${await dataUrl(bytes, imageMime(ref.path)!)}|width=240)`)
   },

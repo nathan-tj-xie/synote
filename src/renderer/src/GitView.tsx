@@ -136,6 +136,16 @@ function Panel({ root, state }: { root: string; state: Ready }) {
           ⑂ {state.branch ?? t('gitDetached')} → {state.upstream ?? t('gitNoUpstream')}
           {busy && ` · ${t('gitBusy', { op: t(`gitOp_${busy}`) })}`}
         </div>
+        {/* LFS（S17）：附件走 LFS 却没装 git-lfs、或 status 因 LFS filter 失败时，非模态提示，git 面板其余照常 */}
+        {(state.lfsError || state.lfsUsed) && (
+          <ErrorCard
+            kind={state.lfsError?.kind ?? 'lfsMissing'}
+            raw={state.lfsError?.raw}
+            commands={state.lfsError?.kind === 'lfsFilter' ? [] : lfsCommands}
+            onRetry={() => load(window.synote.redetectGit())}
+            retryLabel={t('gitRedetect')}
+          />
+        )}
         {noIdentity && (
           <ErrorCard kind="noIdentity" commands={identityCommands(state)} onRetry={() => load(window.synote.gitState())} retryLabel={t('gitRedetect')} />
         )}
@@ -199,6 +209,9 @@ function Panel({ root, state }: { root: string; state: Ready }) {
 const identityCommands = (st: { name: string | null; email: string | null }) =>
   [!st.name && 'git config --global user.name "Your Name"', !st.email && 'git config --global user.email "you@example.com"'].filter((c): c is string => !!c)
 
+// 安装 git-lfs：macOS 用 Homebrew（装完还要 git lfs install 写 filter 配置）；其它平台给官网（Git for Windows 默认自带）
+const lfsCommands = isMac ? ['brew install git-lfs', 'git lfs install'] : ['https://git-lfs.com']
+
 // 给 shell 用的单引号转义
 const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
 
@@ -206,6 +219,7 @@ function commandsFor(card: Card): string[] {
   if (card.outside) return [`git -C ${sq(card.outside.top)} --literal-pathspecs reset -q -- ${card.outside.paths.map(sq).join(' ')}`]
   if (card.kind === 'noCredentials') return [`git ${card.op}`]
   if (card.kind === 'conflict') return ['git merge --abort']
+  if (card.kind === 'lfsMissing') return lfsCommands
   return []
 }
 
