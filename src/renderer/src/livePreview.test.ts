@@ -342,7 +342,10 @@ describe('容器嵌套的生成式测试', () => {
     // 所以任务项只作最内层，且只放段落
     const task = stack.findIndex((c) => c.first === '- [ ] ')
     if (task !== -1 && (task !== depth - 1 || kind !== '段落')) continue
-    const lines = body.map((text, j) => stack.map((c) => (j === 0 ? c.first : c.cont)).join('') + text)
+    // 表格的表头、数据行随机加行尾空白（空格 / Tab / 混合）。行首空白会改变缩进、破坏容器结构，所以只加行尾。
+    // 对齐行不加：@lezer/markdown 遇到对齐行带行尾空白时不认这是表格（GFM 允许），整段按段落显示源码，见 PR「偏离与限制」
+    const pad = () => pick(['', ' ', '  ', '\t', ' \t '])
+    const lines = body.map((text, j) => stack.map((c) => (j === 0 ? c.first : c.cont)).join('') + text + (kind === '表格' && j !== 1 ? pad() : ''))
     const name = `#${i} ${stack.map((c) => c.first.trim()).join(' ')} ${kind}`
     if (!stack.some((c) => c.first === '> ')) continue
     it(name, () => {
@@ -413,6 +416,14 @@ describe('表格单元格', () => {
   it('空表头', () => expect(table('| | b |\n|---|---|\n| 1 | 2 |')[0].rows).toEqual([['', 'b'], ['1', '2']]))
   it('行比表头少列补空、多列截断', () =>
     expect(table('| a | b |\n|---|---|\n| 1 |\n| 1 | 2 | 3 |')[0].rows).toEqual([['a', 'b'], ['1', ''], ['1', '2']]))
+  it('行首 / 行尾带空格、Tab、混合空白', () => {
+    expect(table('| a | b |  \n|---|---|\n| 1 | 2 |')[0].rows).toEqual([['a', 'b'], ['1', '2']])
+    expect(table('| a | b |\t\n|---|---|\n| 1 | 2 | \t ')[0].rows).toEqual([['a', 'b'], ['1', '2']])
+    expect(table('  | a | b |\n |---|---|\n\t| 1 | 2 |')[0].rows).toEqual([['a', 'b'], ['1', '2']])
+    expect(table('| a | b | \t\n|---|---|\n| | x |  ')[0].rows).toEqual([['a', 'b'], ['', 'x']]) // 末尾的空单元格仍在
+  })
+  // 解析器限制：对齐行带行尾空白时 @lezer/markdown 不认表格，整段保持源码（不会半渲染）
+  it('对齐行带行尾空白：不是表格，保持源码', () => expect(table('| a |\n|---| \n| 1 |')).toEqual([]))
   it('转义的 | 不切分', () => expect(table('| a | b |\n|---|---|\n| x \\| y | z |')[0].rows).toEqual([['a', 'b'], ['x | y', 'z']]))
   it('对齐按列应用', () => expect(table('| a | b | c |\n|:--|:-:|--:|\n| 1 | 2 | 3 |')[0].align).toEqual(['left', 'center', 'right']))
 })

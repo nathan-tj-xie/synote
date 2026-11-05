@@ -364,8 +364,10 @@ export function tableCells(state: EditorState, row: SyntaxNode): string[] {
     start = p.to
   }
   segs.push([start, row.to])
-  if (pipes[0]?.from === row.from) segs.shift()
-  if (pipes.at(-1)?.to === row.to) segs.pop()
+  // 首个 `|` 之前、末个 `|` 之后只有空白（行的节点范围可能带首尾空格 / Tab）：那是可省略的边界，不是单元格
+  const blank = ([a, b]: [number, number]) => /^[ \t]*$/.test(state.sliceDoc(a, b))
+  if (pipes.length && blank(segs[0])) segs.shift()
+  if (pipes.length && segs.length && blank(segs.at(-1)!)) segs.pop()
   return segs.map(([a, b]) => unescapeMd(state.sliceDoc(a, b).trim()))
 }
 
