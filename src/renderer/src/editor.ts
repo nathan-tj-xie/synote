@@ -6,7 +6,9 @@ import { EditorView, keymap } from '@codemirror/view'
 import { vscodeKeymap } from '@replit/codemirror-vscode-keymap'
 import { minimalSetup } from 'codemirror'
 import { i18next } from '../../shared/i18n'
-import { anchorLine, relativeLink } from '../../shared/url'
+import type { Rewritten } from '../../shared/api'
+import { applyEdits } from '../../shared/mdLinks'
+import { anchorLine, movePath, relativeLink } from '../../shared/url'
 import { imageMime } from './diffUtil'
 import { tableTrailingSpace } from './gfmTable'
 import { noteCompletion, resolveHref, type Href } from './links'
@@ -92,6 +94,28 @@ const pending = StateField.define<Map<number, Span>>({
 })
 let pendingSeq = 0
 
+// 和笔记路径有关的扩展（链接按所在目录解析）放在一个 compartment 里，重命名后原地换掉，不丢撤销历史
+const where = new Compartment()
+const atPath = (path: string) => [
+  livePreview(vault ? { vault, path } : null),
+  noteCompletion(path),
+  // 文件优先于 CM6 自带的处理（它会把拖入的文件当文本读进来）；粘贴同时带文本时（如表格软件）照常粘文本
+  EditorView.domEventHandlers({
+    paste: (e) => !e.clipboardData?.types.includes('text/plain') && attach(e, e.clipboardData?.files, true),
+    drop: (e, v) => attach(e, e.dataTransfer?.files, false, v.posAtCoords({ x: e.clientX, y: e.clientY })),
+    // ⌘ 点击（其他平台 Ctrl）双链跳转；不在链接上时照常交给 CM6（加光标）
+    mousedown: (e, v) => {
+      if (e.button !== 0 || !(isMac ? e.metaKey : e.ctrlKey)) return false
+      const pos = v.posAtCoords({ x: e.clientX, y: e.clientY })
+      const h = pos === null ? null : linkAt(v.state, pos)
+      if (!h) return false
+      e.preventDefault()
+      followLink(h, path).catch((err) => useUi.getState().setError(String(err)))
+      return true
+    },
+  }),
+]
+
 function makeState(doc: string, path: string): EditorState {
   return EditorState.create({
     doc,
@@ -103,25 +127,9 @@ function makeState(doc: string, path: string): EditorState {
       editable(),
       EditorState.allowMultipleSelections.of(true), // ⌘D、⌥ 点击等多光标键位需要
       markdown({ base: markdownLanguage, codeLanguages: languages, extensions: [tableTrailingSpace] }), // GFM（表格、任务列表、删除线）；代码块按语言懒加载高亮
-      livePreview(vault ? { vault, path } : null),
-      noteCompletion(path),
+      where.of(atPath(path)),
       EditorView.lineWrapping,
       theme,
-      // 文件优先于 CM6 自带的处理（它会把拖入的文件当文本读进来）；粘贴同时带文本时（如表格软件）照常粘文本
-      EditorView.domEventHandlers({
-        paste: (e) => !e.clipboardData?.types.includes('text/plain') && attach(e, e.clipboardData?.files, true),
-        drop: (e, v) => attach(e, e.dataTransfer?.files, false, v.posAtCoords({ x: e.clientX, y: e.clientY })),
-        // ⌘ 点击（其他平台 Ctrl）双链跳转；不在链接上时照常交给 CM6（加光标）
-        mousedown: (e, v) => {
-          if (e.button !== 0 || !(isMac ? e.metaKey : e.ctrlKey)) return false
-          const pos = v.posAtCoords({ x: e.clientX, y: e.clientY })
-          const h = pos === null ? null : linkAt(v.state, pos)
-          if (!h) return false
-          e.preventDefault()
-          followLink(h, path).catch((err) => useUi.getState().setError(String(err)))
-          return true
-        },
-      }),
       EditorView.updateListener.of((u) => {
         if (!u.docChanged || !shown) return
         if (!u.transactions.some((t) => t.annotation(Transaction.remote))) scheduleSave(shown)
@@ -437,6 +445,66 @@ export async function reloadIfClean(path: string) {
   if (path === shown && view) view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text }, effects: setEol.of(detectEol(text)), annotations: Transaction.remote.of(true) })
   else states.set(path, makeState(text, path))
   useEditor.getState().setDirty(path, false)
+}
+
+// 重命名 / 移动（S9）：主进程算出并原子地写下所有改写，编辑器这边保证不和它打架——先插完在途附件、加锁、把所有输入落盘
+// （此后磁盘内容就是编辑器内容，dirty 为空；有没写进去的改动就拒绝），确认后执行，再把同一组改写同步进已打开笔记的状态
+// （不再写盘），路径随之改名。交接锁期间拒绝。用户在确认时取消返回 false
+export async function renamePath(r: string, from: string, to: string, confirm: (plan: { files: string[]; skipped: string[] }) => Promise<boolean>): Promise<boolean> {
+  const busy = () => locked || vault !== r
+  if (busy()) throw new Error(i18next.t('renameBusy'))
+  await attachmentsSettled() // 加锁后在途的附件就插不进链接了
+  if (busy()) throw new Error(i18next.t('renameBusy'))
+  setLocked(true)
+  try {
+    if (!(await flushAll())) throw new Error(i18next.t('renameUnsaved'))
+    const plan = await window.synote.planRename(r, from, to)
+    if ((plan.files.length || plan.skipped.length) && !(await confirm(plan))) return false
+    const rewritten = await window.synote.rename(r, from, to, plan.files)
+    if (vault === r) followRename(from, to, rewritten)
+    return true
+  } finally {
+    setLocked(false)
+  }
+}
+
+// 主进程的改写按磁盘正文（原换行符）计偏移；编辑器内部一律是 \n，CRLF 时减去前面的 \r。
+// 编辑器正文和改写前的磁盘正文对不上（读入时归一了换行等）就整篇换成改写后的正文
+function rewriteChanges(s: EditorState, w: Rewritten): ChangeSpec {
+  const doc = s.doc.toString()
+  const disk = s.field(eol, false) === '\r\n' ? doc.replace(/\n/g, '\r\n') : doc
+  if (disk !== w.before) return { from: 0, to: s.doc.length, insert: applyEdits(w.before, w.edits) }
+  const at = (i: number) => i - (w.before.slice(0, i).split('\r').length - 1)
+  return w.edits.map((e) => ({ from: at(e.from), to: at(e.to), insert: e.insert }))
+}
+
+function followRename(from: string, to: string, rewritten: Rewritten[]) {
+  const move = (p: string) => movePath(p, from, to)
+  const byPath = new Map(rewritten.map((w) => [w.path, w]))
+  for (const p of new Set([...states.keys(), ...(shown ? [shown] : [])])) {
+    const np = move(p)
+    const w = byPath.get(p)
+    if (np === p && !w) continue
+    const s = p === shown ? view!.state : states.get(p)!
+    // 已经写盘：remote 不触发保存；不进撤销历史，撤销不会把链接改回旧路径
+    const spec: TransactionSpec = { annotations: [Transaction.remote.of(true), Transaction.addToHistory.of(false)] }
+    if (w) spec.changes = rewriteChanges(s, w)
+    if (np !== p) spec.effects = where.reconfigure(atPath(np))
+    if (p === shown) view!.dispatch(spec)
+    else states.set(p, s.update(spec).state)
+    if (np === p) continue
+    if (p === shown) shown = np
+    else {
+      states.set(np, states.get(p)!)
+      states.delete(p)
+    }
+    diffMode.delete(p) // diff 左侧是按旧路径读的 HEAD：退回正文
+    writes.delete(p)
+  }
+  if (current) current = move(current)
+  if (target) target.path = move(target.path)
+  useEditor.getState().rename(move)
+  syncDiff()
 }
 
 // 换笔记库（vaults.ts 已先 flushAll）：交接期间又有输入的话按旧库发出（主进程已切库时拒绝并提示），

@@ -1,5 +1,6 @@
 // 主进程 ↔ 渲染进程的 IPC 契约，两边共享类型
 import type { CommandId } from './commands'
+import type { Edit } from './mdLinks'
 
 export type Entry = { path: string; dir: boolean } // path 为相对笔记库根目录的 POSIX 路径
 
@@ -40,7 +41,10 @@ export type GitState =
 // 孤儿附件（S11）：tracked 为 git 已跟踪，删除时执行 git rm；否则（含非 git 目录）移到回收站
 export type OrphanAttachment = { path: string; tracked: boolean }
 
-export type ItemMenuAction = Extract<CommandId, 'newNote' | 'trash'> | null
+export type ItemMenuAction = Extract<CommandId, 'newNote' | 'rename' | 'trash'> | null
+
+// 重命名 / 移动后改写过的笔记（旧路径）：改写前的正文和改写（偏移按 before），渲染进程据此更新已打开的笔记
+export type Rewritten = { path: string; before: string; edits: Edit[] }
 
 export interface SynoteApi {
   // 选择文件夹，取消时为 null
@@ -63,6 +67,10 @@ export interface SynoteApi {
   // 这些附件的插入任务已结束（插入、取消或丢弃），相关笔记也已落盘：解除清理孤儿时的在途保护（S11）
   attachmentSettled(vault: string, paths: string[]): Promise<void>
   trash(vault: string, path: string): Promise<void>
+  // 重命名 / 移动（S9）：先 planRename 列出要改写链接的笔记（旧路径）和没法自动改写的链接（`路径: 原文`），
+  // 用户确认后 rename 带上这份清单执行；清单和执行时重算的不一致（期间库被改过）就拒绝。全部成功或全部不改
+  planRename(vault: string, from: string, to: string): Promise<{ files: string[]; skipped: string[] }>
+  rename(vault: string, from: string, to: string, files: string[]): Promise<Rewritten[]>
   showItemMenu(path: string, dir: boolean): Promise<ItemMenuAction>
   reportReady(): void
   // 以下推送事件都带上来源笔记库的 root，渲染进程只接受当前库的

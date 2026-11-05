@@ -39,6 +39,8 @@ export const handlers: Record<CommandId, Handler> = {
         .catch(fail)
     },
   },
+  // 文件树右键传入被点的路径；命令面板里是当前笔记
+  rename: { when: () => !!ed().active, run: (path = ed().active!) => ui().setRename({ root: root(), from: path }) },
   trash: {
     when: () => !!ed().active,
     run: async (path = ed().active!) => {

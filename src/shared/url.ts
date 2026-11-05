@@ -23,8 +23,13 @@ export function relativeLink(note: string, target: string): string {
   const to = target.split('/')
   let i = 0
   while (i < from.length && i < to.length - 1 && from[i] === to[i]) i++
-  return [...from.slice(i).map(() => '..'), ...to.slice(i)].map(encodeSegment).join('/')
+  const link = [...from.slice(i).map(() => '..'), ...to.slice(i)].map(encodeSegment).join('/')
+  // 首段带冒号（`RFC:计划.md`）会被当成 URI scheme：加 ./ 保持是相对路径
+  return /^[^/]*:/.test(link) ? `./${link}` : link
 }
+
+// 把 from（文件或文件夹）移到 to 之后，p 的新路径；不在 from 之下的不变（S9）
+export const movePath = (p: string, from: string, to: string) => (p === from ? to : p.startsWith(`${from}/`) ? to + p.slice(from.length) : p)
 
 // HTML 实体解码：数字实体和常用命名实体自己解；其余命名实体有 DOM 时交给浏览器（渲染进程），没有就保留原文
 const named: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0' }

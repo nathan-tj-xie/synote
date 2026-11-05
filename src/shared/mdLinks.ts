@@ -83,3 +83,36 @@ export function findLinks(tree: Tree, doc: string): FoundLink[] {
   for (const w of wikiLinks(tree, doc)) out.push({ kind: 'wiki', from: w.from, to: w.to, href: w.inner })
   return out.sort((a, b) => a.from - b.from)
 }
+
+// 每个标准链接 / 图片地址在源码里的范围（S9 重命名改写用）：内联写法的 URL，和引用定义的 URL（含没被用到的；脚注 `[^1]:` 不算）。
+// 和 findLinks 认同一批链接，只是引用式记在定义处，几处使用共用一个定义时只出现一次
+export function linkUrls(tree: Tree, doc: string): { from: number; to: number }[] {
+  const out: { from: number; to: number }[] = []
+  tree.iterate({
+    enter(n) {
+      if (n.name === 'LinkReference') {
+        const l = n.node.getChild('LinkLabel')
+        const url = n.node.getChild('URL')
+        if (l && url && doc[l.from + 1] !== '^') out.push({ from: url.from, to: url.to })
+        return false
+      }
+      if (RAW.has(n.name)) return false
+      if (n.name !== 'Link' && n.name !== 'Image') return
+      const url = n.node.getChild('URL')
+      if (url && n.node.getChildren('LinkMark').length >= 2) out.push({ from: url.from, to: url.to })
+    },
+  })
+  return out
+}
+
+// 按偏移（从小到大、不重叠）替换几段源码，其余字节原样
+export type Edit = { from: number; to: number; insert: string }
+export function applyEdits(text: string, edits: Edit[]): string {
+  let out = ''
+  let pos = 0
+  for (const e of edits) {
+    out += text.slice(pos, e.from) + e.insert
+    pos = e.to
+  }
+  return out + text.slice(pos)
+}

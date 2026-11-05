@@ -1339,3 +1339,73 @@ test('clean orphans in a git repo: tracked are git rm-ed, untracked are trashed'
   expect(git('status', '--porcelain')).toBe('D  attachments/old.png\n')
   await app.close()
 })
+
+// 文件树右键菜单是原生菜单，测试里换成直接返回 action
+async function renameFromTree(app: ElectronApplication, win: Page, name: string, to: string) {
+  await app.evaluate(({ ipcMain }) => {
+    ipcMain.removeHandler('menu:item')
+    ipcMain.handle('menu:item', () => 'rename')
+  })
+  await win.getByRole('treeitem', { name }).click({ button: 'right' })
+  const dialog = win.getByRole('dialog', { name: '重命名 / 移动…' })
+  await dialog.getByLabel('新路径（相对笔记库）').fill(to)
+  await dialog.getByRole('button', { name: '确定' }).click()
+  return dialog
+}
+
+// 重命名笔记（S9）：确认框列出要改写的文件；打开着的被改名笔记换了标签和路径，链接按新位置解析；
+// [[b]] 保留写法只换名字；切不准的链接列出来让用户知情
+test('renaming an open note rewrites links after confirmation', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '[b](sub/b.md#h) 和 [[b|别名]] 和 [esc](sub/b.md\\#h)\n', 'sub/b.md': '[a](../a.md)\n' })
+  await win.getByRole('treeitem', { name: 'sub' }).click()
+  await win.getByRole('treeitem', { name: 'b.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('[a]')
+  const dialog = await renameFromTree(app, win, 'b.md', 'sub/c.md')
+  await expect(dialog.getByRole('list', { name: '将改写以下 1 个文件中的链接：' }).getByRole('listitem')).toHaveText(['a.md'])
+  await expect(dialog.getByRole('list', { name: '以下 1 处链接无法自动改写，移动后需要手动修改：' }).getByRole('listitem')).toHaveText(['a.md: sub/b.md\\#h'])
+  await dialog.getByRole('button', { name: '移动并改写' }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('[b](sub/c.md#h) 和 [[c|别名]] 和 [esc](sub/b.md\\#h)\n')
+  expect(existsSync(path.join(vault, 'sub/b.md'))).toBe(false)
+  await expect(win.getByRole('tab', { name: 'c' })).toHaveAttribute('aria-selected', 'true')
+  await expect(win.getByRole('treeitem', { name: 'c.md' })).toBeVisible({ timeout: 5000 })
+  // 编辑器还能正常编辑保存，写到新路径
+  await win.locator('.cm-content').click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('续写')
+  await expect.poll(() => readFileSync(path.join(vault, 'sub/c.md'), 'utf8'), { timeout: 5000 }).toBe('[a](../a.md)\n续写')
+  expect(existsSync(path.join(vault, 'sub/b.md'))).toBe(false)
+  await app.close()
+})
+
+// 移动文件夹（git 仓库）：git mv 保留历史；打开着的、没被移动的笔记由编辑器状态同步改写，之后的输入不会写回旧链接
+test('moving a folder rewrites open notes through the editor and uses git mv', async () => {
+  const { app, win, vault } = await launch({
+    'y.md': '[x](notes/x.md) [[x]]\n',
+    'notes/x.md': '[y](../y.md) ![](../attachments/p.png)\n',
+    'archive/keep.md': '',
+    'attachments/p.png': 'p',
+  })
+  const git = (...args: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: vault }).toString()
+  git('init', '-q')
+  git('add', '.')
+  git('commit', '-qm', 'init')
+  await win.getByRole('treeitem', { name: 'y.md' }).click()
+  const editor = win.locator('.cm-content')
+  await expect(editor).toContainText('[[x]]')
+  const dialog = await renameFromTree(app, win, 'notes', 'archive/notes')
+  await expect(dialog.getByRole('listitem')).toHaveText(['notes/x.md', 'y.md'])
+  await dialog.getByRole('button', { name: '移动并改写' }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(readFileSync(path.join(vault, 'y.md'), 'utf8')).toBe('[x](archive/notes/x.md) [[x]]\n')
+  expect(readFileSync(path.join(vault, 'archive/notes/x.md'), 'utf8')).toBe('[y](../../y.md) ![](../../attachments/p.png)\n')
+  expect(git('status', '--porcelain')).toContain('RM notes/x.md -> archive/notes/x.md')
+  await editor.click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('尾')
+  await expect.poll(() => readFileSync(path.join(vault, 'y.md'), 'utf8'), { timeout: 5000 }).toBe('[x](archive/notes/x.md) [[x]]\n尾')
+  // 撤销只撤掉输入，不把链接改回旧路径
+  await win.keyboard.press('ControlOrMeta+z')
+  await expect.poll(() => readFileSync(path.join(vault, 'y.md'), 'utf8'), { timeout: 5000 }).toBe('[x](archive/notes/x.md) [[x]]\n')
+  await app.close()
+})
