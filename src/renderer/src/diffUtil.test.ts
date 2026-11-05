@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bomOffset, imageAt, minimalEdit } from './diffUtil'
+import { bomOffset, decodeEntities, destination, imageAt, minimalEdit, normalizeLabel } from './diffUtil'
 
 const apply = (a: string, e: ReturnType<typeof minimalEdit>) => (e ? a.slice(0, e.from) + e.insert + a.slice(e.to) : a)
 
@@ -49,3 +49,20 @@ describe('imageAt', () => {
   it('以 / 开头按库根', () => expect(imageAt('![](/attachments/x.PNG)', 2, 'a/b/c.md')?.path).toBe('attachments/x.PNG'))
   it('不是图片为 null', () => expect(imageAt('![](note.md)', 2, 'a.md')).toBeNull())
 })
+
+describe('destination / normalizeLabel', () => {
+  it('去尖括号、反转义、解码实体', () => {
+    expect(destination('<a b.png>')).toBe('a b.png')
+    expect(destination('a\\(1\\).png')).toBe('a(1).png')
+    expect(destination('a&amp;b&#35;&#x41;.png')).toBe('a&b#A.png')
+    expect(destination('a\\b.png')).toBe('a\\b.png') // 反斜杠后不是标点：保留
+  })
+  it('没有 DOM 时未知命名实体保留原文', () => expect(decodeEntities('&copy;')).toBe('&copy;'))
+  it('标签：折叠空白、case fold、不反转义', () => {
+    expect(normalizeLabel('[ Foo \n Bar ]')).toBe(normalizeLabel('foo bar'))
+    expect(normalizeLabel('ẞ')).toBe(normalizeLabel('ss'))
+    expect(normalizeLabel('a\\*b')).not.toBe(normalizeLabel('a*b'))
+  })
+  it('diff 悬停的图片同样先解码', () => expect(imageAt('![](a\\(1\\).png)', 2, 'n.md')?.path).toBe('a(1).png'))
+})
+

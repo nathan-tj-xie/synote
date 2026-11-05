@@ -7,7 +7,7 @@ import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, typ
 import type { SyntaxNode } from '@lezer/common'
 import { tags as t } from '@lezer/highlight'
 import { i18next } from '../../shared/i18n'
-import { dataUrl, imageMime, MAX_IMAGE, resolveImage } from './diffUtil'
+import { dataUrl, destination, imageMime, MAX_IMAGE, normalizeLabel, resolveImage, unescapeMd } from './diffUtil'
 
 // 当前正文属于哪个库的哪篇笔记：图片按笔记目录解析、经现有 readBytes（带库标识校验）读取
 type Note = { vault: string; path: string }
@@ -209,8 +209,7 @@ class LinkText extends WidgetType {
   }
 }
 
-// 引用定义 `[ref]: 地址`：标签按 CommonMark 规则归一（去括号、折叠空白、不分大小写）
-const normLabel = (s: string) => s.replace(/^\[|\]$/g, '').trim().replace(/\s+/g, ' ').toLowerCase()
+// 引用定义 `[ref]: 地址`：标签按 normalizeLabel 归一，地址存原文（用时再经 destination 解码）
 export function linkRefs(state: EditorState): Map<string, string> {
   const refs = new Map<string, string>()
   syntaxTree(state).iterate({
@@ -218,7 +217,7 @@ export function linkRefs(state: EditorState): Map<string, string> {
       if (n.name !== 'LinkReference') return CONTAINERS.has(n.name)
       const label = n.node.getChild('LinkLabel')
       const url = n.node.getChild('URL')
-      const key = label && normLabel(state.sliceDoc(label.from, label.to))
+      const key = label && normalizeLabel(sourceText(state, label.from, label.to))
       if (key && url && !refs.has(key)) refs.set(key, state.sliceDoc(url.from, url.to)) // 重复定义以第一个为准
       return false
     },
@@ -226,10 +225,8 @@ export function linkRefs(state: EditorState): Map<string, string> {
   return refs
 }
 
-// 链接 / 图片的文字（[ 与 ] 之间）和地址：内联写法取 URL 子节点；引用写法（`[文][ref]`、`[文][]`、`[文]`）按标签查定义，
-// 查不到时地址为 null（那就不是链接，显示源码）
-// [from, to] 里的显示文字：跨行时去掉续行行首的容器标记（引用的 `>`）和缩进，换行折成一个空格
-export function plainText(state: EditorState, from: number, to: number): string {
+// [from, to] 里属于这段文字的源码：跨行时去掉续行行首的容器标记（引用的 `>`）和缩进，换行折成一个空格；不反转义
+function sourceText(state: EditorState, from: number, to: number): string {
   const quotes: number[] = []
   syntaxTree(state).iterate({ from, to, enter: (n) => void (n.name === 'QuoteMark' && quotes.push(n.from)) })
   const doc = state.doc
@@ -246,23 +243,28 @@ export function plainText(state: EditorState, from: number, to: number): string 
     parts.push(doc.sliceString(start, Math.min(line.to, to)))
     pos = line.to + 1
   }
-  return unescape(parts.join(' ').replace(/\s+/g, ' ').trim())
+  return parts.join(' ').replace(/\s+/g, ' ').trim()
 }
 
-// 反斜杠转义（`\]`、`\|` 等 ASCII 标点）显示成字符本身
-const unescape = (s: string) => s.replace(/\\([!-/:-@[-`{-~])/g, '$1')
+// 显示文字：在 sourceText 基础上反转义（`\]` 显示成 `]`）
+export const plainText = (state: EditorState, from: number, to: number) => unescapeMd(sourceText(state, from, to))
+
+// 链接 / 图片的文字（[ 与 ] 之间）和地址：内联写法取 URL 子节点；引用写法（`[文][ref]`、`[文][]`、`[文]`）按标签查定义，
+// 查不到时地址为 null（那就不是链接，显示源码）。地址都经 destination 解码
 
 function linkParts(state: EditorState, n: SyntaxNode, refs: () => Map<string, string>): { text: string; target: string | null } | null {
   const marks = n.getChildren('LinkMark')
   if (marks.length < 2) return null
   const text = plainText(state, marks[0].to, marks[1].from)
   const url = n.getChild('URL')
-  if (url) return { text, target: state.sliceDoc(url.from, url.to) }
+  if (url) return { text, target: destination(state.sliceDoc(url.from, url.to)) }
   if (marks.length > 2) return { text, target: '' } // `[文]()`：空地址
   const label = n.getChild('LinkLabel')
-  const key = normLabel(label && label.to - label.from > 2 ? plainText(state, label.from, label.to) : text)
+  // 标签匹配用源码（不反转义），显示文字另用 plainText
+  const key = normalizeLabel(label && label.to - label.from > 2 ? sourceText(state, label.from, label.to) : sourceText(state, marks[0].to, marks[1].from))
   // `[^1]` 是脚注写法（MVP 不支持脚注），不当成引用链接，保持源码
-  return { text, target: key.startsWith('^') ? null : (refs().get(key) ?? null) }
+  const target = key.startsWith('^') ? undefined : refs().get(key)
+  return { text, target: target === undefined ? null : destination(target) }
 }
 
 function imageWidget(state: EditorState, text: string, target: string): ImageWidget {
@@ -314,7 +316,7 @@ class TableWidget extends WidgetType {
 }
 
 function tableWidget(state: EditorState, n: SyntaxNode): TableWidget {
-  const text = (a: number, b: number) => unescape(state.sliceDoc(a, b).trim())
+  const text = (a: number, b: number) => unescapeMd(state.sliceDoc(a, b).trim())
   const rows: string[][] = []
   let align: (string | null)[] = []
   for (let c = n.firstChild; c; c = c.nextSibling) {

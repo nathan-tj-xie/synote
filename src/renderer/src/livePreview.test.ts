@@ -114,7 +114,7 @@ describe('引用式链接与图片', () => {
       const w = d.spec.widget as { src?: string } | undefined
       if (w?.src !== undefined) srcs.push(w.src)
     })
-    expect(srcs).toEqual(['<a b.png>', 'x.png', 'y.png'])
+    expect(srcs).toEqual(['a b.png', 'x.png', 'y.png'])
   })
   it('跨行的引用式图片也解析', () => {
     const s = state(1, '首行\n![跨\n行][跨]\n\n> [跨]: z.png')
@@ -214,3 +214,41 @@ describe('节点覆盖表', () => {
     expect(widgets('<https://x.com> www.a.com &amp;')).toEqual(['link:https://x.com', 'link:www.a.com', '&amp;'])
   })
 })
+
+// 链接目标与引用标签按 CommonMark 统一处理（审查第 5 轮）
+describe('目标解码与标签匹配', () => {
+  // 图片 widget 拿到的地址；链接的显示用 replaced 判断
+  const srcs = (text: string) => {
+    const s = state(1, `首行\n\n${text}`)
+    const out: string[] = []
+    buildInline(s, 0, s.doc.length).between(0, s.doc.length, (_a, _b, d) => {
+      const w = d.spec.widget as { src?: string } | undefined
+      if (w?.src !== undefined) out.push(w.src)
+    })
+    return out
+  }
+  it('内联图片：反转义、实体、尖括号', () => {
+    expect(srcs('![x](a\\(1\\).png)')).toEqual(['a(1).png'])
+    expect(srcs('![x](a&amp;b.png)')).toEqual(['a&b.png'])
+    expect(srcs('![x](<a b.png>)')).toEqual(['a b.png'])
+  })
+  it('引用式图片：同样三例', () => {
+    expect(srcs('![x][p]\n\n[p]: a\\(1\\).png')).toEqual(['a(1).png'])
+    expect(srcs('![x][p]\n\n[p]: a&amp;b.png')).toEqual(['a&b.png'])
+    expect(srcs('![x][p]\n\n[p]: <a b.png>')).toEqual(['a b.png'])
+  })
+  it('带转义标点的标签匹配自身定义（不反转义）', () => {
+    const s = state(1, '首行\n\n[x][a\\*b] ![y][a\\*b]\n\n[a\\*b]: note.png')
+    const r = replaced(s, buildInline(s, s.doc.line(3).from, s.doc.line(3).to))
+    expect(r).toEqual(['[', '][a\\*b]', '![y][a\\*b]'])
+    // 反转义后的 `[a*b]` 不是同一个标签
+    const t = state(1, '首行\n\n[x][a*b]\n\n[a\\*b]: note.md')
+    expect(replaced(t, buildInline(t, t.doc.line(3).from, t.doc.line(3).to))).toEqual([])
+  })
+  it('大小写、空白差异能匹配', () => {
+    expect(srcs('![x][Foo  Bar]\n\n[foo bar]: a.png')).toEqual(['a.png'])
+    expect(srcs('![x][ẞ]\n\n[ss]: b.png')).toEqual(['b.png']) // Unicode case fold：ẞ ≡ ss
+    expect(srcs('![x][跨\n行]\n\n[跨 行]: c.png')).toEqual([])  // 跨行图片由 blocks 处理，行内插件不出
+  })
+})
+

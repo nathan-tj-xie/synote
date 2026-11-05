@@ -38,10 +38,39 @@ const mimes: Record<string, string> = {
 
 export const imageMime = (p: string): string | undefined => mimes[p.split('.').pop()!.toLowerCase()]
 
+// Markdown 反斜杠转义（ASCII 标点）还原成字符本身
+export const unescapeMd = (s: string) => s.replace(/\\([!-/:-@[-`{-~])/g, '$1')
+
+// HTML 实体解码：数字实体和常用命名实体自己解；其余命名实体有 DOM 时交给浏览器（渲染进程），没有就保留原文
+const named: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0' }
+export function decodeEntities(s: string): string {
+  return s.replace(/&(#\d{1,7}|#x[\da-f]{1,6}|[a-z][a-z\d]{0,31});/gi, (m, e: string) => {
+    if (e[0] === '#') {
+      const n = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10)
+      return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : '\ufffd'
+    }
+    if (named[e]) return named[e]
+    if (typeof document === 'undefined') return m
+    const t = document.createElement('textarea')
+    t.innerHTML = m // 已校验只是一个实体，不会带出标签
+    return t.value
+  })
+}
+
+// 链接目标（CommonMark 的 link destination）：去尖括号、反转义、解码实体。内联、引用式、自动链接、diff 悬停都走它
+export function destination(raw: string): string {
+  const s = raw.startsWith('<') && raw.endsWith('>') ? raw.slice(1, -1) : raw
+  return decodeEntities(unescapeMd(s))
+}
+
+// 引用标签的匹配键（CommonMark）：去外层方括号，折叠空白，Unicode case fold；不反转义（`[a\*b]` 只匹配 `[a\*b]`）
+export const normalizeLabel = (s: string) =>
+  s.replace(/^\[|\]$/g, '').trim().replace(/\s+/g, ' ').toLowerCase().toUpperCase()
+
 // 图片引用的 src 解析成相对笔记库根的路径（ADR 0001 的相对链接）：按笔记所在目录解析，以 / 开头的按库根；
 // 外链、越出笔记库、不是图片时为 null。diff 悬停和实时预览共用
 export function resolveImage(src: string, note: string): string | null {
-  src = src.replace(/^<|>$/g, '').replace(/[?#].*$/, '')
+  src = src.replace(/[?#].*$/, '') // 尖括号、转义、实体已由 destination 处理
   if (/^[a-z][a-z0-9+.-]*:/i.test(src)) return null
   try {
     src = decodeURI(src)
@@ -61,11 +90,11 @@ export function resolveImage(src: string, note: string): string | null {
 
 // 第 col 列（从 0 起）所在的 Markdown 图片引用 `![alt](src "title")`，返回图片相对笔记库根的路径
 export function imageAt(line: string, col: number, note: string): { path: string; start: number; end: number } | null {
-  for (const m of line.matchAll(/!\[[^\]]*\]\(\s*(<[^>]*>|[^)\s]+)(?:\s+"[^"]*")?\s*\)/g)) {
+  for (const m of line.matchAll(/!\[[^\]]*\]\(\s*(<[^>]*>|(?:\\.|[^)\s\\])+)(?:\s+"[^"]*")?\s*\)/g)) {
     const start = m.index
     const end = start + m[0].length
     if (col < start || col >= end) continue
-    const path = resolveImage(m[1], note)
+    const path = resolveImage(destination(m[1]), note)
     return path ? { path, start, end } : null
   }
   return null
