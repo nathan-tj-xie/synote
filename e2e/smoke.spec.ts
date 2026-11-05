@@ -1575,9 +1575,9 @@ test('settling and saving during an orphan delete check never deletes the attach
 })
 
 // 孤儿删除的互斥边界（codex #49 第二轮）：删除停在最终复核之后、第一次回收之前（拖住 shell.trashItem），
-// 期间应用内的正文写入排在边界外，删完才落盘，内容完整
+// 期间应用内的正文写入、重命名都排在边界外，删完才落盘 / 移动，内容完整
 test('note writes wait until an orphan delete finishes', async () => {
-  const { app, win, vault } = await launch({ 'n.md': '开头', 'attachments/o.pdf': 'o' })
+  const { app, win, vault } = await launch({ 'n.md': '开头', 'm.md': '[n](n.md)', 'attachments/o.pdf': 'o' })
   await expect.poll(() => win.evaluate((v) => window.synote.orphans(v).catch(() => []), vault), { timeout: 5000 }).toEqual(['attachments/o.pdf'])
   await app.evaluate(({ shell }) => {
     const g = globalThis as { trashHeld?: boolean }
@@ -1591,7 +1591,7 @@ test('note writes wait until an orphan delete finishes', async () => {
       return orig(p)
     }
   })
-  type W = { order: string[]; del: Promise<unknown>; wr: Promise<unknown> }
+  type W = { order: string[]; del: Promise<unknown>; wr: Promise<unknown>; mv: Promise<unknown> }
   await win.evaluate((v) => {
     const w = window as unknown as W
     w.order = []
@@ -1603,15 +1603,23 @@ test('note writes wait until an orphan delete finishes', async () => {
     const w = window as unknown as W
     w.wr = window.synote.writeFile(v, 'n.md', text).then(() => w.order.push('write'))
   }, [vault, text])
+  await win.evaluate(async (v) => {
+    const w = window as unknown as W
+    const { files } = await window.synote.planRename(v, 'm.md', 'm2.md') // 规划只读，不受边界影响
+    w.mv = window.synote.rename(v, 'm.md', 'm2.md', files).then(() => w.order.push('rename'))
+  }, vault)
   await win.waitForTimeout(300)
   expect(readFileSync(path.join(vault, 'n.md'), 'utf8')).toBe('开头') // 还在边界外排队
+  expect(existsSync(path.join(vault, 'm.md'))).toBe(true)
   const { r, order } = await win.evaluate(async () => {
     const w = window as unknown as W
     const r = await w.del
-    await w.wr
+    await Promise.all([w.wr, w.mv])
     return { r, order: w.order }
   })
-  expect(order).toEqual(['delete', 'write'])
+  expect(order[0]).toBe('delete')
+  expect(order.slice(1).sort()).toEqual(['rename', 'write'])
+  expect(readFileSync(path.join(vault, 'm2.md'), 'utf8')).toBe('[n](n.md)')
   expect(r).toEqual({ deleted: ['attachments/o.pdf'], kept: [] }) // 复核时没有引用：照常删，可从回收站 / 历史找回
   expect(readFileSync(path.join(vault, 'n.md'), 'utf8')).toBe(text)
   await app.close()

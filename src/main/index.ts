@@ -316,7 +316,7 @@ ipcMain.handle('git:restore', (_e, vault: string, rel: string, hash: string) => 
   attaching = job.catch(() => {})
   return job
 })
-// 孤儿删除的互斥边界（codex #49）：从最终对账复核到最后一个文件删完，应用内的正文写入在边界外排队，
+// 孤儿删除的互斥边界（codex #49）：从最终对账复核到最后一个文件删完，应用内的正文写入（保存、新建、重命名）在边界外排队，
 // 删除看到的引用快照在删完之前不会被应用内写入改变。只推迟落盘，不丢内容（渲染进程 await 保存，dirty 保持）。
 // 外部进程的写入不在范围内
 let deleting: Promise<void> | null = null
@@ -489,7 +489,8 @@ ipcMain.handle('file:planRename', async (_e, vault: string, from: string, to: st
 ipcMain.handle('file:rename', (_e, vault: string, from: string, to: string, files: string[]) => {
   const r = checkVault(vault)
   if (!Array.isArray(files)) throw new Error('invalid files')
-  const job = renaming.then(async () => {
+  // 改写笔记、移动文件同样在孤儿删除的互斥边界外排队（codex #49）
+  const job = renaming.then(() => noteWrite(async () => {
     moving = true
     moves++
     try {
@@ -505,7 +506,7 @@ ipcMain.handle('file:rename', (_e, vault: string, from: string, to: string, file
       moving = false
       callIndex('reconcile').catch((e) => console.error('[index] reconcile failed', e))
     }
-  })
+  }))
   renaming = job.catch(() => {})
   return job
 })
