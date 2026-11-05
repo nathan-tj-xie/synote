@@ -1354,17 +1354,18 @@ async function renameFromTree(app: ElectronApplication, win: Page, name: string,
 }
 
 // 重命名笔记（S9）：确认框列出要改写的文件；打开着的被改名笔记换了标签和路径，链接按新位置解析；
-// [[b]] 改名后会失效，按 ADR 0001 改写成标准链接
+// [[b]] 保留写法只换名字；切不准的链接列出来让用户知情
 test('renaming an open note rewrites links after confirmation', async () => {
-  const { app, win, vault } = await launch({ 'a.md': '[b](sub/b.md#h) 和 [[b]]\n', 'sub/b.md': '[a](../a.md)\n' })
+  const { app, win, vault } = await launch({ 'a.md': '[b](sub/b.md#h) 和 [[b|别名]] 和 [esc](sub/b.md\\#h)\n', 'sub/b.md': '[a](../a.md)\n' })
   await win.getByRole('treeitem', { name: 'sub' }).click()
   await win.getByRole('treeitem', { name: 'b.md' }).click()
   await expect(win.locator('.cm-content')).toContainText('[a]')
   const dialog = await renameFromTree(app, win, 'b.md', 'sub/c.md')
-  await expect(dialog.getByRole('listitem')).toHaveText(['a.md'])
+  await expect(dialog.getByRole('list', { name: '将改写以下 1 个文件中的链接：' }).getByRole('listitem')).toHaveText(['a.md'])
+  await expect(dialog.getByRole('list', { name: '以下 1 处链接无法自动改写，移动后需要手动修改：' }).getByRole('listitem')).toHaveText(['a.md: sub/b.md\\#h'])
   await dialog.getByRole('button', { name: '移动并改写' }).click()
   await expect(dialog).toHaveCount(0)
-  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('[b](sub/c.md#h) 和 [b](sub/c.md)\n')
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('[b](sub/c.md#h) 和 [[c|别名]] 和 [esc](sub/b.md\\#h)\n')
   expect(existsSync(path.join(vault, 'sub/b.md'))).toBe(false)
   await expect(win.getByRole('tab', { name: 'c' })).toHaveAttribute('aria-selected', 'true')
   await expect(win.getByRole('treeitem', { name: 'c.md' })).toBeVisible({ timeout: 5000 })

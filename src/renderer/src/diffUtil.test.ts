@@ -98,6 +98,10 @@ describe('relativeLink', () => {
     expect(relativeLink('日记/今天.md', 'attachments/x.png')).toBe('../attachments/x.png')
     expect(relativeLink('a/b/c.md', 'a/x.png')).toBe('../x.png')
     expect(relativeLink('attachments/n.md', 'attachments/x.png')).toBe('x.png')
+    // 首段带冒号时加 ./，否则会被当成 URI scheme
+    expect(relativeLink('a.md', 'RFC:计划.md')).toBe('./RFC:计划.md')
+    expect(relativeLink('x/a.md', 'x/RFC:计划.md')).toBe('./RFC:计划.md')
+    expect(relativeLink('x/a.md', 'RFC:dir/b.md')).toBe('../RFC:dir/b.md')
   })
   it('编码空白和保留字符，非 ASCII 原样', () => {
     expect(relativeLink('我的 笔记/a.md', 'attachments/图 (1)#2%&?.png')).toBe('../attachments/图%20%281%29%232%25%26%3F.png')

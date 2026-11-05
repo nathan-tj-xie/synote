@@ -3,28 +3,41 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { parser } from '@lezer/markdown'
 import { applyEdits, linkUrls, wikiLinks, type Edit } from '../shared/mdLinks'
-import { destination, encodeSegment, movePath, parseWiki, pickWiki, relativeLink, resolveLink, slug } from '../shared/url'
+import { destination, encodeSegment, movePath, parseWiki, pickWiki, relativeLink, resolveLink } from '../shared/url'
 import { realParentInVault, scanEntries } from './vault'
 
+const noteName = (p: string) => p.slice(p.lastIndexOf('/') + 1, -3)
+
 // 笔记 note 在 from → to 之后要改的源码片段。只改链接目标的路径那一段，锚点、query、尖括号、标题等其余字节不动；
-// 移动后仍解析到同一目标的不改。wiki(name, after) 是移动前 / 后 [[name]] 选中的笔记
-export function rewriteEdits(text: string, note: string, from: string, to: string, wiki: (name: string, after: boolean) => string | null): Edit[] {
+// 移动后仍解析到同一目标的不改。wiki(name, after) 是移动前 / 后 [[name]] 选中的笔记。
+// skipped：需要改、但没法安全改写的链接原文（实体、转义写出的 # ? 等切不准的地址；新目标写不进 [[...]] 的），交给用户确认
+export function rewriteEdits(
+  text: string,
+  note: string,
+  from: string,
+  to: string,
+  wiki: (name: string, after: boolean) => string | null,
+): { edits: Edit[]; skipped: string[] } {
   const tree = parser.parse(text)
   const moved = movePath(note, from, to)
   const edits: Edit[] = []
+  const skipped: string[] = []
   for (const u of linkUrls(tree, text)) {
     const raw = text.slice(u.from, u.to)
+    const whole = resolveLink(destination(raw), note)
+    if (!whole || resolveLink(destination(raw), moved) === movePath(whole, from, to)) continue
     const angle = raw.startsWith('<') && raw.endsWith('>')
     const start = u.from + (angle ? 1 : 0)
     const inner = angle ? raw.slice(1, -1) : raw
     const cut = inner.search(/[?#]/)
     const rawPath = cut < 0 ? inner : inner.slice(0, cut)
     const p = destination(rawPath)
-    const old = p ? resolveLink(p, note) : null
     // 切出来的路径和整条地址的解析结果对不上（转义、实体写出的 # ?）就切不准，宁可不改
-    if (!old || resolveLink(destination(raw), note) !== old) continue
-    const target = movePath(old, from, to)
-    if (resolveLink(p, moved) === target) continue
+    if (!p || resolveLink(p, note) !== whole) {
+      skipped.push(raw)
+      continue
+    }
+    const target = movePath(whole, from, to)
     let next = p.startsWith('/') ? `/${target.split('/').map(encodeSegment).join('/')}` : relativeLink(moved, target)
     if (p.endsWith('/')) next += '/'
     edits.push({ from: start, to: start + rawPath.length, insert: next })
@@ -35,21 +48,30 @@ export function rewriteEdits(text: string, note: string, from: string, to: strin
     if (!old) continue
     const target = movePath(old, from, to)
     if ((k.path ?? wiki(k.name!, true)) === target) continue
-    // 移动后 [[...]] 会指向别处或失效：按 ADR 0001 改写成标准相对链接（Synote 从不写入 [[...]]），锚点按 GitHub slug
-    const anchor = k.anchor ? `#${encodeSegment(slug(k.anchor))}` : ''
-    edits.push({ from: w.from, to: w.to, insert: `[${k.text.replace(/[\\[\]]/g, '\\$&')}](${relativeLink(moved, target)}${anchor})` })
+    // 保留 [[...]] 写法（ADR 0001 的澄清），只换目标那一段，别名、锚点原样；原来写路径的仍写路径，
+    // 写名字的在名字仍能选中新位置时写名字，否则写库根路径；原来带 .md 的照样带
+    const raw = w.inner.split('|')[0].split('#')[0]
+    const at = w.from + 2 + raw.length - raw.trimStart().length
+    const md = raw.trim().endsWith('.md') ? '.md' : ''
+    const name = noteName(target)
+    const next = !k.path && wiki(name, true) === target ? name + md : `${target.includes('/') ? '' : '/'}${target.slice(0, -3)}${md}`
+    const check = parseWiki(next)
+    if (/[|#\]\n]/.test(next) || (check && (check.path ?? wiki(check.name!, true))) !== target) {
+      skipped.push(text.slice(w.from, w.to))
+      continue
+    }
+    edits.push({ from: at, to: at + raw.trim().length, insert: next })
   }
-  return edits.sort((a, b) => a.from - b.from)
+  return { edits: edits.sort((a, b) => a.from - b.from), skipped }
 }
 
 // 一篇要改写的笔记：读到的原始字节（回滚用、写前比对用）、正文、改写和权限位
 export type NotePlan = { path: string; abs: string; bytes: Buffer; before: string; edits: Edit[]; mode: number }
 
-const noteName = (p: string) => p.slice(p.lastIndexOf('/') + 1, -3)
-
-// 读全库笔记，算出 from → to 要改写的那些（按路径排序）。不合法的 UTF-8 笔记要改写时整个操作拒绝（写回会损坏字节）
+// 读全库笔记，算出 from → to 要改写的那些（按路径排序），和没法自动改写的链接（`路径: 原文`）。
+// 不合法的 UTF-8 笔记要改写时整个操作拒绝（写回会损坏字节）
 // shortcut: 每次都在主进程里同步解析所有含链接的笔记，10k 库会让主进程卡几秒；变慢时改用索引的 links 表预筛候选
-export async function planRename(root: string, from: string, to: string): Promise<NotePlan[]> {
+export async function planRename(root: string, from: string, to: string): Promise<{ plans: NotePlan[]; skipped: string[] }> {
   const notes = (await scanEntries(root)).filter((e) => !e.dir && e.path.endsWith('.md')).map((e) => e.path)
   const group = (paths: string[]) => {
     const m = new Map<string, string[]>()
@@ -59,19 +81,21 @@ export async function planRename(root: string, from: string, to: string): Promis
   const groups = [group(notes), group(notes.map((p) => movePath(p, from, to)))]
   const wiki = (name: string, after: boolean) => pickWiki(name, groups[+after].get(name) ?? [])
   const out: NotePlan[] = []
+  const skipped: string[] = []
   await Promise.all(
     notes.map(async (p) => {
       const bytes = await fs.readFile(path.join(root, p))
       const before = bytes.toString('utf8')
       // 链接地址只出现在 `](`、引用定义 `]:` 和 `[[` 之后，没有这些的笔记不用解析
-      const edits = /\]\(|\]:|\[\[/.test(before) ? rewriteEdits(before, p, from, to, wiki) : []
+      const { edits, skipped: s } = /\]\(|\]:|\[\[/.test(before) ? rewriteEdits(before, p, from, to, wiki) : { edits: [], skipped: [] }
+      skipped.push(...s.map((l) => `${p}: ${l}`))
       if (!edits.length) return
       if (!Buffer.from(before).equals(bytes)) throw new Error(`not valid UTF-8, cannot rewrite links in ${p}`)
       const abs = await realParentInVault(root, p)
       out.push({ path: p, abs, bytes, before, edits, mode: (await fs.stat(abs)).mode })
     }),
   )
-  return out.sort((a, b) => (a.path < b.path ? -1 : 1))
+  return { plans: out.sort((a, b) => (a.path < b.path ? -1 : 1)), skipped: skipped.sort() }
 }
 
 export type Ops = Pick<typeof fs, 'readFile' | 'writeFile' | 'rename' | 'unlink' | 'chmod'>

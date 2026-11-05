@@ -450,7 +450,7 @@ export async function reloadIfClean(path: string) {
 // 重命名 / 移动（S9）：主进程算出并原子地写下所有改写，编辑器这边保证不和它打架——先插完在途附件、加锁、把所有输入落盘
 // （此后磁盘内容就是编辑器内容，dirty 为空；有没写进去的改动就拒绝），确认后执行，再把同一组改写同步进已打开笔记的状态
 // （不再写盘），路径随之改名。交接锁期间拒绝。用户在确认时取消返回 false
-export async function renamePath(r: string, from: string, to: string, confirm: (files: string[]) => Promise<boolean>): Promise<boolean> {
+export async function renamePath(r: string, from: string, to: string, confirm: (plan: { files: string[]; skipped: string[] }) => Promise<boolean>): Promise<boolean> {
   const busy = () => locked || vault !== r
   if (busy()) throw new Error(i18next.t('renameBusy'))
   await attachmentsSettled() // 加锁后在途的附件就插不进链接了
@@ -458,9 +458,9 @@ export async function renamePath(r: string, from: string, to: string, confirm: (
   setLocked(true)
   try {
     if (!(await flushAll())) throw new Error(i18next.t('renameUnsaved'))
-    const files = await window.synote.planRename(r, from, to)
-    if (files.length && !(await confirm(files))) return false
-    const rewritten = await window.synote.rename(r, from, to, files)
+    const plan = await window.synote.planRename(r, from, to)
+    if ((plan.files.length || plan.skipped.length) && !(await confirm(plan))) return false
+    const rewritten = await window.synote.rename(r, from, to, plan.files)
     if (vault === r) followRename(from, to, rewritten)
     return true
   } finally {

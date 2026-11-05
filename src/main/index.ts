@@ -406,7 +406,8 @@ async function checkMove(r: string, from: unknown, to: unknown): Promise<{ src: 
 ipcMain.handle('file:planRename', async (_e, vault: string, from: string, to: string) => {
   const r = checkVault(vault)
   await checkMove(r, from, to)
-  return (await planRename(r, from, to)).map((p) => p.path)
+  const { plans, skipped } = await planRename(r, from, to)
+  return { files: plans.map((p) => p.path), skipped }
 })
 ipcMain.handle('file:rename', (_e, vault: string, from: string, to: string, files: string[]) => {
   const r = checkVault(vault)
@@ -416,7 +417,7 @@ ipcMain.handle('file:rename', (_e, vault: string, from: string, to: string, file
     moves++
     try {
       const m = await checkMove(r, from, to)
-      const plans = await planRename(r, m.from, m.to)
+      const { plans } = await planRename(r, m.from, m.to)
       if (plans.map((p) => p.path).join('\0') !== files.join('\0')) throw new Error(t('renameChanged'))
       // 仓库里有跟踪的就 git mv 保留历史，否则（含非 git 目录）直接 rename
       const repo = await vaultRepo(r)

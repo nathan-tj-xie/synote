@@ -23,7 +23,9 @@ export function relativeLink(note: string, target: string): string {
   const to = target.split('/')
   let i = 0
   while (i < from.length && i < to.length - 1 && from[i] === to[i]) i++
-  return [...from.slice(i).map(() => '..'), ...to.slice(i)].map(encodeSegment).join('/')
+  const link = [...from.slice(i).map(() => '..'), ...to.slice(i)].map(encodeSegment).join('/')
+  // 首段带冒号（`RFC:计划.md`）会被当成 URI scheme：加 ./ 保持是相对路径
+  return /^[^/]*:/.test(link) ? `./${link}` : link
 }
 
 // 把 from（文件或文件夹）移到 to 之后，p 的新路径；不在 from 之下的不变（S9）

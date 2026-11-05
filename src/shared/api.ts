@@ -67,9 +67,9 @@ export interface SynoteApi {
   // 这些附件的插入任务已结束（插入、取消或丢弃），相关笔记也已落盘：解除清理孤儿时的在途保护（S11）
   attachmentSettled(vault: string, paths: string[]): Promise<void>
   trash(vault: string, path: string): Promise<void>
-  // 重命名 / 移动（S9）：先 planRename 列出要改写链接的笔记（旧路径），用户确认后 rename 带上这份清单执行；
-  // 清单和执行时重算的不一致（期间库被改过）就拒绝。全部成功或全部不改
-  planRename(vault: string, from: string, to: string): Promise<string[]>
+  // 重命名 / 移动（S9）：先 planRename 列出要改写链接的笔记（旧路径）和没法自动改写的链接（`路径: 原文`），
+  // 用户确认后 rename 带上这份清单执行；清单和执行时重算的不一致（期间库被改过）就拒绝。全部成功或全部不改
+  planRename(vault: string, from: string, to: string): Promise<{ files: string[]; skipped: string[] }>
   rename(vault: string, from: string, to: string, files: string[]): Promise<Rewritten[]>
   showItemMenu(path: string, dir: boolean): Promise<ItemMenuAction>
   reportReady(): void

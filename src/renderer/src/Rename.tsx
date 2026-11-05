@@ -30,16 +30,16 @@ export function Rename() {
 function Body({ req, answer, close }: { req: { root: string; from: string }; answer: React.RefObject<((ok: boolean) => void) | null>; close: () => void }) {
   const { t } = useTranslation()
   const [to, setTo] = useState(req.from)
-  const [files, setFiles] = useState<string[] | null>(null)
+  const [plan, setPlan] = useState<{ files: string[]; skipped: string[] } | null>(null)
   const [busy, setBusy] = useState(false)
   const submit = async () => {
     setBusy(true)
     try {
-      const confirm = (list: string[]) =>
+      const confirm = (p: { files: string[]; skipped: string[] }) =>
         new Promise<boolean>((resolve) => {
           if (useUi.getState().rename !== req) return resolve(false) // 算清单期间已关掉对话框
           answer.current = resolve
-          setFiles(list)
+          setPlan(p)
           setBusy(false)
         })
       if (await renamePath(req.root, req.from, to.trim(), confirm)) close()
@@ -57,7 +57,7 @@ function Body({ req, answer, close }: { req: { root: string; from: string }; ans
   return (
     <>
       <Dialog.Title className={s.title}>{t('rename')}</Dialog.Title>
-      {files === null ? (
+      {plan === null ? (
         <form
           onSubmit={(e) => {
             e.preventDefault()
@@ -77,26 +77,35 @@ function Body({ req, answer, close }: { req: { root: string; from: string }; ans
         </form>
       ) : (
         <>
-          <p className={s.muted}>{t('renameConfirm', { n: files.length })}</p>
-          <ul className={s.list}>
-            {files.map((f) => (
-              <li key={f}>
-                <span className={s.path}>{f}</span>
-              </li>
-            ))}
-          </ul>
+          {plan.files.length > 0 && <List title={t('renameConfirm', { n: plan.files.length })} items={plan.files} />}
+          {plan.skipped.length > 0 && <List title={t('renameSkipped', { n: plan.skipped.length })} items={plan.skipped} />}
         </>
       )}
       <div className={s.actions}>
-        <button onClick={() => (files ? decide(false) : close())}>{t('cancel')}</button>
+        <button onClick={() => (plan ? decide(false) : close())}>{t('cancel')}</button>
         <button
           className={s.primary}
           disabled={busy || !to.trim() || to.trim() === req.from}
-          onClick={() => (files ? decide(true) : submit())}
+          onClick={() => (plan ? decide(true) : submit())}
         >
-          {t(files ? 'renameApply' : 'renameOk')}
+          {t(plan ? 'renameApply' : 'renameOk')}
         </button>
       </div>
+    </>
+  )
+}
+
+function List({ title, items }: { title: string; items: string[] }) {
+  return (
+    <>
+      <p className={s.muted}>{title}</p>
+      <ul className={s.list} aria-label={title}>
+        {items.map((f, i) => (
+          <li key={i}>
+            <span className={s.path}>{f}</span>
+          </li>
+        ))}
+      </ul>
     </>
   )
 }

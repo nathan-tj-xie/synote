@@ -13,8 +13,9 @@ import { commitRename, planRename, rewriteEdits } from './rename'
 // 只有一篇笔记时 [[名字]] 的解析：notes 是移动前的全部笔记
 function rewrite(text: string, note: string, from: string, to: string, notes: string[] = []) {
   const wiki = (name: string, after: boolean) => pickWiki(name, after ? notes.map((p) => movePath(p, from, to)) : notes)
-  return applyEdits(text, rewriteEdits(text, note, from, to, wiki))
+  return applyEdits(text, rewriteEdits(text, note, from, to, wiki).edits)
 }
+const skippedOf = (text: string, note: string, from: string, to: string) => rewriteEdits(text, note, from, to, () => null).skipped
 
 describe('rewriteEdits', () => {
   it('指向被移动笔记的链接：子目录、..、空格、中文', () => {
@@ -48,19 +49,34 @@ describe('rewriteEdits', () => {
     expect(rewrite(text, 'a.md', 'b.md', 'c.md')).toBe(text)
     // 实体里的 # 让切分落错位置：和整条地址的解析对不上，不改
     expect(rewrite('[e](b&#46;md)', 'a.md', 'b.md', 'c.md')).toBe('[e](b&#46;md)')
+    // 需要改却改不了的报出来，交给用户确认；不相干的不报
+    expect(skippedOf(text + ' [e](b&#46;md)', 'a.md', 'b.md', 'c.md')).toEqual(['b.md\\#x', 'b&#46;md'])
   })
 
-  it('[[...]] 移动后仍能解析到同一篇就保持原样，否则按 ADR 0001 改写成标准链接', () => {
+  it('新路径首段带冒号时加 ./，不被当成 URI scheme', () => {
+    expect(rewrite('[b](b.md)', 'a.md', 'b.md', 'RFC:计划.md')).toBe('[b](./RFC:计划.md)')
+    expect(rewrite('[a](a.md)', 'a.md', 'a.md', 'RFC:a.md')).toBe('[a](./RFC:a.md)')
+    expect(rewrite('[a](a.md)', 'RFC:x/n.md', 'RFC:x/n.md', 'n.md')).toBe('[a](./RFC:x/a.md)')
+  })
+
+  it('[[...]] 保留写法：仍能解析到同一篇就不动，否则只换目标那一段', () => {
     const notes = ['a.md', 'x/b.md', 'y/b.md']
-    // 移动后同名仍唯一 / 仍选中同一篇
+    // 名字仍唯一 / 仍选中同一篇：原文不变
     expect(rewrite('[[b]] [[b#标题|别名]]', 'a.md', 'x/b.md', 'z/b.md', ['a.md', 'x/b.md'])).toBe('[[b]] [[b#标题|别名]]')
     expect(rewrite('[[b]]', 'a.md', 'y/b.md', 'z/b.md', notes)).toBe('[[b]]')
-    // 改名后不再叫 b；同名里换了一篇被选中；路径写法失效
-    expect(rewrite('[[b#My Title|别名]]', 'a.md', 'x/b.md', 'x/c.md', ['a.md', 'x/b.md'])).toBe('[别名](x/c.md#my-title)')
-    expect(rewrite('[[b]]', 'a.md', 'x/b.md', 'z/b.md', notes)).toBe('[b](z/b.md)')
-    expect(rewrite('[[x/b]]', 'a.md', 'x', 'w', notes)).toBe('[x/b](w/b.md)')
+    // 改名：换成新名字，别名、锚点、.md 写法、首尾空白原样
+    expect(rewrite('[[b#My Title|别名]] [[ b.md ]]', 'a.md', 'x/b.md', 'x/c.md', ['a.md', 'x/b.md'])).toBe('[[c#My Title|别名]] [[ c.md ]]')
+    // 同名里换了一篇被选中：名字选不中了，写库根路径
+    expect(rewrite('[[b|别名]]', 'a.md', 'x/b.md', 'z/b.md', notes)).toBe('[[z/b|别名]]')
+    expect(rewrite('[[b]]', 'a.md', '0/b.md', 'b.md', ['a.md', '0/b.md', 'a/b.md'])).toBe('[[/b]]')
+    // 路径写法仍写路径
+    expect(rewrite('[[日记/今天#标题]]', 'a.md', '日记', '归档/日记', ['a.md', '日记/今天.md'])).toBe('[[归档/日记/今天#标题]]')
+    expect(rewrite('[[x/b.md]]', 'a.md', 'x', 'w', notes)).toBe('[[w/b.md]]')
     // 新改出来的同名笔记抢走了原来的 [[c]]
-    expect(rewrite('[[c]]', 'a.md', 'x/b.md', 'a/c.md', ['a.md', 'x/b.md', 'z/c.md'])).toBe('[c](z/c.md)')
+    expect(rewrite('[[c]]', 'a.md', 'x/b.md', 'a/c.md', ['a.md', 'x/b.md', 'z/c.md'])).toBe('[[z/c]]')
+    // 新目标写不进 [[...]]（名字里有 #）：不改，报出来
+    const wiki = (n: string, after: boolean) => pickWiki(n, after ? ['a.md', 'x/b#1.md'] : ['a.md', 'x/b.md'])
+    expect(rewriteEdits('[[b]]', 'a.md', 'x/b.md', 'x/b#1.md', wiki)).toEqual({ edits: [], skipped: ['[[b]]'] })
   })
 })
 
@@ -80,7 +96,7 @@ function snapshot(root: string): Record<string, string> {
   return out
 }
 const run = async (root: string, from: string, to: string, ops?: Parameters<typeof commitRename>[2]) =>
-  commitRename(await planRename(root, from, to), () => fs.rename(path.join(root, from), path.join(root, to)), ops)
+  commitRename((await planRename(root, from, to)).plans, () => fs.rename(path.join(root, from), path.join(root, to)), ops)
 
 // 全库的失效链接：标准链接按 linkTarget、[[...]] 按 parseWiki + pickWiki 解析，目标不存在的
 function broken(root: string): string[] {
@@ -111,12 +127,13 @@ describe('planRename + commitRename', () => {
   it('移动文件夹后全库没有失效链接，[[...]] 保持原样且能解析', async () => {
     const root = vault({ ...library, '归档/.keep': '' })
     expect(broken(root)).toEqual([])
-    const plans = await planRename(root, '日记', '归档/日记')
+    const { plans, skipped } = await planRename(root, '日记', '归档/日记')
+    expect(skipped).toEqual([])
     expect(plans.map((p) => p.path)).toEqual(['b/b.md', 'index.md', '日记/今天.md', '日记/明天.md'])
     await run(root, '日记', '归档/日记')
     expect(broken(root)).toEqual([])
     const index = readFileSync(path.join(root, 'index.md'), 'utf8')
-    expect(index).toBe('[日记](归档/日记/今天.md) [[今天]] [图](归档/日记/图%201.png) [日记/今天#标题](归档/日记/今天.md#标题)\n\n[ref]: 归档/日记/今天.md#标题\n用 [引用][ref]\n')
+    expect(index).toBe('[日记](归档/日记/今天.md) [[今天]] [图](归档/日记/图%201.png) [[归档/日记/今天#标题]]\n\n[ref]: 归档/日记/今天.md#标题\n用 [引用][ref]\n')
     // 内部互链不变，CRLF 原样，只改了指向库外的那条
     expect(readFileSync(path.join(root, '归档/日记/明天.md'), 'utf8')).toBe(library['日记/明天.md'].replace('../b/b.md', '../../b/b.md'))
     expect(readdirSync(root, { recursive: true }).filter((f) => String(f).includes('.tmp'))).toEqual([])
@@ -127,7 +144,7 @@ describe('planRename + commitRename', () => {
     await fs.chmod(path.join(root, 'index.md'), 0o600)
     await run(root, '日记/今天.md', '日记/昨天.md')
     expect(broken(root)).toEqual([])
-    expect(readFileSync(path.join(root, 'index.md'), 'utf8')).toContain('[今天](日记/昨天.md)')
+    expect(readFileSync(path.join(root, 'index.md'), 'utf8')).toContain('[日记](日记/昨天.md) [[昨天]]')
     if (process.platform !== 'win32') expect(statSync(path.join(root, 'index.md')).mode & 0o777).toBe(0o600)
   })
 
@@ -146,14 +163,14 @@ describe('planRename + commitRename', () => {
   it('移动失败：已覆盖的笔记全部回滚', async () => {
     const root = vault(library)
     const before = snapshot(root)
-    const plans = await planRename(root, '日记', 'x/日记')
+    const { plans } = await planRename(root, '日记', 'x/日记')
     await expect(commitRename(plans, () => Promise.reject(new Error('mv failed')))).rejects.toThrow('mv failed')
     expect(snapshot(root)).toEqual(before)
   })
 
   it('读取后被改过：整个放弃，什么都不写', async () => {
     const root = vault(library)
-    const plans = await planRename(root, '日记', 'b/日记')
+    const { plans } = await planRename(root, '日记', 'b/日记')
     writeFileSync(path.join(root, 'index.md'), '外部改了 [日记](日记/今天.md)')
     const before = snapshot(root)
     await expect(commitRename(plans, () => fs.rename(path.join(root, '日记'), path.join(root, 'b/日记')))).rejects.toThrow('changed since read: index.md')
@@ -174,7 +191,7 @@ describe('planRename + commitRename', () => {
     git('commit', '-qm', 'init')
     writeFileSync(path.join(root, '日记/草稿.md'), '[首页](../index.md)')
     const g = new Git('git', process.env.PATH ?? '', root)
-    await commitRename(await planRename(root, '日记', 'b/日记'), async () => void (await g.mv('日记', 'b/日记')))
+    await commitRename((await planRename(root, '日记', 'b/日记')).plans, async () => void (await g.mv('日记', 'b/日记')))
     expect(broken(root)).toEqual([])
     expect(readFileSync(path.join(root, 'b/日记/草稿.md'), 'utf8')).toBe('[首页](../../index.md)')
     expect(git('-c', 'core.quotepath=off', 'status', '--porcelain').split('\n').filter((l) => l.startsWith('R')).length).toBe(3)

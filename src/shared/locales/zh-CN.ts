@@ -59,6 +59,7 @@ export const zhCN = {
     renamePath: '新路径（相对笔记库）',
     renameOk: '确定',
     renameConfirm: '将改写以下 {{n}} 个文件中的链接：',
+    renameSkipped: '以下 {{n}} 处链接无法自动改写，移动后需要手动修改：',
     renameApply: '移动并改写',
     renameInvalid: '无效的路径：{{path}}',
     renameExists: '目标已存在：{{path}}',
