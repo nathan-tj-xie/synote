@@ -35,8 +35,20 @@ export type GitState =
   | { status: 'missing' }
   | { status: 'tooOld'; bin: string; version: string }
   | { status: 'notRepo'; version: string }
-  // name / email 有一个为 null 就禁用提交；lfs：本机是否装了 git-lfs（供 S17）
-  | { status: 'ready'; version: string; name: string | null; email: string | null; changes: number; lfs: boolean }
+  // name / email 有一个为 null 就禁用提交；lfs：本机是否装了 git-lfs（供 S17）；files：笔记库内的改动（S13）
+  | ({ status: 'ready'; version: string; name: string | null; email: string | null; files: GitFile[]; lfs: boolean } & GitBranch)
+
+// 分支与上游（S13）：branch 为 null 表示 detached；没有上游时 upstream 为 null，ahead / behind 为 0
+export type GitBranch = { branch: string | null; upstream: string | null; ahead: number; behind: number }
+
+// 一处改动（S13）：path 相对笔记库；x / y 为 porcelain 的暂存区 / 工作区状态（. 表示没改，未跟踪为 ? ?）；
+// orig 是重命名前的路径（在库外时以 ../ 开头）
+export type GitFile = { path: string; x: string; y: string; orig?: string }
+
+// git 面板写操作（S13）的结果。done 是失败前已完成的步骤：deleted 为删掉的孤儿附件数（kept 为没删的），
+// staged 为已"全部暂存"；raw 是 git 的原始输出
+export type GitDone = { deleted?: number; kept?: { path: string; reason: 'mentioned' | 'pending' }[]; staged?: boolean }
+export type GitOpResult = { ok: true; done: GitDone } | { ok: false; kind: GitErrorKind; raw: string; done: GitDone }
 
 // 孤儿附件（S11）：tracked 为 git 已跟踪，删除时执行 git rm；否则（含非 git 目录）移到回收站
 export type OrphanAttachment = { path: string; tracked: boolean }
@@ -105,6 +117,15 @@ export interface SynoteApi {
   // 从历史恢复缺失附件（S15）：最后一个还有它的提交，历史里从没有过时为 null；restore 只写工作区，已存在时拒绝
   restoreSource(vault: string, path: string): Promise<LogEntry | null>
   restoreAttachment(vault: string, path: string, hash: string): Promise<void>
+  // git 面板（S13）：都只作用于笔记库内。stage 的 paths 为 null 时暂存全部；
+  // commit：all 时先全部暂存，orphans 是勾选的孤儿附件，按"先删孤儿、再暂存、再提交"执行，失败时 done 说明做到了哪一步
+  gitStage(vault: string, paths: string[] | null): Promise<GitOpResult>
+  gitUnstage(vault: string, paths: string[]): Promise<GitOpResult>
+  gitCommit(vault: string, message: string, all: boolean, orphans: string[]): Promise<GitOpResult>
+  gitPush(vault: string): Promise<GitOpResult>
+  gitPull(vault: string): Promise<GitOpResult>
+  // 笔记库的提交历史（git 面板底部），新的在前；LogEntry.path 为空
+  repoLog(vault: string): Promise<LogEntry[]>
   // 工作区或 .git 有变化后推送最新状态
   onGitChanged(cb: (e: { root: string | null; state: GitState }) => void): () => void
 }

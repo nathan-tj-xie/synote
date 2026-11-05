@@ -2,8 +2,19 @@
 import * as Dialog from '@radix-ui/react-dialog'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import type { GitDone } from '../../shared/api'
+import { i18next } from '../../shared/i18n'
 import s from './Orphans.module.css'
 import { useUi } from './store'
+
+// 为保险没删的孤儿附件告诉用户（清理命令和 git 面板的提交共用）
+export function reportKept(kept: NonNullable<GitDone['kept']>) {
+  const msg = (['pending', 'mentioned'] as const)
+    .map((reason) => [reason, kept.filter((k) => k.reason === reason).map((k) => k.path)] as const)
+    .filter(([, ps]) => ps.length)
+    .map(([reason, ps]) => i18next.t(reason === 'pending' ? 'orphansPending' : 'orphansKept', { paths: ps.join('、') }))
+  if (msg.length) useUi.getState().setError(msg.join('\n'))
+}
 
 export function Orphans() {
   const { t } = useTranslation()
@@ -16,11 +27,7 @@ export function Orphans() {
     try {
       const { kept } = await window.synote.deleteOrphans(orphans.root, orphans.list.map((o) => o.path))
       close()
-      const msg = (['pending', 'mentioned'] as const)
-        .map((reason) => [reason, kept.filter((k) => k.reason === reason).map((k) => k.path)] as const)
-        .filter(([, ps]) => ps.length)
-        .map(([reason, ps]) => t(reason === 'pending' ? 'orphansPending' : 'orphansKept', { paths: ps.join('、') }))
-      if (msg.length) useUi.getState().setError(msg.join('\n'))
+      reportKept(kept)
     } catch (e) {
       useUi.getState().setError(String(e))
     } finally {

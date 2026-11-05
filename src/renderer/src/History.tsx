@@ -38,19 +38,27 @@ export function History({ path }: { path: string }) {
       <h2 className={s.title}>{t('history')}</h2>
       {!ready && <div className={s.empty}>{t(notRepo ? 'gitNotRepo' : 'gitUnavailable')}</div>}
       {ready && log.length === 0 && <div className={s.empty}>{t('noHistory')}</div>}
-      <ul className={s.list}>
-        {log.map((e) => (
-          <li key={e.hash}>
-            <button className={`${s.item} ${rev === e.hash ? s.on : ''}`} aria-pressed={rev === e.hash} title={e.hash} onClick={() => compareWith(path, e)}>
-              <span className={s.subject}>{e.subject}</span>
-              <span className={s.meta}>
-                {e.hash.slice(0, 7)} · {new Date(e.time * 1000).toLocaleString('zh-CN')} · {e.author}
-              </span>
-              {e.path !== path && <span className={s.meta}>{e.path}</span>}
-            </button>
-          </li>
-        ))}
-      </ul>
+      <CommitList log={log} rev={rev} path={path} onPick={(e) => compareWith(path, e)} />
     </aside>
+  )
+}
+
+// 提交列表：历史栏和 git 面板底部的仓库历史（S13）共用。rev 是选中的提交；
+// e.path 与 path 不同（改过名）时多显示一行路径，仓库历史不传 path
+export function CommitList({ log, rev, path, onPick }: { log: LogEntry[]; rev?: string; path?: string; onPick: (e: LogEntry) => void }) {
+  return (
+    <ul className={s.list}>
+      {log.map((e) => (
+        <li key={e.hash}>
+          <button className={`${s.item} ${rev === e.hash ? s.on : ''}`} aria-pressed={rev === e.hash} title={e.hash} onClick={() => onPick(e)}>
+            <span className={s.subject}>{e.subject}</span>
+            <span className={s.meta}>
+              {e.hash.slice(0, 7)} · {new Date(e.time * 1000).toLocaleString('zh-CN')} · {e.author}
+            </span>
+            {path !== undefined && e.path !== path && <span className={s.meta}>{e.path}</span>}
+          </button>
+        </li>
+      ))}
+    </ul>
   )
 }

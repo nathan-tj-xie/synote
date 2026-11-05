@@ -1,7 +1,7 @@
 // git 服务（ADR 0004）：只用系统 git CLI 子进程；查找、porcelain 解析、错误分类、常驻 cat-file
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import path from 'node:path'
-import type { GitErrorKind, LogEntry } from '../shared/api'
+import type { GitBranch, GitErrorKind, GitFile, LogEntry } from '../shared/api'
 
 export type ExecResult = { code: number; stdout: string; stderr: string }
 export type Exec = (
@@ -105,6 +105,14 @@ export function parseStatus(out: string): StatusEntry[] {
     else if (p[0] === '!') res.push({ kind: 'ignored', path: p.slice(2) })
   }
   return res
+}
+
+// `status --porcelain=v2 --branch` 的头部：分支（detached 时为 null）、上游、↑ahead / ↓behind（没有上游时为 0）
+export function parseBranch(out: string): GitBranch {
+  const head = (k: string) => out.split('\0').find((l) => l.startsWith(`# branch.${k} `))?.slice(k.length + 10)
+  const branch = head('head')
+  const ab = /^\+(\d+) -(\d+)$/.exec(head('ab') ?? '')
+  return { branch: branch && branch !== '(detached)' ? branch : null, upstream: head('upstream') ?? null, ahead: ab ? Number(ab[1]) : 0, behind: ab ? Number(ab[2]) : 0 }
 }
 
 // 与 parseLog 配套的格式：每条提交 4 个字段，-z 下各以 NUL 结尾
@@ -220,9 +228,57 @@ export class Git {
     return out.trim() === 'true'
   }
 
-  async status(): Promise<StatusEntry[]> {
+  // git 面板（S13）的数据：只列笔记库（cwd）内的改动，路径换成相对 cwd（porcelain 输出相对仓库根）；
+  // x / y 是暂存区 / 工作区一侧的状态，未跟踪记为 ??
+  async status(): Promise<GitBranch & { files: GitFile[] }> {
     // --no-optional-locks：不顺手刷新 .git/index，否则会触发 watcher 再推一次状态
-    return parseStatus(await this.run(['--no-optional-locks', 'status', '--porcelain=v2', '-z', '--untracked-files=all']))
+    const [out, prefix] = await Promise.all([
+      this.run(['--no-optional-locks', '--literal-pathspecs', 'status', '--porcelain=v2', '-z', '--branch', '--untracked-files=all', '--', '.']),
+      this.prefix(),
+    ])
+    const rel = (p: string) => path.posix.relative(prefix, p)
+    const files = parseStatus(out).flatMap((e): GitFile[] => {
+      if (!('xy' in e)) return e.kind === 'untracked' ? [{ path: rel(e.path), x: '?', y: '?' }] : []
+      return [{ path: rel(e.path), x: e.xy[0], y: e.xy[1], ...(e.kind === 'renamed' && { orig: rel(e.orig) }) }]
+    })
+    return { ...parseBranch(out), files }
+  }
+
+  // 笔记库在仓库里的前缀（如 `笔记/`，库就是仓库根时为空）
+  private async prefix(): Promise<string> {
+    return (await this.run(['rev-parse', '--show-prefix'])).replace(/\n$/, '')
+  }
+
+  // 暂存（含删除）；paths 为 ['.'] 时暂存笔记库内的全部改动
+  stage(paths: string[]): Promise<string> {
+    return this.mutate(['--literal-pathspecs', 'add', '-A', '--', ...paths])
+  }
+
+  // 取消暂存，只动暂存区；还没有任何提交时没有 HEAD 可还原，改为从暂存区移除
+  async unstage(paths: string[]): Promise<string> {
+    const args = (await this.hasHead()) ? ['restore', '--staged'] : ['rm', '--cached', '-r', '-q']
+    return this.mutate(['--literal-pathspecs', ...args, '--', ...paths])
+  }
+
+  // 提交暂存区。useConfigOnly：缺身份时报错（noIdentity），不让 git 用主机名拼一个
+  commit(message: string): Promise<string> {
+    return this.mutate(['-c', 'user.useConfigOnly=true', 'commit', '-q', '-m', message])
+  }
+
+  // 没有上游时推到 origin 的同名分支并设为上游
+  push(hasUpstream: boolean): Promise<string> {
+    return this.mutate(hasUpstream ? ['push'] : ['push', '-u', 'origin', 'HEAD'])
+  }
+
+  // 合并远端（不 rebase，不弹编辑器）；冲突时笔记库进入合并中（S16）
+  pull(): Promise<string> {
+    return this.mutate(['pull', '--no-rebase', '--no-edit'])
+  }
+
+  // git 面板底部的历史：动过笔记库内文件的最近 n 个提交，新的在前
+  async log(n = 200): Promise<LogEntry[]> {
+    if (!(await this.hasHead())) return []
+    return parseLog(await this.run(['--literal-pathspecs', 'log', '-z', `-n${n}`, LOG_FORMAT, '--', '.']))
   }
 
   async identity(): Promise<{ name: string | null; email: string | null }> {
@@ -270,11 +326,10 @@ export class Git {
   // 历史栏（S15）：rel（相对 cwd）的提交历史，--follow 跨重命名；path 换成相对 cwd 的写法（改名前在库外时以 ../ 开头）
   async fileLog(rel: string): Promise<LogEntry[]> {
     if (!(await this.hasHead())) return []
-    const [out, prefix] = await Promise.all([
+    const [out, p] = await Promise.all([
       this.run(['--literal-pathspecs', 'log', '--follow', '-z', '--name-status', LOG_FORMAT, '--', rel]),
-      this.run(['rev-parse', '--show-prefix']),
+      this.prefix(),
     ])
-    const p = prefix.replace(/\n$/, '')
     return parseLog(out).map((e) => ({ ...e, path: path.posix.relative(p, e.path) }))
   }
 

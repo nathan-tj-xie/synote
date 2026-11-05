@@ -337,6 +337,14 @@ export function toggleDiff() {
   if (!on) view!.focus()
 }
 
+// git 面板点改动的文件（S13）：打开它并直接进入工作区对比（已在对比中就保持）
+export function openDiff(path: string) {
+  if (locked) return
+  if (diffMode.get(path)?.rev !== 'HEAD') setMode(path, { rev: 'HEAD', path })
+  if (path === shown) syncDiff()
+  useEditor.getState().open(path)
+}
+
 // 历史栏选中提交（S15）：当前笔记 ↔ 该提交里的版本，再点同一个提交回到正文。左侧只读，块级拣回和输入一样写回 CM6
 export function compareWith(path: string, e: LogEntry) {
   if (path !== shown || locked) return

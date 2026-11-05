@@ -4,7 +4,7 @@ import { existsSync, promises as fs, statSync, watch, type FSWatcher } from 'nod
 import path from 'node:path'
 import { i18next, i18nOptions } from '../shared/i18n'
 import { commands } from '../shared/commands'
-import { indexMethods, type GitState, type OrphanAttachment, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
+import { indexMethods, type GitDone, type GitOpResult, type GitState, type OrphanAttachment, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
 import { tokens } from '../shared/tokens'
 import { exec, findGit, Git, GitError, type GitDetectionResult } from './git'
 import { attachmentTarget, checkOrphans, isAttachmentPath, removeOrphans, trackedOf } from './orphans'
@@ -215,8 +215,8 @@ async function gitState(): Promise<GitState> {
 // 只用传入的实例，期间全局的 git 被替换或置空也不受影响
 async function queryGit(g: Git, version: string): Promise<GitState> {
   if (!(await g.isRepo())) return { status: 'notRepo', version }
-  const [identity, changes, lfs] = await Promise.all([g.identity(), g.status(), g.lfsInstalled()])
-  return { status: 'ready', version, ...identity, changes: changes.length, lfs }
+  const [identity, st, lfs] = await Promise.all([g.identity(), g.status(), g.lfsInstalled()])
+  return { status: 'ready', version, ...identity, ...st, lfs }
 }
 
 // 状态由主进程推送（ADR 0005）：文件改动后防抖重查，渲染进程的 git store 据此更新
@@ -413,7 +413,12 @@ ipcMain.handle('orphans:list', async (_e, vault: string): Promise<OrphanAttachme
 // 和附件写入串在同一条链上：粘贴复用某个孤儿文件时，不会在写入途中被删
 ipcMain.handle('orphans:delete', (_e, vault: string, paths: string[]) => {
   const r = checkVault(vault)
-  if (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string')) throw new Error('invalid paths')
+  if (!isStrings(paths)) throw new Error('invalid paths')
+  return deleteOrphans(r, paths)
+})
+const isStrings = (xs: unknown): xs is string[] => Array.isArray(xs) && xs.every((p) => typeof p === 'string')
+// 清理命令和 git 面板的提交（S13）共用
+function deleteOrphans(r: string, paths: string[]) {
   const job = attaching.then(async () => {
     const checked = await checkOrphans(r, paths, new Set(await currentOrphans()))
     await pruneFresh(r)
@@ -438,6 +443,62 @@ ipcMain.handle('orphans:delete', (_e, vault: string, paths: string[]) => {
   })
   attaching = job.catch(() => {})
   return job
+}
+
+// git 面板的写操作（S13）：失败按分类返回（经 IPC 抛出的异常只剩一段文本，渲染进程没法给出引导），done 记下已完成的步骤。
+// 结束后立即推一次状态，不等 watcher
+async function gitOp(r: string, f: (g: Git, done: GitDone) => Promise<unknown>): Promise<GitOpResult> {
+  const done: GitDone = {}
+  try {
+    await diffGit(r, (g) => f(g, done))
+    return { ok: true, done }
+  } catch (e) {
+    const raw = e instanceof GitError ? [e.stderr, e.stdout].map((x) => x.trim()).filter(Boolean).join('\n') : String(e)
+    return { ok: false, kind: e instanceof GitError ? e.kind : 'unknown', raw, done }
+  } finally {
+    pushGitState()
+  }
+}
+// 渲染进程传来的路径：笔记库内的规范相对路径（git 面板列出的都是），按字面交给 git
+const checkPaths = (paths: unknown): string[] => {
+  if (!isStrings(paths) || !paths.length || !paths.every(relOk)) throw new Error('invalid paths')
+  return paths
+}
+ipcMain.handle('git:stage', (_e, vault: string, paths: string[] | null) => {
+  const r = checkVault(vault)
+  const ps = paths === null ? ['.'] : checkPaths(paths)
+  return gitOp(r, (g) => g.stage(ps))
+})
+ipcMain.handle('git:unstage', (_e, vault: string, paths: string[]) => {
+  const r = checkVault(vault)
+  const ps = checkPaths(paths)
+  return gitOp(r, (g) => g.unstage(ps))
+})
+// 提交：先查身份（缺身份时什么都不做）→ 删勾选的孤儿附件（git rm 的进入这次提交）→ 全部暂存（all 时）→ 提交。
+// 未保存的正文由渲染进程在调用前落盘
+ipcMain.handle('git:commit', (_e, vault: string, message: string, all: boolean, orphans: string[]) => {
+  const r = checkVault(vault)
+  if (typeof message !== 'string' || !message.trim() || typeof all !== 'boolean' || !isStrings(orphans)) throw new Error('invalid commit')
+  return gitOp(r, async (g, done) => {
+    const id = await g.identity()
+    if (!id.name || !id.email) throw new GitError('noIdentity', -1, '')
+    if (orphans.length) {
+      const res = await deleteOrphans(r, orphans)
+      done.deleted = res.deleted.length
+      done.kept = res.kept
+    }
+    if (all) {
+      await g.stage(['.'])
+      done.staged = true
+    }
+    await g.commit(message)
+  })
+})
+ipcMain.handle('git:push', (_e, vault: string) => gitOp(checkVault(vault), async (g) => g.push(!!(await g.status()).upstream)))
+ipcMain.handle('git:pull', (_e, vault: string) => gitOp(checkVault(vault), (g) => g.pull()))
+ipcMain.handle('git:repoLog', (_e, vault: string) => {
+  const r = checkVault(vault)
+  return diffGit(r, (g) => g.log())
 })
 
 // 大文件提示（#13），只提示不阻止：> 50 MiB GitHub 会警告，> 100 MiB 会拒绝 push；按 .gitattributes 走 LFS 的不提示。
