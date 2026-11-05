@@ -1541,7 +1541,8 @@ test('history diff resolves images in the old version against the old note path'
   const items = win.getByRole('complementary', { name: '历史' }).getByRole('button')
   await expect(items).toHaveCount(2, { timeout: 10_000 })
   await items.nth(1).click()
-  const line = win.locator('.monaco-diff-editor .editor.original .view-line', { hasText: 'attachments/x.png' })
+  // 窄窗口（CI 屏幕）里这一行会折行：只认以 `![` 开头的那一段
+  const line = win.locator('.monaco-diff-editor .editor.original .view-line', { hasText: /^!\[/ })
   await expect(line).toBeVisible({ timeout: 10_000 })
   await line.hover({ position: { x: 12, y: 8 } }) // 停在 `![` 上
   const hover = win.locator('.monaco-hover img')
