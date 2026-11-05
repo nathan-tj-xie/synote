@@ -280,19 +280,29 @@ ipcMain.handle('file:createNote', async (_e, vault: string, dir: string) => {
 // 粘贴 / 拖入的附件（S10）：串成一条链，并发的两次粘贴不会都没查到对方而写出两份同样的文件
 let attaching: Promise<unknown> = Promise.resolve()
 // 在途附件（S11）：本会话粘贴 / 拖入（含复用已有文件）、还没被任何已落盘笔记引用的，按库记。
-// 清理时不列、不删：链接可能还没插进去或还没自动保存。索引发现它被引用后移出；从没被引用的整个会话都受保护（宁可少删）
-const fresh = new Map<string, Set<string>>()
+// 清理时不列、不删：链接可能还没插进去或还没自动保存。三种情况移出：索引发现它被引用；渲染进程报告插入任务结束且
+// 笔记已落盘（file:attachmentSettled，插完又撤销的这时就能清理）；超时兜底。值为保护到期的时间
+// shortcut: 兜底固定 10 分钟，防渲染进程崩溃或漏报时永远不释放；有超长的插入（如超大文件）时再按大小放宽
+const FRESH_MS = 10 * 60_000
+const fresh = new Map<string, Map<string, number>>()
+const isFresh = (dir: string, p: string) => (fresh.get(dir)?.get(p) ?? 0) > Date.now()
 async function pruneFresh(dir: string): Promise<void> {
   const s = fresh.get(dir)
   if (!s?.size) return
-  for (const p of (await callIndex('referenced', [...s])) as string[]) s.delete(p)
+  for (const [p, until] of s) if (until <= Date.now()) s.delete(p)
+  for (const p of (await callIndex('referenced', [...s.keys()])) as string[]) s.delete(p)
 }
+ipcMain.handle('file:attachmentSettled', (_e, vault: string, paths: string[]) => {
+  if (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string')) throw new Error('invalid paths')
+  for (const p of paths) fresh.get(vault)?.delete(p) // 只动内存里的保护表，期间切了库也无妨
+})
 ipcMain.handle('file:saveAttachment', (_e, vault: string, name: string | null, bytes: Uint8Array) => {
   const r = checkVault(vault)
   if (!(bytes instanceof Uint8Array) || (name !== null && typeof name !== 'string')) throw new Error('invalid attachment')
   const job = attaching.then(async () => {
     const rel = await saveAttachment(r, attachmentName(name, new Date()), bytes)
-    fresh.get(r)?.add(rel) ?? fresh.set(r, new Set([rel]))
+    if (!fresh.has(r)) fresh.set(r, new Map())
+    fresh.get(r)!.set(rel, Date.now() + FRESH_MS)
     return { path: rel, warn: await sizeWarning(r, rel, bytes.length) }
   })
   attaching = job.catch(() => {})
@@ -318,7 +328,7 @@ ipcMain.handle('orphans:list', async (_e, vault: string): Promise<OrphanAttachme
   const r = checkVault(vault)
   const all = await currentOrphans()
   await pruneFresh(r) // 对账之后再修剪：刚保存的引用已进索引
-  const list = all.filter((p) => !fresh.get(r)?.has(p))
+  const list = all.filter((p) => !isFresh(r, p))
   const tracked = await trackedOf(await vaultRepo(r), list)
   return list.map((p) => ({ path: p, tracked: tracked.has(p) }))
 })
@@ -331,7 +341,7 @@ ipcMain.handle('orphans:delete', (_e, vault: string, paths: string[]) => {
   const job = attaching.then(async () => {
     const checked = await checkOrphans(r, paths, new Set(await currentOrphans()))
     await pruneFresh(r)
-    const pending = checked.map(([p]) => p).filter((p) => fresh.get(r)?.has(p))
+    const pending = checked.map(([p]) => p).filter((p) => isFresh(r, p))
     const mentioned = (await callIndex('mentioned', checked.map(([p]) => p).filter((p) => !pending.includes(p)))) as string[]
     const kept = [...pending.map((path) => ({ path, reason: 'pending' as const })), ...mentioned.map((path) => ({ path, reason: 'mentioned' as const }))]
     const targets = checked.filter(([p]) => !kept.some((k) => k.path === p))

@@ -1291,6 +1291,26 @@ test('attachments still being inserted are never cleaned', async () => {
   await app.close()
 })
 
+// 误粘后撤销（codex #47 第三轮）：插入任务结束后在途保护就解除，撤销掉链接的附件能被清理
+test('an attachment pasted and then undone can be cleaned', async () => {
+  const { app, win, vault } = await launch({ 'n.md': '开头' })
+  await win.getByRole('treeitem', { name: 'n.md' }).click()
+  await win.locator('.cm-content').click()
+  await win.keyboard.press('End')
+  await fire(win, 'drop', 'oops.pdf', [9, 9], 'application/pdf')
+  const file = path.join(vault, 'n.md')
+  await expect.poll(() => readFileSync(file, 'utf8')).toBe('开头[oops](attachments/oops.pdf)')
+  await win.keyboard.press('ControlOrMeta+z')
+  await expect.poll(() => readFileSync(file, 'utf8')).toBe('开头')
+  const dialog = await cleanOrphans(win)
+  await expect(dialog.getByRole('listitem')).toHaveText(['attachments/oops.pdf回收站'])
+  await dialog.getByRole('button', { name: '删除 1 个' }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(win.getByRole('alert')).toHaveCount(0)
+  expect(existsSync(path.join(vault, 'attachments/oops.pdf'))).toBe(false)
+  await app.close()
+})
+
 // 大小写别名：引用写成小写也不删
 test('clean orphans keeps attachments referenced with different case', async () => {
   const { app, win, vault } = await launch({ 'a.md': '![](attachments/report.png)', 'attachments/Report.PNG': 'r', 'attachments/gone.png': 'g' })

@@ -22,6 +22,7 @@ const api: SynoteApi = {
   exists: (v, p) => ipcRenderer.invoke('file:exists', v, p),
   createNote: (v, dir) => ipcRenderer.invoke('file:createNote', v, dir),
   saveAttachment: (v, n, b) => ipcRenderer.invoke('file:saveAttachment', v, n, b),
+  attachmentSettled: (v, p) => ipcRenderer.invoke('file:attachmentSettled', v, p),
   trash: (v, p) => ipcRenderer.invoke('file:trash', v, p),
   showItemMenu: (p, dir) => ipcRenderer.invoke('menu:item', p, dir),
   reportReady: () => ipcRenderer.send('app:ready'),
