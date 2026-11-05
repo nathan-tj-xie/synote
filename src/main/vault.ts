@@ -35,14 +35,34 @@ export function resolveInVault(root: string, rel: string): string {
   return abs
 }
 
+// 真实路径 a 是否在真实库根 r 之内（含 r 自身）
+function within(r: string, a: string): boolean {
+  const back = path.relative(r, a)
+  return back !== '..' && !back.startsWith(`..${path.sep}`) && !path.isAbsolute(back)
+}
+
 // 读之前再按真实路径查一次：resolveInVault 只看字面，符号链接（文件本身或路径上的某个目录）可能指向库外。
 // 目标的真实路径必须仍在库的真实路径之内，否则拒绝
 export async function realInVault(root: string, rel: string): Promise<string> {
   const abs = resolveInVault(root, rel)
   const [r, a] = await Promise.all([fs.realpath(root), fs.realpath(abs)])
-  const back = path.relative(r, a)
-  if (!back || back === '..' || back.startsWith(`..${path.sep}`) || path.isAbsolute(back)) throw new Error(`path outside vault: ${rel}`)
+  if (a === r || !within(r, a)) throw new Error(`path outside vault: ${rel}`)
   return a
+}
+
+// 回收 / 新建用：真实父目录必须在库内，返回「真实父目录 + 末级名」。末级是链接时返回的就是链接本身（回收链接，不回收目标）
+export async function realParentInVault(root: string, rel: string): Promise<string> {
+  const abs = resolveInVault(root, rel)
+  const [r, dir] = await Promise.all([fs.realpath(root), fs.realpath(path.dirname(abs))])
+  if (!within(r, dir)) throw new Error(`path outside vault: ${rel}`)
+  return path.join(dir, path.basename(abs))
+}
+
+// 写入用：父目录同上；末级已是符号链接时写入会跟随它，所以它的目标也必须在库内（悬空链接同样拒绝）
+export async function writeTarget(root: string, rel: string): Promise<string> {
+  const p = await realParentInVault(root, rel)
+  const st = await fs.lstat(p).catch(() => null)
+  return st?.isSymbolicLink() ? realInVault(root, rel) : p
 }
 
 export function toPosix(p: string): string {

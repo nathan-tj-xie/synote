@@ -7,7 +7,7 @@ import { commands } from '../shared/commands'
 import { indexMethods, type GitState, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
 import { tokens } from '../shared/tokens'
 import { exec, findGit, Git, GitError, type GitDetectionResult } from './git'
-import { isHidden, realInVault, resolveInVault, scanEntries, toPosix, uniqueNoteName } from './vault'
+import { isHidden, realInVault, realParentInVault, resolveInVault, scanEntries, toPosix, uniqueNoteName, writeTarget } from './vault'
 
 i18next.init(i18nOptions)
 const t = i18next.t
@@ -224,7 +224,6 @@ function checkVault(vault: string): string {
   if (vault !== root) throw new Error(t('vaultSwitched', { vault }))
   return root
 }
-const vaultPath = (vault: string, rel: string) => resolveInVault(checkVault(vault), rel)
 
 // 只选目录；打开走和最近列表同一条交接路径
 ipcMain.handle('vault:pick', async () => {
@@ -256,12 +255,13 @@ ipcMain.handle('git:readHead', async (_e, vault: string, rel: string) => {
     throw e instanceof GitError && e.kind === 'notRepo' ? new Error(t('gitNotRepo')) : e
   }
 })
-ipcMain.handle('file:write', (_e, vault: string, rel: string, content: string) => fs.writeFile(vaultPath(vault, rel), content))
+// 写入、新建、回收同样按真实路径校验：父目录（或被跟随的链接）被换成指向库外时拒绝
+ipcMain.handle('file:write', async (_e, vault: string, rel: string, content: string) => fs.writeFile(await writeTarget(checkVault(vault), rel), content))
 ipcMain.handle('file:createNote', async (_e, vault: string, dir: string) => {
   const r = checkVault(vault)
   const entries = await scanEntries(r)
   const rel = uniqueNoteName(new Set(entries.map((x) => x.path)), dir, t('untitled'))
-  await fs.writeFile(resolveInVault(r, rel), '', { flag: 'wx' }) // wx：不覆盖已有文件
+  await fs.writeFile(await realParentInVault(r, rel), '', { flag: 'wx' }) // wx：不覆盖已有文件，也不跟随末级链接
   return rel
 })
 ipcMain.handle('index:call', (_e, vault: string, method: string, ...args: unknown[]) => {
@@ -278,7 +278,7 @@ ipcMain.handle('git:choose', async () => {
   detectGit()
   return gitState()
 })
-ipcMain.handle('file:trash', (_e, vault: string, rel: string) => shell.trashItem(vaultPath(vault, rel)))
+ipcMain.handle('file:trash', async (_e, vault: string, rel: string) => shell.trashItem(await realParentInVault(checkVault(vault), rel)))
 ipcMain.handle(
   'menu:item',
   (_e, _rel: string, dir: boolean) =>

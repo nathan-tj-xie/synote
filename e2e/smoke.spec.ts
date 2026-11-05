@@ -834,6 +834,11 @@ const allSyntax = [
   '',
   '正文 [名字](其他.md) 和 ![图](../attachments/a.png) 还有 ![外链](https://example.com/x.png)',
   '',
+  '跨行的 [链',
+  '接](其他.md) 和引用式 ![引用图][图] 与 [引用链接][图]',
+  '',
+  '[图]: ../attachments/a.png',
+  '',
   '- 圆点',
   '  1. 有序',
   '- [ ] 待办',
@@ -883,11 +888,13 @@ test('live preview renders every syntax and never changes source bytes', async (
   // 光标在第一行：标题源码可见，其余渲染
   await expect(editor).toContainText('# 一级标题')
   await expect(win.locator('.cm-lp-h2')).toHaveText('二级 斜 粗 删 码')
-  await expect(win.locator('.cm-lp-link')).toHaveText('名字')
+  await expect(win.locator('.cm-lp-link')).toHaveText(['名字', '链 接', '引用链接'])
   await expect(editor).not.toContainText('其他.md')
-  await expect(win.locator('.cm-lp-image img')).toHaveAttribute('src', /^data:image\/png;base64,/)
+  // 内联写法和引用式写法的图片都按笔记目录解析、内联显示
+  await expect(win.locator('.cm-lp-image img')).toHaveCount(2)
+  for (const img of await win.locator('.cm-lp-image img').all()) await expect(img).toHaveAttribute('src', /^data:image\/png;base64,/)
   await expect(win.locator('.cm-lp-image-missing')).toHaveText('外链')
-  await expect(win.locator('.cm-lp-bullet')).toHaveCount(2)
+  await expect(win.locator('.cm-lp-bullet').first()).toHaveText('•') // 行内装饰只建视口，后面的列表不一定已渲染
   await expect(win.locator('.cm-lp-task')).toHaveCount(2)
   await expect(win.locator('.cm-lp-task').nth(1)).toBeChecked()
   await expect(win.locator('.cm-line.cm-lp-quote')).toHaveText('引用 粗')
@@ -895,18 +902,19 @@ test('live preview renders every syntax and never changes source bytes', async (
   await expect(win.locator('.cm-lp-fence')).toHaveText('ts')
   await expect(win.locator('.cm-lp-table').first().locator('th')).toHaveText(['左', '中', '右'])
   await expect(win.locator('.cm-lp-table').first().locator('td').nth(2)).toHaveCSS('text-align', 'right')
-  // 引用、列表里的表格也渲染（连同行首的 `> ` / 缩进）
-  await expect(win.locator('.cm-lp-table')).toHaveCount(3)
+  // 引用、列表里的表格也渲染（连同行首的 `> ` / 缩进）；它们在文末，先滚过去（只渲染视口）
+  const scroll = (to: 'top' | 'bottom') => win.locator('.cm-scroller').evaluate((e, to) => (e.scrollTop = to === 'top' ? 0 : e.scrollHeight), to)
+  await scroll('bottom')
   await expect(win.locator('.cm-lp-table.cm-lp-quote td')).toHaveText(['x', 'y'])
-  await expect(win.locator('.cm-lp-table').nth(2).locator('td')).toHaveText(['z'])
+  await expect(win.locator('.cm-lp-table').last().locator('td')).toHaveText(['z'])
   await expect(editor).not.toContainText('|---|')
+  await scroll('top')
   // 代码块按语言懒加载高亮：关键字有自己的颜色
   await expect.poll(() => win.locator('.cm-lp-codeblock span').count()).toBeGreaterThan(2)
 
   // 光标移进表格：表格切回源码
   await win.locator('.cm-lp-table').first().click()
   await expect(editor).toContainText('|:---|:--:|---:|')
-  await expect(win.locator('.cm-lp-table')).toHaveCount(2)
 
   const stat = (p: string) => statSync(path.join(vault, p)).mtimeMs
   const save = async (p: string) => {
@@ -981,7 +989,8 @@ test('IME composition keeps the cursor line stable', async () => {
 // CRLF 笔记：CM6 内部按 \n 处理，保存时按读进来时的换行符写回（只打开不写盘，编辑后仍是 CRLF，diff 里编辑也一样）
 test('CRLF notes keep their line endings', async () => {
   const crlf = '# 标题\r\n\r\n- [ ] 任务\r\n正文\r\n'
-  const { app, win, vault } = await launch({ 'a.md': crlf, 'b.md': crlf, 'c.md': crlf })
+  const mixed = '# 混合\r\n一\n二\r\n三\r四'
+  const { app, win, vault } = await launch({ 'a.md': crlf, 'b.md': crlf, 'c.md': crlf, 'd.md': mixed })
   const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(vault, '..', 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' }
   writeFileSync(env.GIT_CONFIG_GLOBAL, '[core]\n\tautocrlf = false\n')
   const git = (...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: vault, env })
@@ -997,6 +1006,13 @@ test('CRLF notes keep their line endings', async () => {
   await win.keyboard.press('ControlOrMeta+s')
   await win.waitForTimeout(500)
   expect(read('a.md')).toBe(crlf)
+
+  // 混合换行只打开 + ⌘S：不写盘，字节不变（编辑后才会统一成多数那种）
+  await win.getByRole('treeitem', { name: 'd.md' }).click()
+  await expect(editor).toContainText('# 混合')
+  await win.keyboard.press('ControlOrMeta+s')
+  await win.waitForTimeout(500)
+  expect(read('d.md')).toBe(mixed)
 
   // 正文里编辑：仍是 CRLF
   await win.getByRole('treeitem', { name: 'b.md' }).click()

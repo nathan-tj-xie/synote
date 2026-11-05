@@ -177,6 +177,59 @@ class ImageWidget extends WidgetType {
   }
 }
 
+// 跨行链接整段替换成它的文字
+class LinkText extends WidgetType {
+  constructor(readonly text: string) {
+    super()
+  }
+  eq(o: LinkText) {
+    return o.text === this.text
+  }
+  toDOM() {
+    const el = document.createElement('span')
+    el.className = 'cm-lp-link'
+    el.textContent = this.text
+    return el
+  }
+}
+
+// 引用定义 `[ref]: 地址`：标签按 CommonMark 规则归一（去括号、折叠空白、不分大小写）
+const normLabel = (s: string) => s.replace(/^\[|\]$/g, '').trim().replace(/\s+/g, ' ').toLowerCase()
+export function linkRefs(state: EditorState): Map<string, string> {
+  const refs = new Map<string, string>()
+  syntaxTree(state).iterate({
+    enter(n) {
+      if (n.name !== 'LinkReference') return CONTAINERS.has(n.name)
+      const label = n.node.getChild('LinkLabel')
+      const url = n.node.getChild('URL')
+      const key = label && normLabel(state.sliceDoc(label.from, label.to))
+      if (key && url && !refs.has(key)) refs.set(key, state.sliceDoc(url.from, url.to)) // 重复定义以第一个为准
+      return false
+    },
+  })
+  return refs
+}
+
+// 链接 / 图片的文字（[ 与 ] 之间）和地址：内联写法取 URL 子节点；引用写法（`[文][ref]`、`[文][]`、`[文]`）按标签查定义，
+// 查不到时地址为 null（那就不是链接，显示源码）
+function linkParts(state: EditorState, n: SyntaxNode, refs: () => Map<string, string>): { text: string; target: string | null } | null {
+  const marks = n.getChildren('LinkMark')
+  if (marks.length < 2) return null
+  const text = state.sliceDoc(marks[0].to, marks[1].from)
+  const url = n.getChild('URL')
+  if (url) return { text, target: state.sliceDoc(url.from, url.to) }
+  if (marks.length > 2) return { text, target: '' } // `[文]()`：空地址
+  const label = n.getChild('LinkLabel')
+  const key = normLabel(label && label.to - label.from > 2 ? state.sliceDoc(label.from, label.to) : text)
+  return { text, target: refs().get(key) ?? null }
+}
+
+function imageWidget(state: EditorState, text: string, target: string): ImageWidget {
+  const info = state.facet(note)
+  const path = info && target ? resolveImage(target, info.path) : null
+  return new ImageWidget(info?.vault ?? null, path, target, text.replace(/\s+/g, ' '), imageGen)
+}
+
 // 表格：整块替换成只读的 HTML 表格；点一下把光标放进表格，切回源码编辑
 class TableWidget extends WidgetType {
   constructor(
@@ -240,35 +293,55 @@ function tableWidget(state: EditorState, n: SyntaxNode): TableWidget {
   return new TableWidget(state.sliceDoc(start, n.to), rows, align, quoted, quoted ? 0 : n.from - start)
 }
 
-// 能装下表格的容器：只往这些节点里走，段落、代码块等叶子块整块跳过，每次重建只付块级结构的代价
+// 能装下表格的容器：只往这些节点里走，代码块等叶子块整块跳过；段落只在跨行时才往里看
 const CONTAINERS = new Set(['Document', 'Blockquote', 'BulletList', 'OrderedList', 'ListItem'])
+// 跨行段落里，链接 / 图片可能嵌在这些行内节点里
+const INLINE_CONTAINERS = new Set(['Emphasis', 'StrongEmphasis', 'Strikethrough'])
 
-// 跨行替换（表格）必须由 StateField 提供，ViewPlugin 不能替换换行。块级替换按整行：
-// 引用、列表里的表格连同行首的 `> ` / 缩进一起替换（行内插件跳过这些行，不会叠加装饰）
-export function buildTables(state: EditorState): DecorationSet {
+// 跨行替换必须由 StateField 提供，ViewPlugin 不能替换换行。这里出两类：
+// - 表格：块级替换按整行，引用、列表里的表格连同行首的 `> ` / 缩进一起替换
+// - 跨行的链接 / 图片：整段替换成文字 / 图片（行内插件跳过它们和这些范围里的标记，不会叠加装饰）
+export function buildBlocks(state: EditorState, refs: Map<string, string> = linkRefs(state)): DecorationSet {
   const out: Range<Decoration>[] = []
+  const doc = state.doc
+  const multiLine = (a: number, b: number) => doc.lineAt(a).number !== doc.lineAt(b).number
   syntaxTree(state).iterate({
     enter(n) {
-      if (n.name !== 'Table') return CONTAINERS.has(n.name)
-      if (!touches(state, n.from, n.to))
-        out.push(Decoration.replace({ widget: tableWidget(state, n.node), block: true }).range(state.doc.lineAt(n.from).from, n.to))
-      return false
+      const name = n.name
+      if (CONTAINERS.has(name)) return true
+      if (name === 'Table') {
+        if (!touches(state, n.from, n.to)) out.push(Decoration.replace({ widget: tableWidget(state, n.node), block: true }).range(doc.lineAt(n.from).from, n.to))
+        return false
+      }
+      if (name === 'Paragraph') return multiLine(n.from, n.to)
+      if ((name === 'Link' || name === 'Image') && multiLine(n.from, n.to)) {
+        const parts = touches(state, n.from, n.to) ? null : linkParts(state, n.node, () => refs)
+        if (parts && parts.target !== null) {
+          const widget = name === 'Image' ? imageWidget(state, parts.text, parts.target) : new LinkText(parts.text.replace(/\s+/g, ' '))
+          out.push(Decoration.replace({ widget }).range(n.from, n.to))
+        }
+        return false
+      }
+      return INLINE_CONTAINERS.has(name)
     },
   })
-  return Decoration.set(out)
+  return Decoration.set(out, true)
 }
 
 // 组字状态：由 DOM 的 compositionstart / end 维护。StateField 拿不到 view.composing，靠它在组字期间不重建表格
 let ime = false
 
-type TableValue = { decos: DecorationSet; key: string; stale: boolean }
-const tables = StateField.define<TableValue>({
-  create: (s) => ({ decos: buildTables(s), key: activeKey(s), stale: false }),
+type BlockValue = { decos: DecorationSet; refs: Map<string, string>; key: string; stale: boolean }
+function blockValue(state: EditorState): BlockValue {
+  const refs = linkRefs(state)
+  return { decos: buildBlocks(state, refs), refs, key: activeKey(state), stale: false }
+}
+const blocks = StateField.define<BlockValue>({
+  create: blockValue,
   update(v, tr) {
     if (ime || tr.isUserEvent('input.type.compose')) return { ...v, decos: v.decos.map(tr.changes), stale: true }
-    const key = activeKey(tr.state)
-    if (v.stale || tr.docChanged || key !== v.key || syntaxTree(tr.state) !== syntaxTree(tr.startState) || refreshed([tr]))
-      return { decos: buildTables(tr.state), key, stale: false }
+    if (v.stale || tr.docChanged || activeKey(tr.state) !== v.key || syntaxTree(tr.state) !== syntaxTree(tr.startState) || refreshed([tr]))
+      return blockValue(tr.state)
     return v
   },
   provide: (f) => EditorView.decorations.from(f, (v) => v.decos),
@@ -280,9 +353,11 @@ const MARKS: Record<string, string> = { Emphasis: 'EmphasisMark', StrongEmphasis
 export function buildInline(state: EditorState, from: number, to: number): DecorationSet {
   const out: Range<Decoration>[] = []
   const doc = state.doc
-  const info = state.facet(note)
-  // 已整块渲染成表格的范围（引用、列表里的表格）：里面的 `> `、缩进等不再加装饰
-  const rendered = state.field(tables, false)?.decos
+  // 已由 blocks 整段替换的范围（表格、跨行链接 / 图片）：里面的 `> `、缩进、标记等不再加装饰
+  const field = state.field(blocks, false)
+  const rendered = field?.decos
+  let refs: Map<string, string> | undefined
+  const getRefs = () => (refs ??= field?.refs ?? linkRefs(state))
   const inTable = (a: number, b: number) => {
     let hit = false
     rendered?.between(a, a, (x, y) => {
@@ -326,7 +401,7 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
       }
       switch (name) {
         case 'Table':
-          return false // 由 tables 字段整块处理
+          return false // 由 blocks 字段整块处理
         case 'FencedCode': {
           lines(n.from, n.to, (a, b) => `cm-lp-codeblock${a ? ' cm-lp-codeblock-first' : ''}${b ? ' cm-lp-codeblock-last' : ''}`)
           if (!active()) {
@@ -362,24 +437,20 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
           out.push(mark('cm-lp-code').range(n.from, n.to))
           break
         case 'Link': {
+          if (!oneLine(n.from, n.to)) return false // 跨行的由 blocks 整段处理
+          const parts = active() ? null : linkParts(state, n.node, getRefs)
+          if (!parts || parts.target === null) return // 光标在这行，或是没有定义的 `[文]`（不是链接）
+          // [名字](路径)、[名字][ref] → 只显示名字
           const marks = n.node.getChildren('LinkMark')
-          if (active() || marks.length < 2) return
-          // [名字](路径) → 只显示名字。目标跨行（`](\n路径)`）时整个链接显示源码，不能只藏一半
-          if (!oneLine(marks[1].from, n.to)) return
           hide(marks[0].from, marks[0].to)
           if (marks[0].to < marks[1].from) out.push(mark('cm-lp-link').range(marks[0].to, marks[1].from))
           hide(marks[1].from, n.to)
           return
         }
         case 'Image': {
-          // 跨行的图片整个显示源码（ViewPlugin 不能替换换行）
-          if (active() || !oneLine(n.from, n.to)) return false
-          const url = n.node.getChild('URL')
-          const src = url ? doc.sliceString(url.from, url.to) : ''
-          const marks = n.node.getChildren('LinkMark')
-          const alt = marks.length >= 2 ? doc.sliceString(marks[0].to, marks[1].from) : ''
-          const path = info && src ? resolveImage(src, info.path) : null
-          replace(n.from, n.to, Decoration.replace({ widget: new ImageWidget(info?.vault ?? null, path, src, alt, imageGen) }))
+          if (!oneLine(n.from, n.to) || active()) return false // 跨行的由 blocks 整段处理
+          const parts = linkParts(state, n.node, getRefs)
+          if (parts && parts.target !== null) replace(n.from, n.to, Decoration.replace({ widget: imageWidget(state, parts.text, parts.target) }))
           return false
         }
       }
@@ -476,5 +547,5 @@ const theme = EditorView.theme({
 })
 
 export function livePreview(n: Note | null): Extension {
-  return [n ? note.of(n) : [], syntaxHighlighting(highlight), tables, inline, theme]
+  return [n ? note.of(n) : [], syntaxHighlighting(highlight), blocks, inline, theme]
 }
