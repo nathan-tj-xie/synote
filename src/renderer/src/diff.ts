@@ -33,7 +33,7 @@ import { fromMonacoLabel, monacoKeyName, parity } from './keymap'
 import { isMac } from './match'
 import { useUi } from './store'
 import { monacoColors, monacoRules } from './tokens'
-import { bomOffset, dataUrl, imageAt, imageMime, MAX_IMAGE, minimalEdit } from './diffUtil'
+import { bomOffset, dataUrl, escapeMd, imageAt, imageMime, lfsHoverMarkdown, MAX_IMAGE, minimalEdit } from './diffUtil'
 
 // diff 计算放在 worker 里，不卡输入
 self.MonacoEnvironment = { getWorker: () => new EditorWorker() }
@@ -262,16 +262,17 @@ monaco.languages.registerHoverProvider('markdown', {
     const bytes =
       (side === 'original' && smudged.get(`${c.vault}\0${c.rev}\0${ref.path}`)) ||
       (await (side === 'original' ? window.synote.readRev(c.vault, c.rev, ref.path) : window.synote.readBytes(c.vault, ref.path)).catch(() => null))
-    const text = (value: string) => ({ range, contents: [{ value }] })
+    // 文字一律转义：路径来自笔记正文，不能被渲染成链接或 HTML
+    const text = (value: string) => ({ range, contents: [{ value: escapeMd(value) }] })
     if (!bytes) return text(i18next.t('imageMissing', { path: ref.path }))
     const ptr = parseLfsPointer(bytes)
     if (ptr) {
-      // command 链接要 isTrusted；参数是悬停的位置，命令执行时按当前模型重新解析，不把路径塞进链接
-      const args = encodeURIComponent(JSON.stringify([side, pos.lineNumber, pos.column]))
-      const value = `${i18next.t('lfsNotDownloaded', { size: sizeLabel(ptr.size), path: ref.path })} [${i18next.t('lfsDownload')}](command:synote.lfsDownload?${args})`
-      return { range, contents: [{ value, isTrusted: true }] }
+      // 只放行自己的命令（不用 isTrusted: true）；参数是悬停的位置，命令执行时按当前模型重新解析，不把路径塞进链接
+      const value = lfsHoverMarkdown(i18next.t('lfsNotDownloaded', { size: sizeLabel(ptr.size), path: ref.path }), i18next.t('lfsDownload'), [side, pos.lineNumber, pos.column])
+      return { range, contents: [{ value, isTrusted: { enabledCommands: ['synote.lfsDownload'] } }] }
     }
     if (bytes.length > MAX_IMAGE) return text(i18next.t('imageTooLarge'))
-    return text(`![](${await dataUrl(bytes, imageMime(ref.path)!)}|width=240)`)
+    // 缩略图：只有 base64 的 data URL，没有来自正文的文字，不转义；不可信（不放行任何命令）
+    return { range, contents: [{ value: `![](${await dataUrl(bytes, imageMime(ref.path)!)}|width=240)` }] }
   },
 })

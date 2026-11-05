@@ -472,10 +472,14 @@ export class Git {
   }
 
   // 工作区里是指针的文件，下载真实内容写回工作区：`git lfs pull --include=<仓库根相对路径>`。--include 是 gitignore 式的模式，
-  // 通配符和反斜杠逐个转义；逗号是多个模式的分隔符且没有转义写法，换成只匹配单个字符的 ?（最多多下同目录里只差这一位的文件）
-  async lfsPull(rel: string): Promise<string> {
+  // 通配符和反斜杠逐个转义；逗号是多个模式的分隔符且没有转义写法，换成只匹配单个字符的 ?（最多多下同目录里只差这一位的文件）。
+  // 用户点了才下载：空的 --exclude= 盖掉 lfs.fetchexclude（--include 同样盖掉 lfs.fetchinclude），否则配置会让它静默跳过。
+  // 下完再确认文件已不是指针，仍是指针就报错，不当作成功
+  async lfsPull(rel: string): Promise<void> {
     const pattern = (await this.prefix()) + rel
-    return this.mutate(['lfs', 'pull', `--include=${pattern.replace(/[\\*?[\]]/g, '\\$&').replace(/,/g, '?')}`])
+    await this.mutate(['lfs', 'pull', `--include=${pattern.replace(/[\\*?[\]]/g, '\\$&').replace(/,/g, '?')}`, '--exclude='])
+    const after = await fs.readFile(path.join(this.cwd, rel)).catch(() => null)
+    if (after && parseLfsPointer(after)) throw new GitError('lfsFilter', 0, `git lfs pull finished but ${rel} is still an LFS pointer`)
   }
 
   // 读任意版本的 blob（如 `HEAD:a.md`），不存在时为 null；复用常驻的 cat-file --batch 进程

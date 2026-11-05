@@ -1,5 +1,6 @@
 // 主进程 ↔ 渲染进程的 IPC 契约，两边共享类型
 import type { CommandId } from './commands'
+import type { LfsPointer } from './lfs'
 import type { Edit } from './mdLinks'
 
 export type Entry = { path: string; dir: boolean } // path 为相对笔记库根目录的 POSIX 路径
@@ -93,8 +94,8 @@ export interface SynoteApi {
   readFile(vault: string, path: string): Promise<string>
   writeFile(vault: string, path: string, content: string): Promise<void>
   readBytes(vault: string, path: string): Promise<Uint8Array>
-  // 每个路径是否存在（实时预览的附件缺失占位用）
-  exists(vault: string, paths: string[]): Promise<boolean[]>
+  // 每个路径是否存在（实时预览的附件缺失占位用）；存在且是 LFS 指针（内容没下载，S17）时给出指针
+  exists(vault: string, paths: string[]): Promise<(boolean | LfsPointer)[]>
   createNote(vault: string, dir: string): Promise<string>
   // 粘贴 / 拖入的附件写进 attachments/（S10），name 为 null 表示剪贴板图片；内容相同的已有文件直接复用。
   // warn：large 为超过 50 MiB，huge 为超过 100 MiB 且不走 LFS

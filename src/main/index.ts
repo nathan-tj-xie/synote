@@ -261,10 +261,16 @@ ipcMain.handle('vault:writeConfig', async (_e, vault: string, config: VaultConfi
 })
 // 读取跟随符号链接，所以按真实路径校验（实时预览会自动读图片，不能让一个指向库外的链接读出库外文件）
 ipcMain.handle('file:read', async (_e, vault: string, rel: string) => fs.readFile(await realInVault(checkVault(vault), rel), 'utf8'))
-// 实时预览查附件链接是否存在（S10）：一批路径一次查，同样按真实路径校验，越出笔记库的按不存在
+// 实时预览查附件链接是否存在（S10）：一批路径一次查，同样按真实路径校验，越出笔记库的按不存在。
+// 小于 1024 字节的文件顺带识别 LFS 指针（S17），是指针就给出指针（大文件不读内容）
 ipcMain.handle('file:exists', async (_e, vault: string, rels: string[]) => {
   const r = checkVault(vault)
-  return Promise.all(rels.map((p) => realInVault(r, p).then(() => true, () => false)))
+  const probe = async (p: string) => {
+    const abs = await realInVault(r, p)
+    const st = await fs.stat(abs)
+    return (st.isFile() && st.size < 1024 && parseLfsPointer(await fs.readFile(abs))) || true
+  }
+  return Promise.all(rels.map((p) => probe(p).catch(() => false)))
 })
 ipcMain.handle('file:readBytes', async (_e, vault: string, rel: string) => fs.readFile(await realInVault(checkVault(vault), rel)))
 // diff / 历史用的 git：没有可用 git、不是仓库时报错（不像 vaultRepo 那样当作非 git 目录）

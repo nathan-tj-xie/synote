@@ -18,9 +18,12 @@ test.skip(!hasLfs, 'git-lfs not installed')
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64')
 const OLD = Buffer.concat([PNG, Buffer.from('old')]) // 尾部多几个字节仍能显示，内容（oid）和 p.png 不同
+const PDF = Buffer.from('%PDF-1.4 假的\n')
+// 文件名里拼出一个 command 链接（codex #37 审查）：悬停里只能显示成字面文字，不能变成可点的编辑器命令
+const EVIL = '[下载](command:editor.action.deleteLines).png'
 const FILTER = '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n\tsmudge = git-lfs smudge -- %f\n\tprocess = git-lfs filter-process\n\trequired = true\n'
 
-// 源仓库：v1 的 a.md 引用 old.png；v2 删掉 old.png，改引用 p.png。按 GIT_LFS_SKIP_SMUDGE=1 克隆成笔记库：附件全是指针，本地没有对象。
+// 源仓库：v1 的 a.md 引用 old.png 和一个文件名里拼了 Markdown 命令链接的图片；v2 删掉这两个，改引用 p.png 和 d.pdf。按 GIT_LFS_SKIP_SMUDGE=1 克隆成笔记库：附件全是指针，本地没有对象。
 // lfs 为 false 时 app 用的 git 所在目录里没有 git-lfs，PATH 也只有系统目录（模拟 macOS 上没装 git-lfs）
 async function launchLfs(lfs: boolean) {
   const base = mkdtempSync(path.join(tmpdir(), 'synote-lfs-e2e-'))
@@ -37,15 +40,17 @@ async function launchLfs(lfs: boolean) {
   const env = { ...process.env, GIT_CONFIG_GLOBAL: setupConfig, GIT_CONFIG_NOSYSTEM: '1' }
   const git = (cwd: string, ...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd, env }).toString()
   writeFileSync(path.join(src, '.gitattributes'), 'attachments/** filter=lfs diff=lfs merge=lfs -text\n')
-  writeFileSync(path.join(src, 'a.md'), '首行\n\n![旧](attachments/old.png)\n')
+  writeFileSync(path.join(src, 'a.md'), `首行\n\n![旧](attachments/old.png)\n\n![坏](attachments/${EVIL.replace(/\(/g, '%28').replace(/\)/g, '%29')})\n`)
   writeFileSync(path.join(src, 'attachments/old.png'), OLD)
+  writeFileSync(path.join(src, 'attachments', EVIL), Buffer.concat([PNG, Buffer.from('evil')])) // 内容和 p.png 不同：本地没有它的对象
   git(base, 'init', '-q', '--bare', '-b', 'main', remote)
   git(src, 'init', '-q', '-b', 'main')
   git(src, 'add', '.')
   git(src, 'commit', '-qm', 'v1')
   writeFileSync(path.join(src, 'attachments/p.png'), PNG) // 先写：git rm 删掉最后一个文件时会连目录一起删
-  git(src, 'rm', '-q', 'attachments/old.png')
-  writeFileSync(path.join(src, 'a.md'), '首行\n\n![图](attachments/p.png)\n')
+  writeFileSync(path.join(src, 'attachments/d.pdf'), PDF)
+  git(src, 'rm', '-q', '--', 'attachments/old.png', `attachments/${EVIL}`)
+  writeFileSync(path.join(src, 'a.md'), '首行\n\n![图](attachments/p.png)\n\n看 [文档](attachments/d.pdf)\n')
   git(src, 'add', '.')
   git(src, 'commit', '-qm', 'v2')
   git(src, 'push', '-q', `file://${remote}`, 'main')
@@ -76,15 +81,19 @@ test('LFS installed: pointer placeholder downloads in place, dedupe by oid, hist
   const saved = await win.evaluate(([v, b]) => window.synote.saveAttachment(v, 'dup.png', new Uint8Array(b)), [vault, [...PNG]] as const)
   expect(saved.path).toBe('attachments/p.png')
 
-  // 工作区指针：区别于附件缺失的占位，"下载"后换成图片
+  // 工作区指针（图片和普通附件链接）：区别于附件缺失的占位，"下载"后换成图片 / 普通链接
   await win.getByRole('treeitem', { name: 'a.md' }).click()
   const ph = win.locator('.cm-lp-lfs')
-  await expect(ph).toContainText('LFS 内容未下载')
-  await expect(win.locator('.cm-lp-image-missing')).toHaveCount(1) // 只有这一个占位，不另报附件缺失
-  await ph.getByRole('button', { name: '下载' }).click()
+  await expect(ph).toHaveCount(2)
+  await expect(win.locator('.cm-lp-image-missing')).toHaveCount(2) // 只有这两个 LFS 占位，不另报附件缺失
+  await expect(ph.filter({ hasText: 'd.pdf' })).toContainText(`LFS 内容未下载（${PDF.length} B）`)
+  await ph.filter({ hasText: 'p.png' }).getByRole('button', { name: '下载' }).click()
   await expect(win.locator('.cm-lp-image img')).toBeVisible({ timeout: 10_000 })
-  await expect(ph).toHaveCount(0)
   expect(readFileSync(p)).toEqual(PNG)
+  await ph.filter({ hasText: 'd.pdf' }).getByRole('button', { name: '下载' }).click()
+  await expect(win.locator('.cm-lp-link')).toHaveText('文档', { timeout: 10_000 })
+  await expect(ph).toHaveCount(0)
+  expect(readFileSync(path.join(vault, 'attachments/d.pdf'))).toEqual(PDF)
   expect(execFileSync('git', ['status', '--porcelain'], { cwd: vault, env: appEnv }).toString()).toBe('')
 
   // 历史里删掉的 old.png：本地没有对象，悬停只显示占位（不下载），点"下载"才 smudge，随后悬停显示图片
@@ -96,8 +105,22 @@ test('LFS installed: pointer placeholder downloads in place, dedupe by oid, hist
   const items = win.getByRole('complementary', { name: '历史' }).getByRole('button')
   await expect(items).toHaveCount(2, { timeout: 10_000 })
   await items.nth(1).click()
-  const line = win.locator('.monaco-diff-editor .editor.original .view-line', { hasText: /^!\[/ })
-  await expect(line).toBeVisible({ timeout: 10_000 })
+  // 长行在窄窗口里会折行：只认以 `![alt` 开头的那一段
+  const imgLine = (alt: string) => win.locator('.monaco-diff-editor .editor.original .view-line', { hasText: new RegExp(`^!\\[${alt}`) })
+  // 恶意文件名：悬停里原样显示文字，只有我们自己的那一个链接；点它也只是下载，正文不变
+  await expect(imgLine('坏')).toBeVisible({ timeout: 10_000 })
+  await imgLine('坏').hover({ position: { x: 12, y: 8 } })
+  const evil = win.locator('.monaco-hover').filter({ hasText: 'LFS 内容未下载' })
+  await expect(evil).toContainText(EVIL, { timeout: 10_000 })
+  await expect(evil.getByRole('link')).toHaveCount(1)
+  await evil.getByRole('link', { name: '下载' }).click()
+  await expect(win.locator('.monaco-hover img')).toBeVisible({ timeout: 10_000 })
+  await expect(win.locator('.cm-content')).toHaveText(/首行[\s\S]*看 文档/) // 编辑器正文（CM6，diff 右侧以它为准）没被删行
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('首行\n\n![图](attachments/p.png)\n\n看 [文档](attachments/d.pdf)\n')
+  await win.mouse.move(0, 0)
+
+  const line = imgLine('旧')
+  await expect(line).toBeVisible()
   await line.hover({ position: { x: 12, y: 8 } })
   const hover = win.locator('.monaco-hover').filter({ hasText: 'LFS 内容未下载' })
   await expect(hover).toBeVisible({ timeout: 10_000 })
@@ -113,7 +136,7 @@ test('LFS not installed: git panel prompts to install, download reports it, stat
   const { app, win, vault, appConfig } = await launchLfs(false)
   // 占位照常显示；点"下载"报缺 git-lfs，文件不动
   await win.getByRole('treeitem', { name: 'a.md' }).click()
-  await win.locator('.cm-lp-lfs').getByRole('button', { name: '下载' }).click()
+  await win.locator('.cm-lp-lfs', { hasText: 'p.png' }).getByRole('button', { name: '下载' }).click()
   await expect(win.getByRole('alert').filter({ hasText: /没有安装 git-lfs[\s\S]*not a git command/ })).toBeVisible()
   expect(readFileSync(path.join(vault, 'attachments/p.png'), 'utf8')).toMatch(/^version https:\/\/git-lfs/)
 

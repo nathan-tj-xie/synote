@@ -653,7 +653,8 @@ describe('Git（系统 git）', () => {
     expect(ptr?.toString()).toMatch(/^version https:\/\/git-lfs/)
     expect(await git.readFileAt('HEAD~1:./attachments/old.png')).toEqual(await git.readBlob('HEAD~1:./attachments/old.png'))
 
-    // 工作区：pull 只下这一个（带 [ ] * , 和空格的另一个仍是指针）
+    // 工作区：pull 只下这一个（带 [ ] * , 和空格的另一个仍是指针）。lfs.fetchexclude 排除了附件也照样下（用户点了才下载）
+    g(vault, 'config', 'lfs.fetchexclude', '笔 记/attachments/**')
     await git.lfsPull('attachments/x.png')
     expect(readFileSync(att('x.png'))).toEqual(files['x.png'])
     expect(readFileSync(att('a b[1]*,c.png')).length).toBeLessThan(200)

@@ -130,10 +130,10 @@ function loadImage(vault: string, path: string): Promise<string | LfsPointer | n
 }
 
 // 非图片附件链接的目标是否存在（缺失时显示占位）：按库 + 路径缓存，没有的项一次重建里攒成一批，经 exists 查一次，
-// 不是每次渲染都查。查到缺失才需要重建（默认按存在渲染）；查询失败按存在处理，免得反复查
-const present = new Map<string, boolean>()
+// 不是每次渲染都查。查到缺失或 LFS 指针（S17）才需要重建（默认按存在渲染）；查询失败按存在处理，免得反复查
+const present = new Map<string, boolean | LfsPointer>()
 const asking = new Map<string, Set<string>>() // 库 → 待查路径
-function isPresent(vault: string, path: string): boolean | undefined {
+function isPresent(vault: string, path: string): boolean | LfsPointer | undefined {
   const key = `${vault}\0${path}`
   if (present.has(key)) return present.get(key)
   if (!asking.size) queueMicrotask(askPresent)
@@ -147,7 +147,7 @@ function askPresent() {
       (r) => {
         if (present.size >= 5000) present.clear() // shortcut: 满了整个清空而不是 LRU，附件链接极多时再换
         paths.forEach((p, i) => present.set(`${vault}\0${p}`, r[i]))
-        if (r.includes(false)) rebuildViews()
+        if (r.some((x) => x !== true)) rebuildViews()
       },
       () => paths.forEach((p) => present.set(`${vault}\0${p}`, true)),
     )
@@ -233,20 +233,22 @@ function fillLfs(box: HTMLElement, vault: string, path: string, size: number) {
   })
 }
 
-// 指向库内附件（attachments/ 下）的普通链接，目标已知不存在时的占位
+// 指向库内附件（attachments/ 下）的普通链接，目标已知不存在时的占位；lfs 不为 null 时是 LFS 内容未下载的占位（S17，大小）
 class MissingWidget extends WidgetType {
   constructor(
     readonly vault: string,
     readonly path: string,
+    readonly lfs: number | null,
   ) {
     super()
   }
   eq(o: MissingWidget) {
-    return o.vault === this.vault && o.path === this.path
+    return o.vault === this.vault && o.path === this.path && o.lfs === this.lfs
   }
   toDOM() {
     const el = document.createElement('span')
-    fillMissing(el, this.vault, this.path)
+    if (this.lfs === null) fillMissing(el, this.vault, this.path)
+    else fillLfs(el, this.vault, this.path, this.lfs)
     return el
   }
 }
@@ -254,7 +256,9 @@ class MissingWidget extends WidgetType {
 function missingWidget(state: EditorState, target: string): MissingWidget | null {
   const info = state.facet(note)
   const path = info && target ? resolveLink(target, info.path) : null
-  return path?.startsWith('attachments/') && isPresent(info!.vault, path) === false ? new MissingWidget(info!.vault, path) : null
+  if (!path?.startsWith('attachments/')) return null
+  const p = isPresent(info!.vault, path)
+  return p === false ? new MissingWidget(info!.vault, path, null) : typeof p === 'object' ? new MissingWidget(info!.vault, path, p.size) : null
 }
 
 class ImageWidget extends WidgetType {
