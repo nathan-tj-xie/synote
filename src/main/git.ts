@@ -2,6 +2,7 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import path from 'node:path'
 import type { GitBranch, GitErrorKind, GitFile, LogEntry } from '../shared/api'
+import { encodeSegment } from '../shared/url'
 
 export type ExecResult = { code: number; stdout: string; stderr: string }
 export type Exec = (
@@ -259,10 +260,29 @@ export class Git {
     return (await this.run(['rev-parse', '--show-prefix'])).replace(/\n$/, '')
   }
 
-  // 暂存区里笔记库之外的路径（相对仓库根，--no-renames 让改名的两侧都列出来）。笔记库就是仓库根时为空
+  // 暂存区里笔记库之外的路径（相对仓库根，--no-renames 让改名的两侧都列出来）。笔记库就是仓库根时为空。
+  // diff.relative=true 会只列 cwd 以内、正好漏掉要找的：配置和参数都强制关掉
   async stagedOutside(): Promise<string[]> {
-    const [out, prefix] = await Promise.all([this.run(['diff', '--cached', '--name-only', '-z', '--no-renames']), this.prefix()])
+    const [out, prefix] = await Promise.all([
+      this.run(['-c', 'diff.relative=false', 'diff', '--cached', '--no-relative', '--name-only', '-z', '--no-renames']),
+      this.prefix(),
+    ])
     return prefix ? out.split('\0').filter((p) => p && !p.startsWith(prefix)) : []
+  }
+
+  // 暂存区版本的笔记（库内 .md）里仍提到这些附件的（按文件名的几种编码形式、不区分大小写，同索引的 mentioned）。
+  // "提交已暂存"时用：工作区里删了引用、但那篇笔记的改动没暂存，提交里它仍引用附件，附件就不能随提交删掉
+  // shortcut: 每个附件一次 git grep；一次提交要删上百个孤儿变慢时改成一次读出暂存区笔记再逐个比对
+  async stagedMentions(paths: string[]): Promise<string[]> {
+    const hit: string[] = []
+    for (const p of paths) {
+      const name = path.posix.basename(p)
+      const forms = [...new Set([name, encodeSegment(name), encodeURIComponent(name), encodeURI(name)])].flatMap((f) => ['-e', f])
+      // grep.fullName / color 等用户配置不影响 -l -z 的输出；没有命中时退出码为 1
+      const out = await this.run(['--literal-pathspecs', '-c', 'grep.fullName=false', 'grep', '--cached', '-F', '-i', '-l', '-z', ...forms, '--', '.']).catch(onExit1(''))
+      if (out.split('\0').some((f) => f.toLowerCase().endsWith('.md'))) hit.push(p)
+    }
+    return hit
   }
 
   async toplevel(): Promise<string> {
@@ -347,7 +367,8 @@ export class Git {
   async fileLog(rel: string): Promise<LogEntry[]> {
     if (!(await this.hasHead())) return []
     const [out, p] = await Promise.all([
-      this.run(['--literal-pathspecs', 'log', '--follow', '-z', '--name-status', LOG_FORMAT, '--', rel]),
+      // diff.relative=true 会让 --name-status 的路径变成相对 cwd、并丢掉库外那段改名历史：强制关掉
+      this.run(['--literal-pathspecs', '-c', 'diff.relative=false', 'log', '--follow', '-z', '--name-status', LOG_FORMAT, '--', rel]),
       this.prefix(),
     ])
     return parseLog(out).map((e) => ({ ...e, path: path.posix.relative(p, e.path) }))
@@ -356,7 +377,7 @@ export class Git {
   // 从历史恢复附件：最后一个还有 rel 的提交（改动过它、且不是删除它的最近一个提交），找不到为 null
   async restoreSource(rel: string): Promise<LogEntry | null> {
     if (!(await this.hasHead())) return null
-    const out = await this.run(['--literal-pathspecs', 'log', '-1', '-z', '--name-status', '--diff-filter=d', LOG_FORMAT, 'HEAD', '--', rel])
+    const out = await this.run(['--literal-pathspecs', '-c', 'diff.relative=false', 'log', '-1', '-z', '--name-status', '--diff-filter=d', LOG_FORMAT, 'HEAD', '--', rel])
     const e = parseLog(out)[0]
     return e && (await this.isFileAt(e.hash, rel)) ? e : null
   }

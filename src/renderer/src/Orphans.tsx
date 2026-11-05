@@ -9,10 +9,10 @@ import { useUi } from './store'
 
 // 为保险没删的孤儿附件告诉用户（清理命令和 git 面板的提交共用）
 export function reportKept(kept: NonNullable<GitDone['kept']>) {
-  const msg = (['pending', 'mentioned'] as const)
+  const msg = (['pending', 'mentioned', 'staged'] as const)
     .map((reason) => [reason, kept.filter((k) => k.reason === reason).map((k) => k.path)] as const)
     .filter(([, ps]) => ps.length)
-    .map(([reason, ps]) => i18next.t(reason === 'pending' ? 'orphansPending' : 'orphansKept', { paths: ps.join('、') }))
+    .map(([reason, ps]) => i18next.t(reason === 'pending' ? 'orphansPending' : reason === 'staged' ? 'orphansStaged' : 'orphansKept', { paths: ps.join('、') }))
   if (msg.length) useUi.getState().setError(msg.join('\n'))
 }
 

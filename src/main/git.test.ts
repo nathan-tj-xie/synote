@@ -380,6 +380,10 @@ describe('Git（系统 git）', () => {
     sh('add', '库外.md')
     expect(await git.stagedOutside()).toEqual(['库外.md'])
     expect(await git.toplevel()).toBe(execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: repo, env }).toString().trim())
+    // 用户配置 diff.relative=true 时照样能查到库外的（否则 diff 只列 cwd 以内）
+    sh('config', 'diff.relative', 'true')
+    expect(await git.stagedOutside()).toEqual(['库外.md'])
+    sh('config', '--unset', 'diff.relative')
     sh('reset', '-q', '--', '库外.md')
     await git.stage(['*.md'])
     expect((await git.status()).files.map((f) => f.x + f.y)).toEqual(['A.', '??'])
@@ -412,6 +416,20 @@ describe('Git（系统 git）', () => {
     expect(readFileSync(path.join(repo, '笔记', '*.md'), 'utf8')).toBe('远端\n')
     await git.push(true)
     expect(await git.status()).toMatchObject({ ahead: 0, behind: 0 })
+  })
+
+  it('stagedMentions：按暂存区版本的笔记查附件引用（编码形式、大小写不敏感），不看工作区', async () => {
+    const { repo, env, sh } = setup()
+    sh('init', '-q')
+    writeFileSync(path.join(repo, 'a.md'), '![](attachments/My%20Pic.PNG)\n')
+    writeFileSync(path.join(repo, 'b.txt'), 'x.png\n') // 不是笔记，不算
+    sh('add', '.')
+    sh('config', 'grep.fullName', 'true')
+    const git = new Git('git', process.env.PATH!, repo, undefined, env)
+    writeFileSync(path.join(repo, 'a.md'), '') // 工作区删了引用，但没暂存
+    expect(await git.stagedMentions(['attachments/my pic.png', 'attachments/x.png', 'attachments/none.png'])).toEqual(['attachments/my pic.png'])
+    sh('add', 'a.md')
+    expect(await git.stagedMentions(['attachments/my pic.png'])).toEqual([])
   })
 
   // 靠「PATH 里只放 git、不放 git-lfs」来复现。Git for Windows 把 git-lfs.exe 和 git 依赖的 DLL 放在同一个 mingw64/bin 里，

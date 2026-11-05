@@ -475,7 +475,7 @@ ipcMain.handle('git:unstage', (_e, vault: string, paths: string[]) => {
   const ps = checkPaths(paths)
   return gitOp(r, (g) => g.unstage(ps))
 })
-// 提交：先查身份、查暂存区里有没有笔记库之外的文件（面板看不到，不替用户提交），有一项不满足就什么都不做 → 删勾选的孤儿附件（git rm 的进入这次提交）→ 全部暂存（all 时）→ 提交。
+// 提交：先查身份、查暂存区里有没有笔记库之外的文件（面板看不到，不替用户提交），有一项不满足就什么都不做 → 删勾选的孤儿附件（只提交已暂存时跳过暂存区笔记仍引用的）（git rm 的进入这次提交）→ 全部暂存（all 时）→ 提交。
 // 未保存的正文由渲染进程在调用前落盘
 ipcMain.handle('git:commit', (_e, vault: string, message: string, all: boolean, orphans: string[]) => {
   const r = checkVault(vault)
@@ -486,10 +486,12 @@ ipcMain.handle('git:commit', (_e, vault: string, message: string, all: boolean, 
     const outside = await g.stagedOutside()
     if (outside.length) throw new StagedOutsideError(await g.toplevel(), outside)
     if (orphans.length) {
+      // 只提交已暂存时，提交里的笔记是暂存区版本：仍被它们引用的附件不删（工作区里删了引用也一样）
+      const staged = all ? [] : await g.stagedMentions(orphans)
       // 逐个记进度：中途失败时卡片如实报出已删了几个
       done.deleted = 0
-      const res = await deleteOrphans(r, orphans, () => done.deleted!++)
-      done.kept = res.kept
+      const res = await deleteOrphans(r, orphans.filter((p) => !staged.includes(p)), () => done.deleted!++)
+      done.kept = [...staged.map((path) => ({ path, reason: 'staged' as const })), ...res.kept]
     }
     if (all) {
       await g.stage(['.'])

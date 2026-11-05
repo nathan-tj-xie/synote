@@ -222,7 +222,7 @@ test('git panel: files staged outside a subfolder vault block the commit', async
   const card = win.getByRole('alert').filter({ hasText: '提交失败' })
   await expect(card).toContainText('暂存区里有笔记库之外的文件')
   await expect(card.getByRole('listitem')).toHaveText(["库外 's.md"])
-  const cmd = `git -C '${realpathSync(repo)}' reset -q -- '库外 '\\''s.md'`
+  const cmd = `git -C '${realpathSync(repo)}' --literal-pathspecs reset -q -- '库外 '\\''s.md'`
   await expect(card.getByText(cmd, { exact: true })).toBeVisible()
   expect(git('log', '--format=%s')).toBe('init\n')
   expect(git('-c', 'core.quotePath=false', 'status', '--porcelain')).toBe("M  \"库外 's.md\"\n M 笔记/a.md\n")
@@ -296,5 +296,24 @@ test('git panel: pull flushes input first, locks the editor and reloads open not
   await win.keyboard.press('ControlOrMeta+End')
   await win.keyboard.type('Z')
   await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe(lines('a1 再改', 'XZ'))
+  await app.close()
+})
+
+// 只提交已暂存：工作区里删了引用、但那篇笔记没暂存，提交里的旧版仍引用附件——附件不随提交删除，提示原因
+test('git panel: commit staged keeps orphans still referenced by staged notes', async () => {
+  const { app, win, vault, git } = await launchRepo({ 'a.md': '![](attachments/x.png)\n', 'b.md': 'b\n', 'attachments/x.png': 'x' })
+  writeFileSync(path.join(vault, 'a.md'), '没有引用了\n')
+  writeFileSync(path.join(vault, 'b.md'), 'b 改\n')
+  const changes = await openGit(win)
+  await expect(changes.locator('label[title="attachments/x.png"]')).toContainText('git rm', { timeout: 10_000 })
+  await row(changes, 'b.md').hover()
+  await row(changes, 'b.md').getByRole('button', { name: '暂存' }).click()
+  await win.getByLabel('提交信息（⌘Enter 提交）').fill('只提交 b')
+  await win.getByRole('button', { name: '提交已暂存（1）' }).click()
+  await expect.poll(() => git('log', '-1', '--format=%s')).toBe('只提交 b\n')
+  expect(git('show', '--name-status', '--format=', 'HEAD')).toBe('M\tb.md\n')
+  expect(readFileSync(path.join(vault, 'attachments/x.png'), 'utf8')).toBe('x')
+  await expect(win.getByRole('alert').filter({ hasText: '仍被暂存区里的笔记引用' })).toContainText('attachments/x.png')
+  expect(git('status', '--porcelain')).toBe(' M a.md\n')
   await app.close()
 })

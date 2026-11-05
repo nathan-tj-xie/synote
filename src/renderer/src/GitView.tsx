@@ -193,7 +193,7 @@ const identityCommands = (st: { name: string | null; email: string | null }) =>
 const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
 
 function commandsFor(card: Card): string[] {
-  if (card.outside) return [`git -C ${sq(card.outside.top)} reset -q -- ${card.outside.paths.map(sq).join(' ')}`]
+  if (card.outside) return [`git -C ${sq(card.outside.top)} --literal-pathspecs reset -q -- ${card.outside.paths.map(sq).join(' ')}`]
   if (card.kind === 'noCredentials') return [`git ${card.op}`]
   if (card.kind === 'conflict') return ['git merge --abort']
   return []

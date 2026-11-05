@@ -49,7 +49,8 @@ export type GitFile = { path: string; x: string; y: string; orig?: string }
 
 // git 面板写操作（S13）的结果。done 是失败前已完成的步骤：deleted 为删掉的孤儿附件数（kept 为没删的），
 // staged 为已"全部暂存"；raw 是 git 的原始输出
-export type GitDone = { deleted?: number; kept?: { path: string; reason: 'mentioned' | 'pending' }[]; staged?: boolean }
+// kept 的 staged：暂存区版本的笔记仍引用它（"提交已暂存"时）
+export type GitDone = { deleted?: number; kept?: { path: string; reason: 'mentioned' | 'pending' | 'staged' }[]; staged?: boolean }
 // outside：kind 为 stagedOutside 时，仓库根（top）和那些库外的已暂存路径（相对仓库根）
 export type GitOpResult =
   | { ok: true; done: GitDone }
