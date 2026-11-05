@@ -5,8 +5,11 @@ import { Annotation, Compartment, EditorSelection, EditorState, StateEffect, Sta
 import { EditorView, keymap } from '@codemirror/view'
 import { vscodeKeymap } from '@replit/codemirror-vscode-keymap'
 import { minimalSetup } from 'codemirror'
+import { i18next } from '../../shared/i18n'
+import { relativeLink } from '../../shared/url'
+import { imageMime } from './diffUtil'
 import { tableTrailingSpace } from './gfmTable'
-import { livePreview } from './livePreview'
+import { forgetImages, livePreview } from './livePreview'
 import { useEditor, useUi, useVault } from './store'
 
 // 缓存不变式：视图里那份（shown）永远是该文件最新的正文，states 只缓存不在视图里的已打开文件。
@@ -76,6 +79,11 @@ function makeState(doc: string, path: string): EditorState {
       livePreview(vault ? { vault, path } : null),
       EditorView.lineWrapping,
       theme,
+      // 文件优先于 CM6 自带的处理（它会把拖入的文件当文本读进来）；粘贴同时带文本时（如表格软件）照常粘文本
+      EditorView.domEventHandlers({
+        paste: (e) => !e.clipboardData?.types.includes('text/plain') && attach(e, e.clipboardData?.files, true),
+        drop: (e, v) => attach(e, e.dataTransfer?.files, false, v.posAtCoords({ x: e.clientX, y: e.clientY })),
+      }),
       EditorView.updateListener.of((u) => {
         if (!u.docChanged || !shown) return
         if (!u.transactions.some((t) => t.annotation(Transaction.remote))) scheduleSave(shown)
@@ -116,6 +124,43 @@ async function flush(path: string) {
   } catch (e) {
     useUi.getState().setError(String(e))
   }
+}
+
+// 粘贴 / 拖入文件（S10）：经主进程写进 attachments/，写完把相对链接插进发起时那篇笔记的光标处，走普通编辑事务和保存路径。
+// 交接锁期间拒绝（吞掉事件，什么都不写）；写盘期间换了库或进入交接就不插链接，已写的附件成为孤儿，由孤儿清理处理
+function attach(e: Event, files: FileList | undefined, paste: boolean, at?: number | null): boolean {
+  if (!files?.length) return false
+  e.preventDefault()
+  if (locked || !vault || !shown || !view) return true
+  if (at != null) view.dispatch({ selection: { anchor: at } }) // 拖入：链接落在松手处
+  const v = vault
+  const g = vaultGen
+  const note = shown
+  ;(async () => {
+    const links: string[] = []
+    try {
+      for (const f of [...files]) {
+        // Chromium 里截图等剪贴板位图的文件名固定是 image.png，按剪贴板图片命名
+        const r = await window.synote.saveAttachment(v, paste && f.name === 'image.png' ? null : f.name, new Uint8Array(await f.arrayBuffer()))
+        if (r.warn) useUi.getState().setError(i18next.t(r.warn === 'huge' ? 'attachmentHuge' : 'attachmentLarge', { path: r.path }))
+        forgetImages(v, [r.path]) // 之前按缺失缓存过的同名附件
+        const alt = r.path.split('/').pop()!.replace(/\.[^.]*$/, '').replace(/[\\[\]]/g, '\\$&')
+        links.push(`${imageMime(r.path) ? '!' : ''}[${alt}](${relativeLink(note, r.path)})`)
+      }
+    } catch (err) {
+      useUi.getState().setError(String(err))
+    }
+    if (!links.length || g !== vaultGen || locked) return
+    const s = note === shown ? view?.state : states.get(note)
+    if (!s) return // 标签页已关
+    const spec = s.replaceSelection(links.join('\n'))
+    if (note === shown) view!.dispatch(spec, { scrollIntoView: true, userEvent: 'input.paste' })
+    else {
+      states.set(note, s.update(spec).state)
+      scheduleSave(note)
+    }
+  })()
+  return true
 }
 
 // 切库前调用：防抖中的输入立即写，再等所有在途写入落盘；还有没写进去的改动（写失败）就返回 false

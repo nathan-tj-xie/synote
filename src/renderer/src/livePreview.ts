@@ -124,14 +124,17 @@ function loadImage(vault: string, path: string): Promise<string | null> {
   return p
 }
 
-// 单测（node）里没有 window
-if (typeof window !== 'undefined') window.synote.onVaultChanged(({ root, changed }) => {
+// 这些文件变了（外部改动、新写入的附件）：丢掉缓存，正在显示它们的视图重建
+export function forgetImages(root: string, changed: string[]) {
   let hit = false
   for (const p of changed) hit = images.delete(`${root}\0${p}`) || hit
   if (!hit) return
   imageGen++
   for (const v of views) v.dispatch({ effects: refresh.of(null) })
-})
+}
+
+// 单测（node）里没有 window
+if (typeof window !== 'undefined') window.synote.onVaultChanged(({ root, changed }) => forgetImages(root, changed))
 
 class ImageWidget extends WidgetType {
   constructor(
@@ -164,7 +167,8 @@ class ImageWidget extends WidgetType {
     const path = this.path
     loadImage(this.vault, path).then(
       (url) => {
-        if (!url) return fail(i18next.t('imageMissing', { path }))
+        // 附件缺失（#8）：只显示占位，不修复也不改引用
+        if (!url) return fail(i18next.t('attachmentMissing', { path }))
         const img = document.createElement('img')
         img.src = url
         img.alt = this.alt
