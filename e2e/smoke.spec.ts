@@ -1261,6 +1261,47 @@ test('clean orphans never deletes attachments referenced in unusual forms', asyn
   await app.close()
 })
 
+// 在途附件（codex #47 第二轮）：拖入两个文件，第二个写盘被拖慢；期间第一个已落盘但链接还没插。
+// 主进程直接删也拦下（pending），清理命令等插完、保存后再列，附件不被删，链接有效
+test('attachments still being inserted are never cleaned', async () => {
+  const { app, win, vault } = await launch({ 'n.md': '开头' })
+  await win.getByRole('treeitem', { name: 'n.md' }).click()
+  await win.locator('.cm-content').click()
+  await win.keyboard.press('End')
+  const held = await holdRecentWrite(app, 2000, 'second.pdf')
+  await win.evaluate(() => {
+    const dt = new DataTransfer()
+    for (const name of ['first.pdf', 'second.pdf']) dt.items.add(new File([new Uint8Array([name.length, 1])], name, { type: 'application/pdf' }))
+    const el = document.querySelector('.cm-content')!
+    const r = el.getBoundingClientRect()
+    el.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true, clientX: r.right - 2, clientY: r.bottom - 2 }))
+  })
+  await expect.poll(held).toBe(true)
+  expect(existsSync(path.join(vault, 'attachments/first.pdf'))).toBe(true)
+  // 不经过 UI 直接删（模拟没等插入的调用方）：主进程的在途保护拦下
+  const r = await win.evaluate((v) => window.synote.deleteOrphans(v, ['attachments/first.pdf']), vault)
+  expect(r).toEqual({ deleted: [], kept: [{ path: 'attachments/first.pdf', reason: 'pending' }] })
+  const dialog = await cleanOrphans(win) // 等插完链接、落盘后才列
+  await expect(dialog).toContainText('没有孤儿附件', { timeout: 10_000 })
+  await win.keyboard.press('Escape')
+  const text = readFileSync(path.join(vault, 'n.md'), 'utf8')
+  expect(text).toContain('[first](attachments/first.pdf)')
+  expect(text).toContain('[second](attachments/second.pdf)')
+  expect(readdirSync(path.join(vault, 'attachments')).sort()).toEqual(['first.pdf', 'second.pdf'])
+  await app.close()
+})
+
+// 大小写别名：引用写成小写也不删
+test('clean orphans keeps attachments referenced with different case', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '![](attachments/report.png)', 'attachments/Report.PNG': 'r', 'attachments/gone.png': 'g' })
+  await expect.poll(() => win.evaluate((v) => window.synote.orphans(v).catch(() => []), vault), { timeout: 5000 }).toEqual(['attachments/gone.png'])
+  const dialog = await cleanOrphans(win)
+  await dialog.getByRole('button', { name: '删除 1 个' }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(readdirSync(path.join(vault, 'attachments'))).toEqual(['Report.PNG'])
+  await app.close()
+})
+
 // git 仓库：已跟踪的 git rm（暂存删除），未跟踪的移到回收站
 test('clean orphans in a git repo: tracked are git rm-ed, untracked are trashed', async () => {
   const { app, win, vault } = await launch({ 'a.md': '![](attachments/keep.png)', 'attachments/keep.png': 'k', 'attachments/old.png': 'o' })

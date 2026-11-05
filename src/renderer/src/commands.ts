@@ -1,7 +1,7 @@
 // 命令注册表的运行时部分：可用条件和执行逻辑；id、标题、快捷键见 shared/commands.ts
 import { commands, type CommandId } from '../../shared/commands'
 import { i18next } from '../../shared/i18n'
-import { flushAll, forget, saveCurrent, toggleDiff } from './editor'
+import { attachmentsSettled, flushAll, forget, saveCurrent, toggleDiff } from './editor'
 import { matchKey } from './match'
 import { useEditor, useUi, useVault } from './store'
 
@@ -59,6 +59,7 @@ export const handlers: Record<CommandId, Handler> = {
     run: async () => {
       const r = root()
       try {
+        await attachmentsSettled() // 在途的粘贴 / 拖入先插完链接，再一起落盘
         if (!(await flushAll())) return fail(i18next.t('orphansUnsaved'))
         const list = await window.synote.listOrphans(r)
         if (useVault.getState().vault?.root === r) ui().setOrphans({ root: r, list })

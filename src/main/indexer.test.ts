@@ -162,6 +162,16 @@ describe('Indexer', () => {
     expect(idx.orphans()).toEqual(['attachments/r.pdf'])
   })
 
+  // 大小写别名（codex #47 第二轮）：不区分大小写的文件系统上 report.png 也指向 Report.PNG，统一按引用存在处理
+  test('references match attachments case-insensitively', async () => {
+    const { idx } = setup({ 'a.md': '![](attachments/report.png)', 'b.md': '见 PHOTO.jpg', 'attachments/Report.PNG': '', 'attachments/photo.JPG': '' })
+    await idx.reconcile()
+    await idx.idle()
+    expect(idx.orphans()).toEqual(['attachments/photo.JPG'])
+    expect(idx.referenced(['attachments/Report.PNG', 'attachments/photo.JPG'])).toEqual(['attachments/Report.PNG'])
+    expect(idx.mentioned(['attachments/photo.JPG'])).toEqual(['attachments/photo.JPG'])
+  })
+
   // 第二道防线：文件名原样或百分号编码出现在任一正文里就算提到（含还没写进全文索引的）
   test('mentioned finds attachment names anywhere in note text', async () => {
     const { idx, write } = setup({ 'a.md': '截图见 shot.png', 'b.md': 'y%20z.png', 'attachments/shot.png': '', 'attachments/y z.png': '', 'attachments/none.png': '' })

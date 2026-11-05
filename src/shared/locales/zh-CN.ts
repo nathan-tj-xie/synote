@@ -54,6 +54,7 @@ export const zhCN = {
     deleteOrphans: '删除 {{n}} 个',
     cancel: '取消',
     orphansKept: '以下附件的文件名仍出现在笔记中，为保险没有删除：{{paths}}',
+    orphansPending: '以下附件刚添加，引用还没保存，没有删除：{{paths}}',
     orphansUnsaved: '有未保存的改动没能写入，没有清理孤儿附件',
   },
 } as const

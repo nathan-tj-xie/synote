@@ -16,7 +16,11 @@ export function Orphans() {
     try {
       const { kept } = await window.synote.deleteOrphans(orphans.root, orphans.list.map((o) => o.path))
       close()
-      if (kept.length) useUi.getState().setError(t('orphansKept', { paths: kept.join('、') }))
+      const msg = (['pending', 'mentioned'] as const)
+        .map((reason) => [reason, kept.filter((k) => k.reason === reason).map((k) => k.path)] as const)
+        .filter(([, ps]) => ps.length)
+        .map(([reason, ps]) => t(reason === 'pending' ? 'orphansPending' : 'orphansKept', { paths: ps.join('、') }))
+      if (msg.length) useUi.getState().setError(msg.join('\n'))
     } catch (e) {
       useUi.getState().setError(String(e))
     } finally {

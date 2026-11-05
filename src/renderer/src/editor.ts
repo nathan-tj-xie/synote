@@ -166,6 +166,10 @@ async function flush(path: string) {
 
 // 粘贴 / 拖入文件（S10）：经主进程写进 attachments/，写完把相对链接插进发起时那篇笔记的光标处，走普通编辑事务和保存路径。
 // 交接锁期间拒绝（吞掉事件，什么都不写）；写盘期间换了库或进入交接就不插链接，已写的附件成为孤儿，由孤儿清理处理
+// 进行中的粘贴 / 拖入：清理孤儿附件前等它们插完链接（之后的自动保存由 flushAll 冲刷）
+const attaching = new Set<Promise<void>>()
+export const attachmentsSettled = () => Promise.all(attaching)
+
 function attach(e: Event, files: FileList | undefined, paste: boolean, at?: number | null): boolean {
   if (!files?.length) return false
   e.preventDefault()
@@ -176,7 +180,7 @@ function attach(e: Event, files: FileList | undefined, paste: boolean, at?: numb
   const v = vault
   const g = vaultGen
   const note = shown
-  ;(async () => {
+  const job = (async () => {
     const links: string[] = []
     try {
       for (const f of [...files]) {
@@ -209,6 +213,8 @@ function attach(e: Event, files: FileList | undefined, paste: boolean, at?: numb
       if (spec.changes) scheduleSave(note)
     }
   })()
+  attaching.add(job)
+  job.finally(() => attaching.delete(job))
   return true
 }
 

@@ -261,13 +261,23 @@ export class Indexer {
     return row.n
   }
 
+  // 引用按大小写折叠后比较：macOS / Windows 默认不区分大小写，report.png 也指向 Report.PNG。
+  // 不检测文件系统，统一保守（区分大小写的库里只是少判几个孤儿）
+  private attRefs(): Set<string> {
+    const rows = this.db.prepare("SELECT DISTINCT dst FROM links WHERE kind = 'att'").all() as { dst: string }[]
+    return new Set(rows.map((r) => r.dst.toLowerCase()))
+  }
+
   orphans(): string[] {
-    const rows = this.db
-      .prepare(
-        "SELECT path FROM files WHERE path LIKE 'attachments/%' AND path NOT IN (SELECT dst FROM links WHERE kind = 'att') ORDER BY path",
-      )
-      .all() as { path: string }[]
-    return rows.map((r) => r.path)
+    const refs = this.attRefs()
+    const rows = this.db.prepare("SELECT path FROM files WHERE path LIKE 'attachments/%' ORDER BY path").all() as { path: string }[]
+    return rows.map((r) => r.path).filter((p) => !refs.has(p.toLowerCase()))
+  }
+
+  // 给定的附件里已被某篇笔记引用的（比较方式同 orphans）；主进程据此把在途附件移出保护集合
+  referenced(paths: string[]): string[] {
+    const refs = this.attRefs()
+    return paths.filter((p) => refs.has(p.toLowerCase()))
   }
 
   // 删除孤儿前的第二道防线（S11）：给定的附件里，哪些的文件名（原样、百分号编码两种写法）仍出现在某篇笔记的正文里。
@@ -276,10 +286,12 @@ export class Indexer {
   mentioned(paths: string[]): string[] {
     const forms = paths.map((p) => {
       const name = path.posix.basename(p)
-      return [p, [...new Set([name, encodeSegment(name), encodeURIComponent(name), encodeURI(name)])]] as const
+      return [p, [...new Set([name, encodeSegment(name), encodeURIComponent(name), encodeURI(name)].map((n) => n.toLowerCase()))]] as const
     })
     const hit = new Set<string>()
-    const scan = (body: string) => {
+    // 不区分大小写，理由同 orphans()
+    const scan = (text: string) => {
+      const body = text.toLowerCase()
       for (const [p, names] of forms) if (!hit.has(p) && names.some((n) => body.includes(n))) hit.add(p)
     }
     for (const r of this.db.prepare('SELECT body FROM fts').iterate() as Iterable<{ body: string }>) scan(r.body)
