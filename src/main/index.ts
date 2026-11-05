@@ -345,9 +345,11 @@ ipcMain.handle('orphans:delete', (_e, vault: string, paths: string[]) => {
   const r = checkVault(vault)
   if (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string')) throw new Error('invalid paths')
   const job = attaching.then(async () => {
+    // 开始时还在途的一律不删：渲染进程插链接、落盘、解除保护可能在下面对账期间完成，而这次对账没看到那次落盘
+    const inflight = new Set([...(fresh.get(r)?.keys() ?? [])].filter((p) => isFresh(r, p)))
     const checked = await checkOrphans(r, paths, new Set(await currentOrphans()))
     await pruneFresh(r)
-    const pending = checked.map(([p]) => p).filter((p) => isFresh(r, p))
+    const pending = checked.map(([p]) => p).filter((p) => inflight.has(p) || isFresh(r, p))
     const mentioned = (await callIndex('mentioned', checked.map(([p]) => p).filter((p) => !pending.includes(p)))) as string[]
     const kept = [...pending.map((path) => ({ path, reason: 'pending' as const })), ...mentioned.map((path) => ({ path, reason: 'mentioned' as const }))]
     const targets = checked.filter(([p]) => !kept.some((k) => k.path === p))
