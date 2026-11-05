@@ -4,7 +4,7 @@ import { EditorState } from '@codemirror/state'
 import type { DecorationSet } from '@codemirror/view'
 import { describe, expect, it } from 'vitest'
 import { tableTrailingSpace } from './gfmTable'
-import { buildBlocks, buildInline, livePreview } from './livePreview'
+import { buildBlocks, buildInline, linkAt, livePreview } from './livePreview'
 
 const doc = [
   '# 标题', // 0
@@ -63,6 +63,28 @@ describe('buildInline', () => {
   it('只构建给定范围', () => {
     const s = state(10)
     expect(replaced(s, buildInline(s, 0, s.doc.line(1).to))).toEqual(['# '])
+  })
+})
+
+describe('[[...]] 与 ⌘ 点击', () => {
+  const text = '首行\n见 [[目标#节|别名]] 和 [[乙]]，`[[代码]]` [标准](a%20b.md#h) [引][r]\n\n[r]: c.md'
+  it('不在光标行时只显示别名或目标，代码里的不动', () => {
+    const s = state(1, text)
+    const r = replaced(s, buildInline(s, 0, s.doc.length))
+    expect(r).toEqual(expect.arrayContaining(['[[目标#节|', ']]', '[[']))
+    expect(r.filter((x) => x === ']]')).toHaveLength(2)
+    const t = state(2, text)
+    expect(replaced(t, buildInline(t, 0, t.doc.length)).filter((x) => x.startsWith('[['))).toEqual([])
+  })
+  it('linkAt 找出位置上的链接', () => {
+    const s = state(1, text)
+    const at = (needle: string) => linkAt(s, text.indexOf(needle))
+    expect(at('别名')).toEqual({ wiki: '目标#节|别名' })
+    expect(at('乙')).toEqual({ wiki: '乙' })
+    expect(at('代码')).toBeNull()
+    expect(at('标准')).toEqual({ href: 'a%20b.md#h' })
+    expect(at('引]')).toEqual({ href: 'c.md' })
+    expect(at('首行')).toBeNull()
   })
 })
 

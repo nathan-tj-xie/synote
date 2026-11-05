@@ -72,8 +72,8 @@ describe('Indexer', () => {
     })
     await idx.reconcile()
     await idx.idle()
-    expect(idx.backlinks('b.md')).toEqual(['a.md'])
-    expect(idx.backlinks('sub/c.md')).toEqual(['a.md'])
+    expect(idx.backlinks('b.md').map((b) => b.path)).toEqual(['a.md'])
+    expect(idx.backlinks('sub/c.md').map((b) => b.path)).toEqual(['a.md'])
     expect(idx.attachmentRefs('attachments/used.png')).toBe(1)
     expect(idx.orphans()).toEqual(['attachments/orphan.png'])
     expect(idx.search('时预览').map((h) => h.path)).toEqual(['sub/c.md'])
@@ -81,6 +81,23 @@ describe('Indexer', () => {
     expect(idx.search('hello').map((h) => h.path)).toEqual(['sub/c.md'])
     expect(idx.search('100%')).toEqual([])
     expect(idx.search('hello')[0].matches).toEqual([{ line: 1, col: 8, text: '实时预览很好用 Hello World', start: 8 }])
+  })
+
+  test('backlinks carry the line of the first link; [[name]] resolves to the smallest path', async () => {
+    const { idx } = setup({
+      'a.md': '# A\r\n\r\n前文 [去 b](sub/b%20b.md#第二节) 后文\r\n[再一次](sub/b%20b.md)',
+      'w.md': '首行\n\n见 [[b b|别名]]',
+      'x/b b.md': '',
+      'sub/b b.md': '',
+      'c.md': '[[x/b b]]',
+    })
+    await idx.reconcile()
+    await idx.idle()
+    expect(idx.backlinks('sub/b b.md')).toEqual([
+      { path: 'a.md', line: 3, text: '前文 [去 b](sub/b%20b.md#第二节) 后文' },
+      { path: 'w.md', line: 3, text: '见 [[b b|别名]]' },
+    ])
+    expect(idx.backlinks('x/b b.md').map((b) => b.path)).toEqual(['c.md'])
   })
 
   test('short queries are ranked by occurrence count', async () => {
@@ -120,7 +137,7 @@ describe('Indexer', () => {
     writeFileSync(path.join(root, 'b.md'), '[a](a.md)')
     idx = new Indexer(path.join(base, 'index.db'), root, onChange)
     expect(await idx.reconcile()).toEqual(['b.md'])
-    expect(idx.backlinks('a.md')).toEqual(['b.md'])
+    expect(idx.backlinks('a.md').map((b) => b.path)).toEqual(['b.md'])
   })
 
   test('rebuild', async () => {
@@ -128,7 +145,7 @@ describe('Indexer', () => {
     await idx.reconcile()
     await idx.rebuild()
     await idx.idle()
-    expect(idx.backlinks('b.md')).toEqual(['a.md'])
+    expect(idx.backlinks('b.md').map((b) => b.path)).toEqual(['a.md'])
   })
 
   // FSEvents 流启动前的改动收不到事件：watch() 之后补一次对账兜底
@@ -138,7 +155,7 @@ describe('Indexer', () => {
     await idx.reconcile()
     idx['watcher']!.close() // 模拟启动窗口里事件全丢
     write('a.md', '[b](b.md)')
-    await vi.waitFor(() => expect(idx.backlinks('b.md')).toEqual(['a.md']), { timeout: 3000, interval: 100 })
+    await vi.waitFor(() => expect(idx.backlinks('b.md').map((b) => b.path)).toEqual(['a.md']), { timeout: 3000, interval: 100 })
   })
 
   // 验收：外部编辑器改动、删除、改名文件后索引正确更新（走真实 fs.watch）
@@ -164,15 +181,15 @@ describe('Indexer', () => {
     await idx.idle()
 
     write('a.md', '[b](b.md) 新内容')
-    await settled(() => expect(idx.backlinks('b.md')).toEqual(['a.md', 'dir/c.md']))
+    await settled(() => expect(idx.backlinks('b.md').map((b) => b.path)).toEqual(['a.md', 'dir/c.md']))
     expect(idx.search('新内容').map((h) => h.path)).toEqual(['a.md'])
 
     rmSync(path.join(root, 'a.md'))
-    await settled(() => expect(idx.backlinks('b.md')).toEqual(['dir/c.md']))
+    await settled(() => expect(idx.backlinks('b.md').map((b) => b.path)).toEqual(['dir/c.md']))
     expect(idx.search('新内容')).toEqual([])
 
     renameSync(path.join(root, 'dir'), path.join(root, 'moved'))
-    await settled(() => expect(idx.backlinks('b.md')).toEqual(['moved/c.md']))
+    await settled(() => expect(idx.backlinks('b.md').map((b) => b.path)).toEqual(['moved/c.md']))
     expect(idx.search('旧内容').map((h) => h.path)).toEqual(['moved/c.md'])
   })
 })
@@ -194,7 +211,7 @@ test.runIf(process.env.SYNOTE_BENCH)('bench 10k notes', { timeout: 120_000 }, as
   const first = new Indexer(db, root)
   await first.reconcile()
   const linksReady = performance.now() - t
-  expect(first.backlinks('d1/n1.md')).toEqual(['d0/n0.md'])
+  expect(first.backlinks('d1/n1.md').map((b) => b.path)).toEqual(['d0/n0.md'])
   await first.idle()
   const full = performance.now() - t
   first.close()

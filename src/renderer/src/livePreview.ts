@@ -7,7 +7,10 @@ import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, typ
 import type { SyntaxNode } from '@lezer/common'
 import { tags as t } from '@lezer/highlight'
 import { i18next } from '../../shared/i18n'
+import { parseWiki, WIKI } from '../../shared/url'
 import { dataUrl, decodeEntities, destination, imageMime, MAX_IMAGE, normalizeLabel, resolveImage, resolveLink, unescapeMd } from './diffUtil'
+import { resolveHref, type Href } from './links'
+import { useVault } from './store'
 
 // 当前正文属于哪个库的哪篇笔记：图片按笔记目录解析、经现有 readBytes（带库标识校验）读取
 type Note = { vault: string; path: string }
@@ -170,7 +173,19 @@ export function forgetFiles(root: string, changed: string[]) {
 if (typeof window !== 'undefined') {
   window.synote.onVaultChanged(({ root, changed }) => forgetFiles(root, changed))
   window.synote.onIndexChanged(({ root, paths }) => forgetFiles(root, paths))
+  // 笔记增删改变 [[名字]] 指向哪篇：重建（不动图片代次，免得图片重绘闪烁）
+  useVault.subscribe((st, prev) => st.vault?.entries !== prev.vault?.entries && views.forEach((v) => v.dispatch({ effects: refresh.of(null) })))
 }
+
+// 双链目标不存在（ADR 0001 的相对链接、[[名字]] 都算）：显示为失效链接。附件另有缺失占位，外链不查
+function broken(state: EditorState, h: Href): boolean {
+  const info = state.facet(note)
+  if (!info) return false
+  const t = resolveHref(h, info.path)
+  if (!t) return 'wiki' in h
+  return !t.path.startsWith('attachments/') && isPresent(info.vault, t.path) === false
+}
+const linkClass = (state: EditorState, h: Href) => (broken(state, h) ? 'cm-lp-link cm-lp-broken' : 'cm-lp-link')
 
 // 指向库内附件（attachments/ 下）的普通链接，目标已知不存在时的占位
 class MissingWidget extends WidgetType {
@@ -256,15 +271,18 @@ class EntityWidget extends WidgetType {
 
 // 跨行链接整段替换成它的文字
 class LinkText extends WidgetType {
-  constructor(readonly text: string) {
+  constructor(
+    readonly text: string,
+    readonly cls: string,
+  ) {
     super()
   }
   eq(o: LinkText) {
-    return o.text === this.text
+    return o.text === this.text && o.cls === this.cls
   }
   toDOM() {
     const el = document.createElement('span')
-    el.className = 'cm-lp-link'
+    el.className = this.cls
     el.textContent = this.text
     return el
   }
@@ -495,7 +513,7 @@ export function buildBlocks(state: EditorState, refs: Map<string, string> = link
       if (name === 'Link' || name === 'Image') {
         const parts = touches(state, n.from, n.to) ? null : linkParts(state, n.node, () => refs)
         if (parts && parts.target !== null) {
-          const widget = name === 'Image' ? imageWidget(state, parts.text, parts.target) : (missingWidget(state, parts.target) ?? new LinkText(parts.text))
+          const widget = name === 'Image' ? imageWidget(state, parts.text, parts.target) : (missingWidget(state, parts.target) ?? new LinkText(parts.text, linkClass(state, { href: parts.target })))
           out.push(Decoration.replace({ widget }).range(n.from, n.to))
         }
         return false
@@ -662,7 +680,7 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
           // [名字](路径)、[名字][ref] → 只显示名字
           const marks = n.node.getChildren('LinkMark')
           hide(marks[0].from, marks[0].to)
-          if (marks[0].to < marks[1].from) out.push(mark('cm-lp-link').range(marks[0].to, marks[1].from))
+          if (marks[0].to < marks[1].from) out.push(mark(linkClass(state, { href: parts.target })).range(marks[0].to, marks[1].from))
           hide(marks[1].from, n.to)
           return
         }
@@ -677,7 +695,49 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
       if (markName && !active()) for (const m of n.node.getChildren(markName)) hide(m.from, m.to)
     },
   })
+
+  // [[目标|别名]]：lezer 不认这种语法，按行扫（跳过代码等原样节点）；只显示别名或目标，⌘ 点击跳转同标准链接
+  for (let i = doc.lineAt(from).number; i <= doc.lineAt(to).number; i++) {
+    const l = doc.line(i)
+    if (!l.text.includes('[[') || touches(state, l.from, l.to)) continue
+    for (const m of l.text.matchAll(WIKI)) {
+      const a = l.from + m.index
+      const b = a + m[0].length
+      const w = parseWiki(m[1])
+      if (!w || inTable(a, b) || wikiBlocked(state, a)) continue
+      const bar = m[1].indexOf('|')
+      const textFrom = bar >= 0 && m[1].slice(bar + 1).trim() ? a + 2 + bar + 1 : a + 2 // 别名为空时显示原文
+      hide(a, textFrom)
+      out.push(mark(linkClass(state, { wiki: m[1] })).range(textFrom, b - 2))
+      hide(b - 2, b)
+    }
+  }
   return Decoration.set(out, true)
+}
+
+// 位置 pos 起的 [[...]] 在代码、HTML 等原样节点或标准链接里：那里的不是双链。
+// lezer 会把里层的 `[...]` 认成引用式 Link（不管有没有定义），那个不算
+function wikiBlocked(state: EditorState, pos: number): boolean {
+  for (let n: SyntaxNode | null = syntaxTree(state).resolveInner(pos, 1); n; n = n.parent)
+    if (RAW.has(n.name) || ((n.name === 'Link' || n.name === 'Image') && n.from !== pos + 1)) return true
+  return false
+}
+
+// pos 处的双链（⌘ 点击跳转用）：标准链接（含引用式）按语法树找，[[...]] 按行扫；不是链接时为 null
+export function linkAt(state: EditorState, pos: number): Href | null {
+  for (const side of [1, -1] as const)
+    for (let n: SyntaxNode | null = syntaxTree(state).resolveInner(pos, side); n; n = n.parent) {
+      if (n.name !== 'Link') continue
+      const parts = linkParts(state, n, () => linkRefs(state))
+      if (parts?.target) return { href: parts.target }
+      break // 没有定义的 `[文]`：可能是 [[...]] 的里层，下面按行再找
+    }
+  const l = state.doc.lineAt(pos)
+  for (const m of l.text.matchAll(WIKI)) {
+    const a = l.from + m.index
+    if (pos >= a && pos <= a + m[0].length && !wikiBlocked(state, a)) return { wiki: m[1] }
+  }
+  return null
 }
 
 const inline = ViewPlugin.fromClass(
@@ -755,6 +815,7 @@ const theme = EditorView.theme({
   '.cm-lp-bullet': { color: 'var(--fg-muted)', display: 'inline-block', width: '1ch' },
   '.cm-lp-task': { margin: '0 4px 0 0', verticalAlign: 'middle', cursor: 'pointer', accentColor: 'var(--accent)' },
   '.cm-lp-link': { color: 'var(--accent)', textDecoration: 'underline' },
+  '.cm-lp-broken': { color: 'var(--fg-muted)', textDecorationStyle: 'dashed' },
   '.cm-lp-hr': { display: 'inline-block', width: '100%', borderTop: '1px solid var(--border)', verticalAlign: 'middle' },
   '.cm-lp-image img': { maxWidth: '100%', verticalAlign: 'bottom' },
   '.cm-lp-image-missing': { color: 'var(--fg-muted)', border: '1px dashed var(--border)', borderRadius: '3px', padding: '0 4px' },
