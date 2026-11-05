@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { Entry } from '../shared/api'
@@ -75,5 +76,48 @@ export function uniqueNoteName(existing: Set<string>, dir: string, base: string)
     const name = `${base}${i ? ` ${i}` : ''}.md`
     const p = dir ? `${dir}/${name}` : name
     if (!existing.has(p)) return p
+  }
+}
+
+// 附件命名（#8）：拖入的保留原名、空白换成 -；name 为 null 是剪贴板图片，按本地时间命名 image-YYYYMMDD-HHmmss.png。
+// 名字来自渲染进程，只取末段，防止带出目录
+export function attachmentName(name: string | null, now: Date): string {
+  if (name === null) {
+    const p = (n: number) => String(n).padStart(2, '0')
+    return `image-${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}.png`
+  }
+  const base = name.split(/[/\\]/).pop()!.replace(/\s/g, '-')
+  return base && base !== '.' && base !== '..' ? base : 'attachment'
+}
+
+// 重名时在扩展名前追加 -1、-2……
+export function numberedName(name: string, i: number): string {
+  if (!i) return name
+  const ext = path.extname(name)
+  return `${name.slice(0, name.length - ext.length)}-${i}${ext}`
+}
+
+const sha256 = (b: Uint8Array) => createHash('sha256').update(b).digest('hex')
+
+// 把附件写进库根的 attachments/，返回相对库根的路径。attachments/ 里已有 SHA-256 相同的文件就直接复用（先按大小筛，
+// 只对同样大小的算哈希）；否则从 name 起找第一个空位，wx 写入不覆盖已有文件。调用方负责串行，避免并发写出两份
+export async function saveAttachment(root: string, name: string, bytes: Uint8Array): Promise<string> {
+  await fs.mkdir(await realParentInVault(root, 'attachments'), { recursive: true })
+  // 真实父目录校验：attachments 被换成指向库外的链接时这里就拒绝
+  const dir = path.dirname(await realParentInVault(root, `attachments/${name}`))
+  const hash = sha256(bytes)
+  for (const d of await fs.readdir(dir, { withFileTypes: true })) {
+    if (!d.isFile()) continue // 链接、子目录不算（扁平目录，链接可能指向库外）
+    const p = path.join(dir, d.name)
+    if ((await fs.stat(p)).size === bytes.length && sha256(await fs.readFile(p)) === hash) return `attachments/${d.name}`
+  }
+  for (let i = 0; ; i++) {
+    const rel = `attachments/${numberedName(name, i)}`
+    try {
+      await fs.writeFile(await realParentInVault(root, rel), bytes, { flag: 'wx' })
+      return rel
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
+    }
   }
 }

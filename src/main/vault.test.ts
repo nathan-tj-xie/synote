@@ -1,8 +1,8 @@
-import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { isHidden, realInVault, realParentInVault, resolveInVault, scanEntries, uniqueNoteName, writeTarget } from './vault'
+import { attachmentName, isHidden, numberedName, realInVault, realParentInVault, resolveInVault, saveAttachment, scanEntries, uniqueNoteName, writeTarget } from './vault'
 
 describe('vault', () => {
   it('scans entries and hides attachments/ and dotfiles', async () => {
@@ -82,5 +82,37 @@ describe('vault', () => {
     expect(readFileSync(path.join(outside, 'n.md'), 'utf8')).toBe('out')
     // 新文件：父目录在库内即可
     expect(await writeTarget(root, 'new.md')).toMatch(/new\.md$/)
+  })
+
+  it('names attachments per #8', () => {
+    expect(attachmentName(null, new Date(2026, 0, 2, 3, 4, 5))).toBe('image-20260102-030405.png')
+    expect(attachmentName('my doc  v2.pdf', new Date())).toBe('my-doc--v2.pdf')
+    expect(attachmentName('../../etc/passwd', new Date())).toBe('passwd') // 只取末段
+    expect(attachmentName('a\\b c.png', new Date())).toBe('b-c.png')
+    expect(attachmentName('..', new Date())).toBe('attachment')
+    expect(numberedName('a.png', 0)).toBe('a.png')
+    expect(numberedName('a.png', 2)).toBe('a-2.png')
+    expect(numberedName('a.tar.gz', 1)).toBe('a.tar-1.gz')
+    expect(numberedName('README', 1)).toBe('README-1')
+  })
+
+  it('saves attachments: reuses same content, numbers clashes, never overwrites', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'synote-'))
+    const png = new Uint8Array([1, 2, 3])
+    expect(await saveAttachment(root, 'a.png', png)).toBe('attachments/a.png') // attachments/ 不存在时自动建
+    expect(await saveAttachment(root, 'b.png', png)).toBe('attachments/a.png') // 名字不同、内容相同：复用
+    expect(await saveAttachment(root, 'a.png', new Uint8Array([3, 2, 1]))).toBe('attachments/a-1.png') // 同大小不同内容
+    expect(await saveAttachment(root, 'a.png', new Uint8Array([9]))).toBe('attachments/a-2.png')
+    expect(await saveAttachment(root, 'a.png', new Uint8Array([3, 2, 1]))).toBe('attachments/a-1.png')
+    expect([...readFileSync(path.join(root, 'attachments/a.png'))]).toEqual([1, 2, 3])
+    expect(readdirSync(path.join(root, 'attachments')).sort()).toEqual(['a-1.png', 'a-2.png', 'a.png'])
+  })
+
+  it.skipIf(process.platform === 'win32')('refuses an attachments/ that links outside the vault', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'synote-'))
+    const outside = mkdtempSync(path.join(tmpdir(), 'synote-out-'))
+    symlinkSync(outside, path.join(root, 'attachments'))
+    await expect(saveAttachment(root, 'a.png', new Uint8Array([1]))).rejects.toThrow('outside vault')
+    expect(readdirSync(outside)).toEqual([])
   })
 })

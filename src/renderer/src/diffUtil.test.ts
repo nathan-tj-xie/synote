@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { relativeLink } from '../../shared/url'
 import { bomOffset, decodeEntities, destination, imageAt, minimalEdit, normalizeLabel, resolveImage } from './diffUtil'
 
 const apply = (a: string, e: ReturnType<typeof minimalEdit>) => (e ? a.slice(0, e.from) + e.insert + a.slice(e.to) : a)
@@ -90,3 +91,19 @@ describe('resolveImage 百分号解码', () => {
   it('不是合法编码时按原文', () => expect(resolveImage('a%zz.png', 'n.md')).toBe('a%zz.png'))
 })
 
+
+describe('relativeLink', () => {
+  it('按笔记所在目录计算', () => {
+    expect(relativeLink('a.md', 'attachments/x.png')).toBe('attachments/x.png')
+    expect(relativeLink('日记/今天.md', 'attachments/x.png')).toBe('../attachments/x.png')
+    expect(relativeLink('a/b/c.md', 'a/x.png')).toBe('../x.png')
+    expect(relativeLink('attachments/n.md', 'attachments/x.png')).toBe('x.png')
+  })
+  it('编码空白和保留字符，非 ASCII 原样', () => {
+    expect(relativeLink('我的 笔记/a.md', 'attachments/图 (1)#2%&?.png')).toBe('../attachments/图%20%281%29%232%25%26%3F.png')
+  })
+  it('解码后还原成原路径', () => {
+    for (const [note, p] of [['x y/n.md', 'attachments/a b(1)#%&?c.png'], ['n.md', 'attachments/<中>.png']])
+      expect(resolveImage(destination(relativeLink(note, p)), note)).toBe(p)
+  })
+})

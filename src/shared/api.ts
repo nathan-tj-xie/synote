@@ -48,7 +48,12 @@ export interface SynoteApi {
   readFile(vault: string, path: string): Promise<string>
   writeFile(vault: string, path: string, content: string): Promise<void>
   readBytes(vault: string, path: string): Promise<Uint8Array>
+  // 每个路径是否存在（实时预览的附件缺失占位用）
+  exists(vault: string, paths: string[]): Promise<boolean[]>
   createNote(vault: string, dir: string): Promise<string>
+  // 粘贴 / 拖入的附件写进 attachments/（S10），name 为 null 表示剪贴板图片；内容相同的已有文件直接复用。
+  // warn：large 为超过 50 MiB，huge 为超过 100 MiB 且不走 LFS
+  saveAttachment(vault: string, name: string | null, bytes: Uint8Array): Promise<{ path: string; warn: 'large' | 'huge' | null }>
   trash(vault: string, path: string): Promise<void>
   showItemMenu(path: string, dir: boolean): Promise<ItemMenuAction>
   reportReady(): void

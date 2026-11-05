@@ -7,7 +7,7 @@ import { commands } from '../shared/commands'
 import { indexMethods, type GitState, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
 import { tokens } from '../shared/tokens'
 import { exec, findGit, Git, GitError, type GitDetectionResult } from './git'
-import { isHidden, realInVault, realParentInVault, resolveInVault, scanEntries, toPosix, uniqueNoteName, writeTarget } from './vault'
+import { attachmentName, isHidden, realInVault, realParentInVault, resolveInVault, saveAttachment, scanEntries, toPosix, uniqueNoteName, writeTarget } from './vault'
 
 i18next.init(i18nOptions)
 const t = i18next.t
@@ -240,6 +240,11 @@ ipcMain.handle('vault:writeConfig', async (_e, vault: string, config: VaultConfi
 })
 // 读取跟随符号链接，所以按真实路径校验（实时预览会自动读图片，不能让一个指向库外的链接读出库外文件）
 ipcMain.handle('file:read', async (_e, vault: string, rel: string) => fs.readFile(await realInVault(checkVault(vault), rel), 'utf8'))
+// 实时预览查附件链接是否存在（S10）：一批路径一次查，同样按真实路径校验，越出笔记库的按不存在
+ipcMain.handle('file:exists', async (_e, vault: string, rels: string[]) => {
+  const r = checkVault(vault)
+  return Promise.all(rels.map((p) => realInVault(r, p).then(() => true, () => false)))
+})
 ipcMain.handle('file:readBytes', async (_e, vault: string, rel: string) => fs.readFile(await realInVault(checkVault(vault), rel)))
 // 工作区对比的 HEAD 一侧（S14）：经常驻 cat-file 读，HEAD 里没有这个文件时为 null。
 // `HEAD:./` 按 git 的工作目录（即笔记库）解析，笔记库是仓库子目录时也对
@@ -264,6 +269,27 @@ ipcMain.handle('file:createNote', async (_e, vault: string, dir: string) => {
   await fs.writeFile(await realParentInVault(r, rel), '', { flag: 'wx' }) // wx：不覆盖已有文件，也不跟随末级链接
   return rel
 })
+// 粘贴 / 拖入的附件（S10）：串成一条链，并发的两次粘贴不会都没查到对方而写出两份同样的文件
+let attaching: Promise<unknown> = Promise.resolve()
+ipcMain.handle('file:saveAttachment', (_e, vault: string, name: string | null, bytes: Uint8Array) => {
+  const r = checkVault(vault)
+  if (!(bytes instanceof Uint8Array) || (name !== null && typeof name !== 'string')) throw new Error('invalid attachment')
+  const job = attaching.then(async () => {
+    const rel = await saveAttachment(r, attachmentName(name, new Date()), bytes)
+    return { path: rel, warn: await sizeWarning(r, rel, bytes.length) }
+  })
+  attaching = job.catch(() => {})
+  return job
+})
+
+// 大文件提示（#13），只提示不阻止：> 50 MiB GitHub 会警告，> 100 MiB 会拒绝 push；按 .gitattributes 走 LFS 的不提示。
+// 没有可用 git、不是仓库时 check-attr 失败，按不走 LFS 处理
+async function sizeWarning(r: string, rel: string, size: number): Promise<'large' | 'huge' | null> {
+  if (size <= 50 << 20) return null
+  const res = await repoGit().catch(() => null)
+  const lfs = res && 'g' in res && res.g.cwd === r && (await res.g.lfsPaths([rel]).catch(() => [])).length > 0
+  return lfs ? null : size > 100 << 20 ? 'huge' : 'large'
+}
 ipcMain.handle('index:call', (_e, vault: string, method: string, ...args: unknown[]) => {
   if (!(indexMethods as readonly string[]).includes(method)) throw new Error(`unknown index method: ${method}`)
   checkVault(vault) // 索引进程只服务当前库，查别的库就拒绝

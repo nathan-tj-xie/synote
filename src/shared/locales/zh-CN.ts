@@ -39,6 +39,9 @@ export const zhCN = {
     gitUnavailable: '没有可用的 git，无法对比',
     toggleDiff: '切换工作区对比（HEAD ↔ 工作区）',
     imageMissing: '图片不存在：{{path}}',
+    attachmentMissing: '附件缺失：{{path}}',
+    attachmentLarge: '{{path}} 超过 50 MiB，push 到 GitHub 时会收到警告',
+    attachmentHuge: '{{path}} 超过 100 MiB 且没有走 LFS，push 到 GitHub 会被拒绝',
     imageTooLarge: '图片过大，不显示缩略图',
   },
 } as const
