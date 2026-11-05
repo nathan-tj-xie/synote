@@ -14,12 +14,21 @@ describe('extractLinks', () => {
       '```',
       '[fake](fake.md) [[围栏]]',
       '```',
+      '[用][ref]',
+      '',
       '[ref]: ./r.md',
+      '[unused]: ./u.md',
     ].join('\n')
     const links = extractLinks('n/note.md', text).map((l) => `${l.kind}:${l.dst}`)
     expect(links.sort()).toEqual(
       ['note:b/c d.md', 'att:attachments/p.png', 'att:attachments/q.png', 'wiki:同名', 'note:dir/sub.md', 'wiki:x', 'note:n/r.md'].sort(),
     )
+  })
+
+  test('reference links count where they are used, every use, not at the definition', () => {
+    const text = ['全写 [目标][r]', '折叠 [r][] 简写 [r]', '', '另一处 [又][R]', '', '[r]: sub/t.md', '[^1]: 脚注.md'].join('\n')
+    const at = extractLinks('n.md', text).map((l) => `${l.kind}:${l.dst}@${text.slice(0, l.at).split('\n').length}`)
+    expect(at).toEqual(['note:sub/t.md@1', 'note:sub/t.md@2', 'note:sub/t.md@2', 'note:sub/t.md@4'])
   })
 
   test('reserved characters are percent-decoded, <img src> may contain spaces', () => {
@@ -83,7 +92,17 @@ describe('Indexer', () => {
     expect(idx.search('hello')[0].matches).toEqual([{ line: 1, col: 8, text: '实时预览很好用 Hello World', start: 8 }])
   })
 
-  test('backlinks carry the line of the first link; [[name]] resolves to the smallest path', async () => {
+  test('backlinks list each line that links, reference links at the use site', async () => {
+    const { idx } = setup({ 'a.md': '正文 [目标][r]\n\n别处 [[t]] 和 [再][r]\n\n[r]: t.md', 't.md': '' })
+    await idx.reconcile()
+    await idx.idle()
+    expect(idx.backlinks('t.md')).toEqual([
+      { path: 'a.md', line: 1, text: '正文 [目标][r]' },
+      { path: 'a.md', line: 3, text: '别处 [[t]] 和 [再][r]' },
+    ])
+  })
+
+  test('backlinks carry the line of each link; [[name]] resolves to the smallest path', async () => {
     const { idx } = setup({
       'a.md': '# A\r\n\r\n前文 [去 b](sub/b%20b.md#第二节) 后文\r\n[再一次](sub/b%20b.md)',
       'w.md': '首行\n\n见 [[b b|别名]]',
@@ -95,6 +114,7 @@ describe('Indexer', () => {
     await idx.idle()
     expect(idx.backlinks('sub/b b.md')).toEqual([
       { path: 'a.md', line: 3, text: '前文 [去 b](sub/b%20b.md#第二节) 后文' },
+      { path: 'a.md', line: 4, text: '[再一次](sub/b%20b.md)' },
       { path: 'w.md', line: 3, text: '见 [[b b|别名]]' },
     ])
     expect(idx.backlinks('x/b b.md').map((b) => b.path)).toEqual(['c.md'])

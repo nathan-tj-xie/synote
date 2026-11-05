@@ -38,6 +38,7 @@ const source =
       options: hits.map((h) => ({
         label: h.id,
         apply: (view, _c, from, to) => {
+          if (view.state.readOnly) return // 切库交接锁：鼠标点选项也不写
           const name = h.id.slice(h.id.lastIndexOf('/') + 1, -3).replace(/[\\[\]]/g, '\\$&')
           const insert = `[${name}](${relativeLink(note, h.id)})`
           // 已经手动敲了收尾的 ]] 就一起换掉

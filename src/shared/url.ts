@@ -124,8 +124,9 @@ export function slugger(): (text: string) => string {
   }
 }
 
-// 标题按 GitHub 渲染后的文字算 slug：去掉 `#`、强调、代码、链接地址等标记，只留显示的文字
-const MARKUP = new Set(['HeaderMark', 'EmphasisMark', 'CodeMark', 'LinkMark', 'URL', 'LinkTitle', 'LinkLabel', 'StrikethroughMark'])
+// 标题按 GitHub 渲染后的文字算 slug：去掉 `#`、强调、代码、链接地址、HTML 标签等标记，只留显示的文字；
+// 中间的空白原样保留（github-slugger 不压缩连续空格：`Hello  World` → `hello--world`）
+const MARKUP = new Set(['HeaderMark', 'EmphasisMark', 'CodeMark', 'LinkMark', 'URL', 'LinkTitle', 'LinkLabel', 'StrikethroughMark', 'HTMLTag'])
 
 // 正文里每个标题的锚点和所在行（从 1 起）
 export function headingAnchors(text: string): { slug: string; line: number }[] {
@@ -148,7 +149,7 @@ export function headingAnchors(text: string): { slug: string; line: number }[] {
         pos = b
       }
       s += text.slice(pos, n.to)
-      const plain = decodeEntities(s.replace(/\\([!-/:-@[-`{-~])/g, '$1')).replace(/\s+/g, ' ').trim()
+      const plain = decodeEntities(s.replace(/\\([!-/:-@[-`{-~])/g, '$1')).trim()
       out.push({ slug: next(plain), line: text.slice(0, n.from).split('\n').length })
       return false
     },

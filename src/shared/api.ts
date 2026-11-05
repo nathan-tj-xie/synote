@@ -12,7 +12,7 @@ export type VaultInfo = { root: string; name: string; entries: Entry[]; config: 
 export type SearchMatch = { line: number; col: number; text: string; start: number }
 export type SearchHit = { path: string; matches: SearchMatch[] }
 
-// 反链：来源笔记、其中第一处链接所在的行（从 1 起）和这一行的文字
+// 反链：来源笔记、链接所在的行（从 1 起）和这一行的文字；一篇里多处链接时每行一条
 export type Backlink = { path: string; line: number; text: string }
 
 // 渲染进程可调用的索引查询（主进程按这个白名单转发给索引 utility process）

@@ -7,8 +7,9 @@ import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, typ
 import type { SyntaxNode } from '@lezer/common'
 import { tags as t } from '@lezer/highlight'
 import { i18next } from '../../shared/i18n'
-import { parseWiki, WIKI } from '../../shared/url'
-import { dataUrl, decodeEntities, destination, imageMime, MAX_IMAGE, normalizeLabel, resolveImage, resolveLink, unescapeMd } from './diffUtil'
+import { linkHref, linkRefs as treeRefs, RAW, wikiLinks } from '../../shared/mdLinks'
+import { parseWiki } from '../../shared/url'
+import { dataUrl, decodeEntities, imageMime, MAX_IMAGE, resolveImage, resolveLink, unescapeMd } from './diffUtil'
 import { resolveHref, type Href } from './links'
 import { useVault } from './store'
 
@@ -288,21 +289,9 @@ class LinkText extends WidgetType {
   }
 }
 
-// 引用定义 `[ref]: 地址`：标签按 normalizeLabel 归一，地址存原文（用时再经 destination 解码）
-export function linkRefs(state: EditorState): Map<string, string> {
-  const refs = new Map<string, string>()
-  syntaxTree(state).iterate({
-    enter(n) {
-      if (n.name !== 'LinkReference') return CONTAINERS.has(n.name)
-      const label = n.node.getChild('LinkLabel')
-      const url = n.node.getChild('URL')
-      const key = label && normalizeLabel(sourceText(state, label.from + 1, label.to - 1)) // 标签内容，不含外层方括号
-      if (key && url && !refs.has(key)) refs.set(key, state.sliceDoc(url.from, url.to)) // 重复定义以第一个为准
-      return false
-    },
-  })
-  return refs
-}
+// 引用定义 `[ref]: 地址`（识别规则在 shared/mdLinks，和索引共用）；跨行标签按 sourceText 去掉续行的引用标记
+const source = (state: EditorState) => ({ text: (a: number, b: number) => state.sliceDoc(a, b), label: (a: number, b: number) => sourceText(state, a, b) })
+export const linkRefs = (state: EditorState): Map<string, string> => treeRefs(syntaxTree(state), source(state))
 
 // 一行上各层引用标记 `>`（连同其后一个空格）的位置。按语法树确定：取这一行末尾处节点的 Blockquote / ListItem 祖先，
 // 由外到内逐层定位——容器从这一行开始时，`>` 就在 Blockquote 的起点、列表标记在 ListMark；续行时跳过缩进再找 `>`。
@@ -360,16 +349,7 @@ export const plainText = (state: EditorState, from: number, to: number) => unesc
 function linkParts(state: EditorState, n: SyntaxNode, refs: () => Map<string, string>): { text: string; target: string | null } | null {
   const marks = n.getChildren('LinkMark')
   if (marks.length < 2) return null
-  const text = plainText(state, marks[0].to, marks[1].from)
-  const url = n.getChild('URL')
-  if (url) return { text, target: destination(state.sliceDoc(url.from, url.to)) }
-  if (marks.length > 2) return { text, target: '' } // `[文]()`：空地址
-  const label = n.getChild('LinkLabel')
-  // 标签匹配用源码（不反转义），显示文字另用 plainText
-  const key = normalizeLabel(label && label.to - label.from > 2 ? sourceText(state, label.from + 1, label.to - 1) : sourceText(state, marks[0].to, marks[1].from))
-  // `[^1]` 是脚注写法（MVP 不支持脚注），不当成引用链接，保持源码
-  const target = key.startsWith('^') ? undefined : refs().get(key)
-  return { text, target: target === undefined ? null : destination(target) }
+  return { text: plainText(state, marks[0].to, marks[1].from), target: linkHref(n, refs, source(state)) }
 }
 
 function imageWidget(state: EditorState, text: string, target: string): ImageWidget {
@@ -487,11 +467,6 @@ function tableWidget(state: EditorState, n: SyntaxNode): TableWidget {
   const indent = quoted ? 0 : (marks[0]?.from ?? n.from) - start
   return new TableWidget(state.sliceDoc(start, n.to), () => tableCellsOf(state, n), quoted, indent, markers)
 }
-
-// 引用定义所在的块级容器（linkRefs 只往这些节点里走）
-const CONTAINERS = new Set(['Document', 'Blockquote', 'BulletList', 'OrderedList', 'ListItem'])
-// 内容不按 Markdown 渲染的节点：里面的 `[..](..)` 不是链接
-const RAW = new Set(['FencedCode', 'CodeBlock', 'InlineCode', 'HTMLBlock', 'HTMLTag', 'CommentBlock', 'Comment', 'ProcessingInstructionBlock', 'LinkReference'])
 
 // 跨行替换必须由 StateField 提供，ViewPlugin 不能替换换行。这里出两类：
 // - 表格：块级替换按整行，引用、列表里的表格连同行首的 `> ` / 缩进一起替换
@@ -700,27 +675,16 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
   for (let i = doc.lineAt(from).number; i <= doc.lineAt(to).number; i++) {
     const l = doc.line(i)
     if (!l.text.includes('[[') || touches(state, l.from, l.to)) continue
-    for (const m of l.text.matchAll(WIKI)) {
-      const a = l.from + m.index
-      const b = a + m[0].length
-      const w = parseWiki(m[1])
-      if (!w || inTable(a, b) || wikiBlocked(state, a)) continue
-      const bar = m[1].indexOf('|')
-      const textFrom = bar >= 0 && m[1].slice(bar + 1).trim() ? a + 2 + bar + 1 : a + 2 // 别名为空时显示原文
+    for (const { from: a, to: b, inner } of wikiLinks(syntaxTree(state), l.text, l.from)) {
+      if (!parseWiki(inner) || inTable(a, b)) continue
+      const bar = inner.indexOf('|')
+      const textFrom = bar >= 0 && inner.slice(bar + 1).trim() ? a + 2 + bar + 1 : a + 2 // 别名为空时显示原文
       hide(a, textFrom)
-      out.push(mark(linkClass(state, { wiki: m[1] })).range(textFrom, b - 2))
+      out.push(mark(linkClass(state, { wiki: inner })).range(textFrom, b - 2))
       hide(b - 2, b)
     }
   }
   return Decoration.set(out, true)
-}
-
-// 位置 pos 起的 [[...]] 在代码、HTML 等原样节点或标准链接里：那里的不是双链。
-// lezer 会把里层的 `[...]` 认成引用式 Link（不管有没有定义），那个不算
-function wikiBlocked(state: EditorState, pos: number): boolean {
-  for (let n: SyntaxNode | null = syntaxTree(state).resolveInner(pos, 1); n; n = n.parent)
-    if (RAW.has(n.name) || ((n.name === 'Link' || n.name === 'Image') && n.from !== pos + 1)) return true
-  return false
 }
 
 // pos 处的双链（⌘ 点击跳转用）：标准链接（含引用式）按语法树找，[[...]] 按行扫；不是链接时为 null
@@ -733,11 +697,8 @@ export function linkAt(state: EditorState, pos: number): Href | null {
       break // 没有定义的 `[文]`：可能是 [[...]] 的里层，下面按行再找
     }
   const l = state.doc.lineAt(pos)
-  for (const m of l.text.matchAll(WIKI)) {
-    const a = l.from + m.index
-    if (pos >= a && pos <= a + m[0].length && !wikiBlocked(state, a)) return { wiki: m[1] }
-  }
-  return null
+  const w = wikiLinks(syntaxTree(state), l.text, l.from).find((w) => pos >= w.from && pos <= w.to)
+  return w ? { wiki: w.inner } : null
 }
 
 const inline = ViewPlugin.fromClass(

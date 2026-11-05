@@ -5,43 +5,36 @@ import { DatabaseSync } from 'node:sqlite'
 import { setImmediate as tick } from 'node:timers/promises'
 import { parser } from '@lezer/markdown'
 import type { Backlink, SearchHit, SearchMatch } from '../shared/api'
-import { decodeComponent, destination, parseWiki, pickWiki, resolveLink, WIKI } from '../shared/url'
+import { findLinks } from '../shared/mdLinks'
+import { decodeComponent, parseWiki, pickWiki, resolveLink } from '../shared/url'
 import { isHidden, toPosix } from './vault'
 
 const VERSION = 2
 const BATCH = 200
 
-type Link = { dst: string; kind: 'note' | 'wiki' | 'att'; at: number } // at：在正文里第一次出现的偏移，反链的上下文用
+type Link = { dst: string; kind: 'note' | 'wiki' | 'att'; at: number } // at：在正文里的偏移（使用处），反链的上下文用
 type Stat = { mtime: number; size: number }
 
 const isNote = (rel: string) => rel.endsWith('.md') && !isHidden(rel)
 const isAtt = (rel: string) => rel.startsWith('attachments/') && !rel.split('/').some((p) => p.startsWith('.'))
 const noteName = (rel: string) => (isNote(rel) ? path.posix.basename(rel, '.md') : null)
 
-// 标准链接走 lezer（排除代码），[[...]] 只扫非代码区，附件引用在全文上宽松识别（宁可多算，不误判孤儿）。
-// 链接地址和 [[...]] 的解析与实时预览、跳转共用 shared/url.ts
+// 双链（标准链接含引用式、[[...]]）按 shared/mdLinks 从语法树认出（排除代码，和实时预览同一套），位置记在使用处，
+// 每处一条；附件引用在全文上宽松识别（宁可多算，不误判孤儿），按路径去重
 export function extractLinks(src: string, text: string): Link[] {
-  const out = new Map<string, Link>()
-  const add = (l: Link) => out.has(`${l.kind}\0${l.dst}`) || out.set(`${l.kind}\0${l.dst}`, l)
-  const code: [number, number][] = []
-  parser.parse(text).iterate({
-    enter: (n) => {
-      if (n.name === 'FencedCode' || n.name === 'CodeBlock' || n.name === 'InlineCode') {
-        code.push([n.from, n.to])
-        return false
-      }
-      if (n.name !== 'URL') return
-      const href = destination(text.slice(n.from, n.to))
-      if (href.startsWith('#')) return // 笔记内的锚点不算双链
-      const dst = resolveLink(href, src)
-      if (dst?.endsWith('.md')) add({ dst, kind: 'note', at: n.from })
-    },
-  })
-  for (const m of text.matchAll(WIKI)) {
-    if (code.some(([a, b]) => m.index >= a && m.index < b)) continue
-    const w = parseWiki(m[1])
-    if (w?.path) add({ dst: w.path, kind: 'note', at: m.index })
-    else if (w?.name) add({ dst: w.name, kind: 'wiki', at: m.index })
+  const links: Link[] = []
+  const att = new Map<string, Link>()
+  const add = (l: Link) => (l.kind === 'att' ? att.has(l.dst) || att.set(l.dst, l) : links.push(l))
+  for (const l of findLinks(parser.parse(text), text)) {
+    if (l.kind === 'wiki') {
+      const w = parseWiki(l.href)
+      if (w?.path) add({ dst: w.path, kind: 'note', at: l.from })
+      else if (w?.name) add({ dst: w.name, kind: 'wiki', at: l.from })
+    } else if (!l.href.startsWith('#')) {
+      // 笔记内的锚点不算双链
+      const dst = resolveLink(l.href, src)
+      if (dst?.endsWith('.md')) add({ dst, kind: 'note', at: l.from })
+    }
   }
   // <img src="..."> 有引号界定，路径里可以有空格；先认出来，下面的通用规则跳过这些范围
   const quoted: [number, number][] = []
@@ -53,7 +46,7 @@ export function extractLinks(src: string, text: string): Link[] {
     if (quoted.some(([a, b]) => m.index >= a && m.index < b)) continue
     add({ dst: `attachments/${decodeComponent(m[1])}`, kind: 'att', at: m.index })
   }
-  return [...out.values()]
+  return [...links, ...att.values()]
 }
 
 // 只走笔记和 attachments/，跳过 .git 等隐藏目录
@@ -223,7 +216,7 @@ export class Indexer {
     while (this.flushing) await this.flushing
   }
 
-  // 指向 p 的笔记，带第一处链接所在的行和这一行的文字（上下文片段）
+  // 指向 p 的每一处链接（按来源笔记、位置排序），带所在行和这一行的文字（上下文片段）
   backlinks(p: string): Backlink[] {
     const name = noteName(p)
     // [[同名]] 指向多篇时由 pickWiki 选定（和实时预览、跳转同一规则），p 是被选中的那篇才算
@@ -231,19 +224,25 @@ export class Indexer {
     const wiki = name !== null && pickWiki(name, same.map((r) => r.path)) === p ? 1 : 0
     const rows = this.db
       .prepare(
-        `SELECT src, min(pos) AS pos FROM links WHERE (kind = 'note' AND dst = :p) OR (:wiki AND kind = 'wiki' AND dst = :name)
-         GROUP BY src ORDER BY src`,
+        `SELECT src, pos FROM links WHERE (kind = 'note' AND dst = :p) OR (:wiki AND kind = 'wiki' AND dst = :name)
+         ORDER BY src, pos`,
       )
       .all({ p, name, wiki }) as { src: string; pos: number }[]
     const body = this.db.prepare('SELECT fts.body FROM fts JOIN files f ON f.id = fts.rowid WHERE f.path = ?')
-    return rows.map(({ src, pos }) => {
-      const text = this.pending.get(src) ?? (body.get(src) as { body: string } | undefined)?.body ?? ''
+    const texts = new Map<string, string>()
+    const out: Backlink[] = []
+    for (const { src, pos } of rows) {
+      if (!texts.has(src)) texts.set(src, this.pending.get(src) ?? (body.get(src) as { body: string } | undefined)?.body ?? '')
+      const text = texts.get(src)!
       const start = text.lastIndexOf('\n', pos - 1) + 1
+      const line = text.slice(0, start).split('\n').length
+      const last = out.at(-1)
+      if (last?.path === src && last.line === line) continue // 同一行里的几处只列一次
       const end = text.indexOf('\n', pos)
       // shortcut: 片段只取链接所在的整行（过长截断），不按句子切，有人嫌长短不齐时再改
-      const snippet = text.slice(start, end < 0 ? text.length : end).trim().slice(0, 200)
-      return { path: src, line: text.slice(0, start).split('\n').length, text: snippet }
-    })
+      out.push({ path: src, line, text: text.slice(start, end < 0 ? text.length : end).trim().slice(0, 200) })
+    }
+    return out
   }
 
   attachmentRefs(p: string): number {

@@ -3,6 +3,7 @@ import { destination, resolveLink } from '../../shared/url'
 
 // 链接解析在 shared/url.ts（渲染、跳转、索引共用），这里转出给已有调用方
 export { decodeEntities, destination, resolveLink } from '../../shared/url'
+export { normalizeLabel } from '../../shared/mdLinks'
 
 // a 变成 b 的最小单段替换（去掉公共前后缀），外部重载推给 Monaco 时用，保住光标和撤销栈。
 // 边界只落在码点上：切开代理对的话 Monaco 会把范围扩到整个码点，插入文本却没扩，两边就错位了
@@ -45,9 +46,6 @@ export const imageMime = (p: string): string | undefined => mimes[p.split('.').p
 // Markdown 反斜杠转义（ASCII 标点）还原成字符本身
 export const unescapeMd = (s: string) => s.replace(/\\([!-/:-@[-`{-~])/g, '$1')
 
-// 引用标签的匹配键（CommonMark）：折叠空白，Unicode case fold；不反转义（`[a\*b]` 只匹配 `[a\*b]`）。
-// 传入的是标签内容，不含外层方括号（由调用方按语法树的 LinkLabel 边界取），所以末尾的转义 `\]` 不会被误删
-export const normalizeLabel = (s: string) => s.trim().replace(/\s+/g, ' ').toLowerCase().toUpperCase()
 
 // 同上，不是图片时也为 null
 export function resolveImage(src: string, note: string): string | null {

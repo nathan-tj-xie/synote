@@ -1,3 +1,4 @@
+import GithubSlugger from 'github-slugger'
 import { describe, expect, it } from 'vitest'
 import { anchorLine, destination, headingAnchors, linkTarget, parseWiki, pickWiki, relativeLink, slug, slugger } from './url'
 
@@ -56,6 +57,12 @@ describe('GitHub slug', () => {
     expect(slug('foo_bar-baz')).toBe('foo_bar-baz')
     expect(slug('Ünïcödé 😀')).toBe('ünïcödé-')
   })
+  it('与 github-slugger 一致', () => {
+    const samples = ['Hello  World', 'Hello World!', '第二节 小结', 'C++ 入门：基础', 'A & B', 'foo_bar-baz', 'Ünïcödé 😀', '  前后空格  ', 'Tab\there', '«引号» “中文”', 'a.b/c', '日本語の見出し', 'Ελληνικά', '100% 完成?', 'emoji 🎉 end', '—破折号—']
+    const ours = slugger()
+    const theirs = new GithubSlugger()
+    for (const s of [...samples, ...samples]) expect(ours(s)).toBe(theirs.slug(s))
+  })
   it('重复标题加 -1、-2，已占用的后缀跳过', () => {
     const next = slugger()
     expect(['a', 'a', 'a-1', 'a', 'A'].map(next)).toEqual(['a', 'a-1', 'a-1-1', 'a-2', 'a-3'])
@@ -71,5 +78,6 @@ describe('GitHub slug', () => {
     expect(anchorLine(text, '标题-1')).toBe(6)
     expect(anchorLine(text, 'Hello')).toBeNull()
     expect(anchorLine('## Hello World', 'Hello World')).toBe(1) // 手写的未转换锚点按 slug 再比一次
+    expect(headingAnchors('# Hello  <b>World</b>\n## a <span class="x">b</span>').map((h) => h.slug)).toEqual(['hello--world', 'a-b'])
   })
 })
