@@ -3,6 +3,7 @@ import { ensureSyntaxTree } from '@codemirror/language'
 import { EditorState } from '@codemirror/state'
 import type { DecorationSet } from '@codemirror/view'
 import { describe, expect, it } from 'vitest'
+import { tableTrailingSpace } from './gfmTable'
 import { buildBlocks, buildInline, livePreview } from './livePreview'
 
 const doc = [
@@ -24,7 +25,7 @@ const doc = [
 // 光标放在第 cursorLine 行（从 1 起）行首
 function state(cursorLine: number, text = doc) {
   // 带上 livePreview：buildInline 跳过 blocks 字段已整段替换的范围，和运行时一致
-  const s0 = EditorState.create({ doc: text, extensions: [markdown({ base: markdownLanguage }), livePreview(null)] })
+  const s0 = EditorState.create({ doc: text, extensions: [markdown({ base: markdownLanguage, extensions: [tableTrailingSpace] }), livePreview(null)] })
   const s = s0.update({ selection: { anchor: s0.doc.line(cursorLine).from } }).state
   ensureSyntaxTree(s, s.doc.length)
   return s
@@ -342,10 +343,9 @@ describe('容器嵌套的生成式测试', () => {
     // 所以任务项只作最内层，且只放段落
     const task = stack.findIndex((c) => c.first === '- [ ] ')
     if (task !== -1 && (task !== depth - 1 || kind !== '段落')) continue
-    // 表格的表头、数据行随机加行尾空白（空格 / Tab / 混合）。行首空白会改变缩进、破坏容器结构，所以只加行尾。
-    // 对齐行不加：@lezer/markdown 遇到对齐行带行尾空白时不认这是表格（GFM 允许），整段按段落显示源码，见 PR「偏离与限制」
+    // 表格的每一行（含对齐行）随机加行尾空白（空格 / Tab / 混合）。行首空白会改变缩进、破坏容器结构，所以只加行尾
     const pad = () => pick(['', ' ', '  ', '\t', ' \t '])
-    const lines = body.map((text, j) => stack.map((c) => (j === 0 ? c.first : c.cont)).join('') + text + (kind === '表格' && j !== 1 ? pad() : ''))
+    const lines = body.map((text, j) => stack.map((c) => (j === 0 ? c.first : c.cont)).join('') + text + (kind === '表格' ? pad() : ''))
     const name = `#${i} ${stack.map((c) => c.first.trim()).join(' ')} ${kind}`
     if (!stack.some((c) => c.first === '> ')) continue
     it(name, () => {
@@ -422,8 +422,14 @@ describe('表格单元格', () => {
     expect(table('  | a | b |\n |---|---|\n\t| 1 | 2 |')[0].rows).toEqual([['a', 'b'], ['1', '2']])
     expect(table('| a | b | \t\n|---|---|\n| | x |  ')[0].rows).toEqual([['a', 'b'], ['', 'x']]) // 末尾的空单元格仍在
   })
-  // 解析器限制：对齐行带行尾空白时 @lezer/markdown 不认表格，整段保持源码（不会半渲染）
-  it('对齐行带行尾空白：不是表格，保持源码', () => expect(table('| a |\n|---| \n| 1 |')).toEqual([]))
+  // 对齐行带行尾空白（gfmTable.ts 修正了 @lezer/markdown 的这个 bug）
+  it('对齐行带行尾空格、Tab、两者', () => {
+    for (const tail of [' ', '  ', '\t', ' \t', '\t '])
+      expect(table(`| a | b |\n|---|:-:|${tail}\n| 1 | 2 |`)).toEqual([{ rows: [['a', 'b'], ['1', '2']], align: [null, 'center'] }])
+    expect(table('a | b\n--|-- \n1 | 2')[0].rows).toEqual([['a', 'b'], ['1', '2']]) // 省略首尾 |
+    expect(table('> | a |\n> |---|\t\n> | 1 |')[0].rows).toEqual([['a'], ['1']]) // 引用里
+    expect(table('前面的段落\n| a |\n|---| \n| 1 |')[0].rows).toEqual([['a'], ['1']]) // 打断段落
+  })
   it('转义的 | 不切分', () => expect(table('| a | b |\n|---|---|\n| x \\| y | z |')[0].rows).toEqual([['a', 'b'], ['x | y', 'z']]))
   it('对齐按列应用', () => expect(table('| a | b | c |\n|:--|:-:|--:|\n| 1 | 2 | 3 |')[0].align).toEqual(['left', 'center', 'right']))
 })

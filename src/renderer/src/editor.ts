@@ -5,6 +5,7 @@ import { Annotation, Compartment, EditorSelection, EditorState, StateEffect, Sta
 import { EditorView, keymap } from '@codemirror/view'
 import { vscodeKeymap } from '@replit/codemirror-vscode-keymap'
 import { minimalSetup } from 'codemirror'
+import { tableTrailingSpace } from './gfmTable'
 import { livePreview } from './livePreview'
 import { useEditor, useUi, useVault } from './store'
 
@@ -71,7 +72,7 @@ function makeState(doc: string, path: string): EditorState {
       minimalSetup,
       editable(),
       EditorState.allowMultipleSelections.of(true), // ⌘D、⌥ 点击等多光标键位需要
-      markdown({ base: markdownLanguage, codeLanguages: languages }), // GFM（表格、任务列表、删除线）；代码块按语言懒加载高亮
+      markdown({ base: markdownLanguage, codeLanguages: languages, extensions: [tableTrailingSpace] }), // GFM（表格、任务列表、删除线）；代码块按语言懒加载高亮
       livePreview(vault ? { vault, path } : null),
       EditorView.lineWrapping,
       theme,
