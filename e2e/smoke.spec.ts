@@ -237,7 +237,7 @@ test('opening vaults in quick succession: last call wins', async () => {
 test('index service in utility process', async () => {
   const { app, win, vault } = await launch({ 'a.md': '去看 [b](b.md)，实时预览', 'b.md': '', 'attachments/orphan.png': '' })
 
-  await expect.poll(() => win.evaluate((v) => window.synote.backlinks(v, 'b.md').catch(() => []), vault), { timeout: 5000 }).toEqual(['a.md'])
+  await expect.poll(() => win.evaluate((v) => window.synote.backlinks(v, 'b.md').then((r) => r.map((b) => b.path)).catch(() => []), vault), { timeout: 5000 }).toEqual(['a.md'])
   await expect.poll(() => win.evaluate((v) => window.synote.search(v, '实时预览').then((h) => h.map((x) => x.path)), vault)).toEqual(['a.md'])
   expect(await win.evaluate((v) => window.synote.orphans(v), vault)).toEqual(['attachments/orphan.png'])
   // 查别的库：主进程拒绝
@@ -249,7 +249,7 @@ test('index service in utility process', async () => {
   await win.keyboard.press('ControlOrMeta+Shift+p')
   await win.keyboard.type('重建索引')
   await win.keyboard.press('Enter')
-  await expect.poll(() => win.evaluate((v) => window.synote.backlinks(v, 'b.md'), vault)).toEqual(['a.md'])
+  await expect.poll(() => win.evaluate((v) => window.synote.backlinks(v, 'b.md').then((r) => r.map((b) => b.path)), vault)).toEqual(['a.md'])
   await app.close()
 })
 
@@ -1134,5 +1134,58 @@ test('a link to a missing non-image attachment shows a placeholder until it is b
   await expect(missing).toHaveCount(0, { timeout: 5000 })
   await expect(win.locator('.cm-lp-link')).toHaveText('文档')
   expect(readFileSync(path.join(vault, 'n.md'), 'utf8')).toBe('首行\n\n看 [文档](attachments/doc.pdf) 吧\n')
+  await app.close()
+})
+
+// 双链（S8）：输入 [[ 补全，写入的是标准相对链接（空格 %20、中文原样），不是 [[...]]
+test('[[ completion writes a standard relative link', async () => {
+  const { app, win, vault } = await launch({ '日记/今天.md': '开头\n', '笔记/目标 笔记.md': '# 目标\n', '别的.md': '' })
+  await win.getByRole('treeitem', { name: '日记' }).click()
+  await win.getByRole('treeitem', { name: '今天.md' }).click()
+  await win.locator('.cm-content').click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('[[目标')
+  const popup = win.locator('.cm-tooltip-autocomplete')
+  await expect(popup.getByRole('option').first()).toHaveText('笔记/目标 笔记.md')
+  await win.keyboard.press('Enter')
+  await expect(popup).toHaveCount(0)
+  await expect.poll(() => readFileSync(path.join(vault, '日记/今天.md'), 'utf8'), { timeout: 5000 }).toBe('开头\n[目标 笔记](../笔记/目标%20笔记.md)')
+  await app.close()
+})
+
+// ⌘ 点击跳到目标笔记并定位到锚点标题；目标不存在显示失效样式；反链面板列出来源并随索引更新
+test('cmd-click follows links to anchors, broken links, backlinks panel', async () => {
+  const filler = Array.from({ length: 60 }, (_, i) => `第 ${i} 行`).join('\n')
+  const { app, win, vault } = await launch({
+    'a.md': '首行\n\n去 [第二节](sub/b%20b.md#第二节) 和 [失效](nope.md) 和 [[不存在]] 和 [[b b|维基]]\n',
+    'sub/b b.md': `# B\n\n${filler}\n\n## 第二节\n\n正文\n`,
+  })
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  const editor = win.locator('.cm-content')
+  await expect(win.locator('.cm-lp-broken')).toHaveText(['失效', '不存在'], { timeout: 5000 })
+
+  await win.locator('.cm-lp-link', { hasText: '失效' }).click({ modifiers: ['ControlOrMeta'] })
+  await expect(win.getByRole('alert')).toHaveText('笔记不存在：nope.md')
+  await win.getByRole('alert').click()
+
+  await win.locator('.cm-lp-link', { hasText: '第二节' }).click({ modifiers: ['ControlOrMeta'] })
+  await expect(win.getByRole('tab', { name: 'b b' })).toHaveAttribute('aria-selected', 'true')
+  const heading = editor.locator('.cm-line', { hasText: '## 第二节' }) // 光标在标题行：显示源码
+  await expect(heading).toBeInViewport()
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toContain('[第二节](sub/b%20b.md#第二节)') // 跳转不改源码
+
+  const panel = win.getByRole('region', { name: '反链' })
+  await expect(panel.getByRole('button')).toHaveText(['a去 [第二节](sub/b%20b.md#第二节) 和 [失效](nope.md) 和 [[不存在]] 和 [[b b|维基]]'], { timeout: 5000 })
+  writeFileSync(path.join(vault, 'c.md'), '另一篇\n见 [[b b]]\n')
+  await expect(panel.getByRole('button')).toHaveCount(2, { timeout: 5000 })
+  await expect(panel.getByRole('button').nth(1)).toHaveText('c见 [[b b]]')
+
+  await panel.getByRole('button').first().click()
+  await expect(win.getByRole('tab', { name: 'a' })).toHaveAttribute('aria-selected', 'true')
+  await expect(editor.locator('.cm-line', { hasText: '[[b b|维基]]' })).toBeVisible() // 定位到链接所在行：显示源码
+  // 光标移开后 [[名字|别名]] 只显示别名，也能 ⌘ 点击
+  await win.keyboard.press('ControlOrMeta+Home')
+  await win.locator('.cm-lp-link', { hasText: '维基' }).click({ modifiers: ['ControlOrMeta'] })
+  await expect(win.getByRole('tab', { name: 'b b' })).toHaveAttribute('aria-selected', 'true')
   await app.close()
 })

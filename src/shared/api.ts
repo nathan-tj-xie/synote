@@ -12,6 +12,9 @@ export type VaultInfo = { root: string; name: string; entries: Entry[]; config: 
 export type SearchMatch = { line: number; col: number; text: string; start: number }
 export type SearchHit = { path: string; matches: SearchMatch[] }
 
+// 反链：来源笔记、链接所在的行（从 1 起）和这一行的文字；一篇里多处链接时每行一条
+export type Backlink = { path: string; line: number; text: string }
+
 // 渲染进程可调用的索引查询（主进程按这个白名单转发给索引 utility process）
 export const indexMethods = ['backlinks', 'search', 'attachmentRefs', 'orphans', 'rebuild'] as const
 
@@ -61,7 +64,7 @@ export interface SynoteApi {
   // 外部改动：刷新后的条目与变化的路径
   onVaultChanged(cb: (e: { root: string; entries: Entry[]; changed: string[] }) => void): () => void
   // 索引（S6），查询同样带上笔记库
-  backlinks(vault: string, path: string): Promise<string[]>
+  backlinks(vault: string, path: string): Promise<Backlink[]>
   search(vault: string, query: string): Promise<SearchHit[]>
   attachmentRefs(vault: string, path: string): Promise<number>
   orphans(vault: string): Promise<string[]>

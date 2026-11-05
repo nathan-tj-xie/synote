@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
+import { Backlinks } from './Backlinks'
 import s from './EditorPane.module.css'
 import { forget, mount, show } from './editor'
 import { useEditor, useUi } from './store'
@@ -51,6 +52,7 @@ export function EditorPane() {
         ))}
       </div>
       <div ref={host} className={s.host} hidden={!active} />
+      {active?.endsWith('.md') && <Backlinks path={active} />}
       {!active && <div className={s.empty}>{t('emptyEditor')}</div>}
     </div>
   )

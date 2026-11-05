@@ -6,10 +6,12 @@ import { EditorView, keymap } from '@codemirror/view'
 import { vscodeKeymap } from '@replit/codemirror-vscode-keymap'
 import { minimalSetup } from 'codemirror'
 import { i18next } from '../../shared/i18n'
-import { relativeLink } from '../../shared/url'
+import { anchorLine, relativeLink } from '../../shared/url'
 import { imageMime } from './diffUtil'
 import { tableTrailingSpace } from './gfmTable'
-import { forgetFiles, livePreview } from './livePreview'
+import { noteCompletion, resolveHref, type Href } from './links'
+import { forgetFiles, linkAt, livePreview } from './livePreview'
+import { isMac } from './match'
 import { useEditor, useUi, useVault } from './store'
 
 // 缓存不变式：视图里那份（shown）永远是该文件最新的正文，states 只缓存不在视图里的已打开文件。
@@ -102,12 +104,23 @@ function makeState(doc: string, path: string): EditorState {
       EditorState.allowMultipleSelections.of(true), // ⌘D、⌥ 点击等多光标键位需要
       markdown({ base: markdownLanguage, codeLanguages: languages, extensions: [tableTrailingSpace] }), // GFM（表格、任务列表、删除线）；代码块按语言懒加载高亮
       livePreview(vault ? { vault, path } : null),
+      noteCompletion(path),
       EditorView.lineWrapping,
       theme,
       // 文件优先于 CM6 自带的处理（它会把拖入的文件当文本读进来）；粘贴同时带文本时（如表格软件）照常粘文本
       EditorView.domEventHandlers({
         paste: (e) => !e.clipboardData?.types.includes('text/plain') && attach(e, e.clipboardData?.files, true),
         drop: (e, v) => attach(e, e.dataTransfer?.files, false, v.posAtCoords({ x: e.clientX, y: e.clientY })),
+        // ⌘ 点击（其他平台 Ctrl）双链跳转；不在链接上时照常交给 CM6（加光标）
+        mousedown: (e, v) => {
+          if (e.button !== 0 || !(isMac ? e.metaKey : e.ctrlKey)) return false
+          const pos = v.posAtCoords({ x: e.clientX, y: e.clientY })
+          const h = pos === null ? null : linkAt(v.state, pos)
+          if (!h) return false
+          e.preventDefault()
+          followLink(h, path).catch((err) => useUi.getState().setError(String(err)))
+          return true
+        },
       }),
       EditorView.updateListener.of((u) => {
         if (!u.docChanged || !shown) return
@@ -345,6 +358,23 @@ export function reveal(path: string, line: number, col: number, len: number) {
     view?.focus()
   }
   useEditor.getState().open(path)
+}
+
+// 打开双链指向的笔记；有锚点时定位到对应标题（按 GitHub slug 匹配，找不到就只打开）。
+// 目标正文优先取已打开的那份（可能有未保存改动），否则读盘
+async function followLink(h: Href, from: string) {
+  const t = resolveHref(h, from)
+  const v = vault
+  if (!v) return
+  if (!t || !t.path.endsWith('.md') || !(await window.synote.exists(v, [t.path]))[0]) {
+    useUi.getState().setError(i18next.t('noteMissing', { path: t?.path ?? ('wiki' in h ? h.wiki : h.href) }))
+    return
+  }
+  const text = t.anchor ? (docOf(t.path) ?? (await window.synote.readFile(v, t.path))) : ''
+  if (vault !== v) return // 期间换了库
+  const line = t.anchor ? anchorLine(text, t.anchor) : null
+  if (line) reveal(t.path, line, 0, 0)
+  else useEditor.getState().open(t.path)
 }
 
 // 正文与上次落盘一致（没有未保存改动）时不写盘

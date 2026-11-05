@@ -7,7 +7,11 @@ import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, typ
 import type { SyntaxNode } from '@lezer/common'
 import { tags as t } from '@lezer/highlight'
 import { i18next } from '../../shared/i18n'
-import { dataUrl, decodeEntities, destination, imageMime, MAX_IMAGE, normalizeLabel, resolveImage, resolveLink, unescapeMd } from './diffUtil'
+import { linkHref, linkRefs as treeRefs, RAW, wikiLinks } from '../../shared/mdLinks'
+import { parseWiki } from '../../shared/url'
+import { dataUrl, decodeEntities, imageMime, MAX_IMAGE, resolveImage, resolveLink, unescapeMd } from './diffUtil'
+import { resolveHref, type Href } from './links'
+import { useVault } from './store'
 
 // 当前正文属于哪个库的哪篇笔记：图片按笔记目录解析、经现有 readBytes（带库标识校验）读取
 type Note = { vault: string; path: string }
@@ -170,7 +174,19 @@ export function forgetFiles(root: string, changed: string[]) {
 if (typeof window !== 'undefined') {
   window.synote.onVaultChanged(({ root, changed }) => forgetFiles(root, changed))
   window.synote.onIndexChanged(({ root, paths }) => forgetFiles(root, paths))
+  // 笔记增删改变 [[名字]] 指向哪篇：重建（不动图片代次，免得图片重绘闪烁）
+  useVault.subscribe((st, prev) => st.vault?.entries !== prev.vault?.entries && views.forEach((v) => v.dispatch({ effects: refresh.of(null) })))
 }
+
+// 双链目标不存在（ADR 0001 的相对链接、[[名字]] 都算）：显示为失效链接。附件另有缺失占位，外链不查
+function broken(state: EditorState, h: Href): boolean {
+  const info = state.facet(note)
+  if (!info) return false
+  const t = resolveHref(h, info.path)
+  if (!t) return 'wiki' in h
+  return !t.path.startsWith('attachments/') && isPresent(info.vault, t.path) === false
+}
+const linkClass = (state: EditorState, h: Href) => (broken(state, h) ? 'cm-lp-link cm-lp-broken' : 'cm-lp-link')
 
 // 指向库内附件（attachments/ 下）的普通链接，目标已知不存在时的占位
 class MissingWidget extends WidgetType {
@@ -256,35 +272,26 @@ class EntityWidget extends WidgetType {
 
 // 跨行链接整段替换成它的文字
 class LinkText extends WidgetType {
-  constructor(readonly text: string) {
+  constructor(
+    readonly text: string,
+    readonly cls: string,
+  ) {
     super()
   }
   eq(o: LinkText) {
-    return o.text === this.text
+    return o.text === this.text && o.cls === this.cls
   }
   toDOM() {
     const el = document.createElement('span')
-    el.className = 'cm-lp-link'
+    el.className = this.cls
     el.textContent = this.text
     return el
   }
 }
 
-// 引用定义 `[ref]: 地址`：标签按 normalizeLabel 归一，地址存原文（用时再经 destination 解码）
-export function linkRefs(state: EditorState): Map<string, string> {
-  const refs = new Map<string, string>()
-  syntaxTree(state).iterate({
-    enter(n) {
-      if (n.name !== 'LinkReference') return CONTAINERS.has(n.name)
-      const label = n.node.getChild('LinkLabel')
-      const url = n.node.getChild('URL')
-      const key = label && normalizeLabel(sourceText(state, label.from + 1, label.to - 1)) // 标签内容，不含外层方括号
-      if (key && url && !refs.has(key)) refs.set(key, state.sliceDoc(url.from, url.to)) // 重复定义以第一个为准
-      return false
-    },
-  })
-  return refs
-}
+// 引用定义 `[ref]: 地址`（识别规则在 shared/mdLinks，和索引共用）；跨行标签按 sourceText 去掉续行的引用标记
+const source = (state: EditorState) => ({ text: (a: number, b: number) => state.sliceDoc(a, b), label: (a: number, b: number) => sourceText(state, a, b) })
+export const linkRefs = (state: EditorState): Map<string, string> => treeRefs(syntaxTree(state), source(state))
 
 // 一行上各层引用标记 `>`（连同其后一个空格）的位置。按语法树确定：取这一行末尾处节点的 Blockquote / ListItem 祖先，
 // 由外到内逐层定位——容器从这一行开始时，`>` 就在 Blockquote 的起点、列表标记在 ListMark；续行时跳过缩进再找 `>`。
@@ -342,16 +349,7 @@ export const plainText = (state: EditorState, from: number, to: number) => unesc
 function linkParts(state: EditorState, n: SyntaxNode, refs: () => Map<string, string>): { text: string; target: string | null } | null {
   const marks = n.getChildren('LinkMark')
   if (marks.length < 2) return null
-  const text = plainText(state, marks[0].to, marks[1].from)
-  const url = n.getChild('URL')
-  if (url) return { text, target: destination(state.sliceDoc(url.from, url.to)) }
-  if (marks.length > 2) return { text, target: '' } // `[文]()`：空地址
-  const label = n.getChild('LinkLabel')
-  // 标签匹配用源码（不反转义），显示文字另用 plainText
-  const key = normalizeLabel(label && label.to - label.from > 2 ? sourceText(state, label.from + 1, label.to - 1) : sourceText(state, marks[0].to, marks[1].from))
-  // `[^1]` 是脚注写法（MVP 不支持脚注），不当成引用链接，保持源码
-  const target = key.startsWith('^') ? undefined : refs().get(key)
-  return { text, target: target === undefined ? null : destination(target) }
+  return { text: plainText(state, marks[0].to, marks[1].from), target: linkHref(n, refs, source(state)) }
 }
 
 function imageWidget(state: EditorState, text: string, target: string): ImageWidget {
@@ -470,11 +468,6 @@ function tableWidget(state: EditorState, n: SyntaxNode): TableWidget {
   return new TableWidget(state.sliceDoc(start, n.to), () => tableCellsOf(state, n), quoted, indent, markers)
 }
 
-// 引用定义所在的块级容器（linkRefs 只往这些节点里走）
-const CONTAINERS = new Set(['Document', 'Blockquote', 'BulletList', 'OrderedList', 'ListItem'])
-// 内容不按 Markdown 渲染的节点：里面的 `[..](..)` 不是链接
-const RAW = new Set(['FencedCode', 'CodeBlock', 'InlineCode', 'HTMLBlock', 'HTMLTag', 'CommentBlock', 'Comment', 'ProcessingInstructionBlock', 'LinkReference'])
-
 // 跨行替换必须由 StateField 提供，ViewPlugin 不能替换换行。这里出两类：
 // - 表格：块级替换按整行，引用、列表里的表格连同行首的 `> ` / 缩进一起替换
 // - 跨行的链接 / 图片：整段替换成文字 / 图片（行内插件跳过它们和这些范围里的标记，不会叠加装饰）
@@ -495,7 +488,7 @@ export function buildBlocks(state: EditorState, refs: Map<string, string> = link
       if (name === 'Link' || name === 'Image') {
         const parts = touches(state, n.from, n.to) ? null : linkParts(state, n.node, () => refs)
         if (parts && parts.target !== null) {
-          const widget = name === 'Image' ? imageWidget(state, parts.text, parts.target) : (missingWidget(state, parts.target) ?? new LinkText(parts.text))
+          const widget = name === 'Image' ? imageWidget(state, parts.text, parts.target) : (missingWidget(state, parts.target) ?? new LinkText(parts.text, linkClass(state, { href: parts.target })))
           out.push(Decoration.replace({ widget }).range(n.from, n.to))
         }
         return false
@@ -662,7 +655,7 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
           // [名字](路径)、[名字][ref] → 只显示名字
           const marks = n.node.getChildren('LinkMark')
           hide(marks[0].from, marks[0].to)
-          if (marks[0].to < marks[1].from) out.push(mark('cm-lp-link').range(marks[0].to, marks[1].from))
+          if (marks[0].to < marks[1].from) out.push(mark(linkClass(state, { href: parts.target })).range(marks[0].to, marks[1].from))
           hide(marks[1].from, n.to)
           return
         }
@@ -677,7 +670,35 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
       if (markName && !active()) for (const m of n.node.getChildren(markName)) hide(m.from, m.to)
     },
   })
+
+  // [[目标|别名]]：lezer 不认这种语法，按行扫（跳过代码等原样节点）；只显示别名或目标，⌘ 点击跳转同标准链接
+  for (let i = doc.lineAt(from).number; i <= doc.lineAt(to).number; i++) {
+    const l = doc.line(i)
+    if (!l.text.includes('[[') || touches(state, l.from, l.to)) continue
+    for (const { from: a, to: b, inner } of wikiLinks(syntaxTree(state), l.text, l.from)) {
+      if (!parseWiki(inner) || inTable(a, b)) continue
+      const bar = inner.indexOf('|')
+      const textFrom = bar >= 0 && inner.slice(bar + 1).trim() ? a + 2 + bar + 1 : a + 2 // 别名为空时显示原文
+      hide(a, textFrom)
+      out.push(mark(linkClass(state, { wiki: inner })).range(textFrom, b - 2))
+      hide(b - 2, b)
+    }
+  }
   return Decoration.set(out, true)
+}
+
+// pos 处的双链（⌘ 点击跳转用）：标准链接（含引用式）按语法树找，[[...]] 按行扫；不是链接时为 null
+export function linkAt(state: EditorState, pos: number): Href | null {
+  for (const side of [1, -1] as const)
+    for (let n: SyntaxNode | null = syntaxTree(state).resolveInner(pos, side); n; n = n.parent) {
+      if (n.name !== 'Link') continue
+      const parts = linkParts(state, n, () => linkRefs(state))
+      if (parts?.target) return { href: parts.target }
+      break // 没有定义的 `[文]`：可能是 [[...]] 的里层，下面按行再找
+    }
+  const l = state.doc.lineAt(pos)
+  const w = wikiLinks(syntaxTree(state), l.text, l.from).find((w) => pos >= w.from && pos <= w.to)
+  return w ? { wiki: w.inner } : null
 }
 
 const inline = ViewPlugin.fromClass(
@@ -755,6 +776,7 @@ const theme = EditorView.theme({
   '.cm-lp-bullet': { color: 'var(--fg-muted)', display: 'inline-block', width: '1ch' },
   '.cm-lp-task': { margin: '0 4px 0 0', verticalAlign: 'middle', cursor: 'pointer', accentColor: 'var(--accent)' },
   '.cm-lp-link': { color: 'var(--accent)', textDecoration: 'underline' },
+  '.cm-lp-broken': { color: 'var(--fg-muted)', textDecorationStyle: 'dashed' },
   '.cm-lp-hr': { display: 'inline-block', width: '100%', borderTop: '1px solid var(--border)', verticalAlign: 'middle' },
   '.cm-lp-image img': { maxWidth: '100%', verticalAlign: 'bottom' },
   '.cm-lp-image-missing': { color: 'var(--fg-muted)', border: '1px dashed var(--border)', borderRadius: '3px', padding: '0 4px' },

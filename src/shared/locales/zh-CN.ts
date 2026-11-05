@@ -43,5 +43,8 @@ export const zhCN = {
     attachmentLarge: '{{path}} 超过 50 MiB，push 到 GitHub 时会收到警告',
     attachmentHuge: '{{path}} 超过 100 MiB 且没有走 LFS，push 到 GitHub 会被拒绝',
     imageTooLarge: '图片过大，不显示缩略图',
+    noteMissing: '笔记不存在：{{path}}',
+    backlinks: '反链',
+    noBacklinks: '没有笔记链接到这里',
   },
 } as const
