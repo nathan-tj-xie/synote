@@ -177,6 +177,22 @@ class ImageWidget extends WidgetType {
   }
 }
 
+// HTML 实体（`&amp;`、`&#35;`）显示成它代表的字符；交给浏览器解码，先校验确实只是一个实体
+class EntityWidget extends WidgetType {
+  constructor(readonly entity: string) {
+    super()
+  }
+  eq(o: EntityWidget) {
+    return o.entity === this.entity
+  }
+  toDOM() {
+    const el = document.createElement('span')
+    if (/^&(#\d{1,7}|#x[\da-f]{1,6}|[a-z][a-z\d]{0,31});$/i.test(this.entity)) el.innerHTML = this.entity
+    else el.textContent = this.entity
+    return el
+  }
+}
+
 // 跨行链接整段替换成它的文字
 class LinkText extends WidgetType {
   constructor(readonly text: string) {
@@ -212,22 +228,47 @@ export function linkRefs(state: EditorState): Map<string, string> {
 
 // 链接 / 图片的文字（[ 与 ] 之间）和地址：内联写法取 URL 子节点；引用写法（`[文][ref]`、`[文][]`、`[文]`）按标签查定义，
 // 查不到时地址为 null（那就不是链接，显示源码）
+// [from, to] 里的显示文字：跨行时去掉续行行首的容器标记（引用的 `>`）和缩进，换行折成一个空格
+export function plainText(state: EditorState, from: number, to: number): string {
+  const quotes: number[] = []
+  syntaxTree(state).iterate({ from, to, enter: (n) => void (n.name === 'QuoteMark' && quotes.push(n.from)) })
+  const doc = state.doc
+  const parts: string[] = []
+  for (let pos = from; pos <= to; ) {
+    const line = doc.lineAt(pos)
+    let start = pos
+    if (pos !== from)
+      for (;;) {
+        while (start < line.to && /\s/.test(doc.sliceString(start, start + 1))) start++
+        if (!quotes.includes(start)) break
+        start++ // 跳过 `>`，后面的空格由下一轮跳过
+      }
+    parts.push(doc.sliceString(start, Math.min(line.to, to)))
+    pos = line.to + 1
+  }
+  return unescape(parts.join(' ').replace(/\s+/g, ' ').trim())
+}
+
+// 反斜杠转义（`\]`、`\|` 等 ASCII 标点）显示成字符本身
+const unescape = (s: string) => s.replace(/\\([!-/:-@[-`{-~])/g, '$1')
+
 function linkParts(state: EditorState, n: SyntaxNode, refs: () => Map<string, string>): { text: string; target: string | null } | null {
   const marks = n.getChildren('LinkMark')
   if (marks.length < 2) return null
-  const text = state.sliceDoc(marks[0].to, marks[1].from)
+  const text = plainText(state, marks[0].to, marks[1].from)
   const url = n.getChild('URL')
   if (url) return { text, target: state.sliceDoc(url.from, url.to) }
   if (marks.length > 2) return { text, target: '' } // `[文]()`：空地址
   const label = n.getChild('LinkLabel')
-  const key = normLabel(label && label.to - label.from > 2 ? state.sliceDoc(label.from, label.to) : text)
-  return { text, target: refs().get(key) ?? null }
+  const key = normLabel(label && label.to - label.from > 2 ? plainText(state, label.from, label.to) : text)
+  // `[^1]` 是脚注写法（MVP 不支持脚注），不当成引用链接，保持源码
+  return { text, target: key.startsWith('^') ? null : (refs().get(key) ?? null) }
 }
 
 function imageWidget(state: EditorState, text: string, target: string): ImageWidget {
   const info = state.facet(note)
   const path = info && target ? resolveImage(target, info.path) : null
-  return new ImageWidget(info?.vault ?? null, path, target, text.replace(/\s+/g, ' '), imageGen)
+  return new ImageWidget(info?.vault ?? null, path, target, text, imageGen)
 }
 
 // 表格：整块替换成只读的 HTML 表格；点一下把光标放进表格，切回源码编辑
@@ -273,7 +314,7 @@ class TableWidget extends WidgetType {
 }
 
 function tableWidget(state: EditorState, n: SyntaxNode): TableWidget {
-  const text = (a: number, b: number) => state.sliceDoc(a, b).trim()
+  const text = (a: number, b: number) => unescape(state.sliceDoc(a, b).trim())
   const rows: string[][] = []
   let align: (string | null)[] = []
   for (let c = n.firstChild; c; c = c.nextSibling) {
@@ -318,7 +359,7 @@ export function buildBlocks(state: EditorState, refs: Map<string, string> = link
       if (name === 'Link' || name === 'Image') {
         const parts = touches(state, n.from, n.to) ? null : linkParts(state, n.node, () => refs)
         if (parts && parts.target !== null) {
-          const widget = name === 'Image' ? imageWidget(state, parts.text, parts.target) : new LinkText(parts.text.replace(/\s+/g, ' '))
+          const widget = name === 'Image' ? imageWidget(state, parts.text, parts.target) : new LinkText(parts.text)
           out.push(Decoration.replace({ widget }).range(n.from, n.to))
         }
         return false
@@ -393,7 +434,11 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
         out.push(line(`cm-lp-h${h[2]}`).range(doc.lineAt(n.from).from))
         if (active()) return false
         for (const m of n.node.getChildren('HeaderMark')) {
-          if (h[1] === 'Setext') hide(m.from, m.to)
+          if (h[1] === 'Setext') {
+            // 引用里的 Setext 下划线行，lezer 不给行首的 `>` 出 QuoteMark 节点：连同它一起藏
+            const start = doc.lineAt(m.from).from
+            hide(/^[\s>]*$/.test(doc.sliceString(start, m.from)) ? start : m.from, m.to)
+          }
           else if (m.from === doc.lineAt(n.from).from) hide(m.from, spaceAfter(m.to))
           else hide(doc.sliceString(m.from - 1, m.from) === ' ' ? m.from - 1 : m.from, m.to) // 结尾的 `##`
         }
@@ -436,6 +481,32 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
         case 'InlineCode':
           out.push(mark('cm-lp-code').range(n.from, n.to))
           break
+        case 'CodeBlock': // 缩进式代码块：没有围栏可藏，只加代码块底色
+          lines(n.from, n.to, (a, b) => `cm-lp-codeblock${a ? ' cm-lp-codeblock-first' : ''}${b ? ' cm-lp-codeblock-last' : ''}`)
+          return false
+        case 'Autolink': {
+          // <https://…>、<user@…> → 只显示地址
+          const marks = n.node.getChildren('LinkMark')
+          if (marks.length === 2) out.push(mark('cm-lp-link').range(marks[0].to, marks[1].from))
+          if (!active() && marks.length === 2) {
+            hide(marks[0].from, marks[0].to)
+            hide(marks[1].from, marks[1].to)
+          }
+          return false
+        }
+        case 'URL':
+          // GFM 裸链接（www.…、https://…、邮箱）：源码就是显示结果，只加链接样式；链接、图片、引用定义里的 URL 不在这里处理
+          if (n.node.parent && !/^(Link|Image|Autolink|LinkReference)$/.test(n.node.parent.name)) out.push(mark('cm-lp-link').range(n.from, n.to))
+          return
+        case 'Escape': // `\*` → `*`
+          if (!active()) hide(n.from, n.from + 1)
+          return
+        case 'HardBreak': // 行尾 `\` 硬换行：藏掉反斜杠；两个空格的写法本来就看不见
+          if (!active() && doc.sliceString(n.from, n.from + 1) === '\\') hide(n.from, n.from + 1)
+          return
+        case 'Entity':
+          if (!active()) replace(n.from, n.to, Decoration.replace({ widget: new EntityWidget(doc.sliceString(n.from, n.to)) }))
+          return
         case 'Link': {
           if (!oneLine(n.from, n.to)) return false // 跨行的由 blocks 整段处理
           const parts = active() ? null : linkParts(state, n.node, getRefs)

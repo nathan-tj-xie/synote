@@ -141,3 +141,76 @@ describe('各种容器里的跨行链接与图片', () => {
   })
 })
 
+
+// 节点覆盖表（@lezer/markdown + markdownLanguage 的 GFM 等扩展）：光标在别处时，范围内的类型只显示渲染结果，
+// 范围外的保持源码。每行：[类型, 正文, 行内插件替换掉的片段, blocks 替换掉的片段]
+const coverage: [string, string, string[], string[]][] = [
+  ['ATX 标题', '# 题 #', ['# ', ' #'], []],
+  ['Setext 标题', '题\n===', ['==='], []],
+  ['强调 / 加粗', '*a* **b** _c_', ['*', '*', '**', '**', '_', '_'], []],
+  ['删除线', '~~a~~', ['~~', '~~'], []],
+  ['行内代码', '`a`', ['`', '`'], []],
+  ['链接', '[a](b.md "t")', ['[', '](b.md "t")'], []],
+  ['引用式链接', '[a][r]\n\n[r]: b.md', ['[', '][r]'], []],
+  ['图片', '![a](b.png)', ['![a](b.png)'], []],
+  ['自动链接', '<https://x.com> <u@x.com>', ['<', '>', '<', '>'], []],
+  ['GFM 裸链接', 'www.a.com https://b.com', [], []],
+  ['反斜杠转义', '\\*a\\*', ['\\', '\\'], []],
+  ['反斜杠硬换行', 'a\\\nb', ['\\'], []],
+  ['空格硬换行', 'a  \nb', [], []],
+  ['HTML 实体', '&amp; &#35;', ['&amp;', '&#35;'], []],
+  ['无序列表', '- a\n* b', ['-', '*'], []],
+  ['有序列表（编号保持原文）', '1. a', [], []],
+  ['任务列表', '- [ ] a\n- [x] b', ['- ', '[ ]', '- ', '[x]'], []],
+  ['引用', '> a', ['> '], []],
+  ['分隔线', '***', ['***'], []],
+  ['围栏代码块', '```js\nx\n```', ['```js', '```'], []],
+  ['缩进代码块（只加底色）', '    x', [], []],
+  ['表格', '| a |\n|---|\n| 1 |', [], ['| a |\n|---|\n| 1 |']],
+  // 范围外，保持源码
+  ['HTML 块', '<div>\n*a*\n</div>', [], []],
+  ['行内 HTML / 注释 / 处理指令', '<b>t</b> <!-- c --> <?p?>', [], []],
+  ['Emoji 短码', ':smile:', [], []],
+  ['上标 / 下标', '^a^ ~b~', [], []],
+  ['脚注', 'x[^1]\n\n[^1]: 注', [], []],
+  ['引用定义行', '[r]: b.md', [], []],
+  // 容器里跨行
+  ['引用里跨行的强调', '> *a\n> b*', ['> ', '*', '> ', '*'], []],
+  ['列表里跨行的删除线 / 行内代码', '- ~~a\n  b~~ `c\n  d`', ['-', '~~', '~~', '`', '`'], []],
+  ['引用里跨行的链接', '> [跨\n> 行](a.md)', ['> '], ['[跨\n> 行](a.md)']],
+  ['列表里跨行的图片', '- ![替\n  代](a.png)', ['-'], ['![替\n  代](a.png)']],
+  ['引用里的 Setext 标题', '> 题\n> ===', ['> ', '> ==='], []],
+  ['任务项里跨行的引用式链接', '- [ ] [跨\n  行][r]\n\n[r]: a.md', ['- ', '[ ]'], ['[跨\n  行][r]']],
+]
+
+describe('节点覆盖表', () => {
+  for (const [name, text, inline, blocks] of coverage)
+    it(name, () => {
+      const s = state(1, `首行\n\n${text}`)
+      const from = s.doc.line(3).from
+      expect(replaced(s, buildInline(s, from, s.doc.length))).toEqual(inline)
+      expect(replaced(s, buildBlocks(s))).toEqual(blocks)
+    })
+
+  // 被替换的范围换成什么：跨行链接 / 图片的文字去掉 `>` 和缩进，自动链接、裸链接加链接样式
+  const widgets = (text: string) => {
+    const s = state(1, `首行\n\n${text}`)
+    const out: string[] = []
+    for (const set of [buildInline(s, 0, s.doc.length), buildBlocks(s)])
+      set.between(0, s.doc.length, (a, b, d) => {
+        const w = d.spec.widget as { text?: string; alt?: string; entity?: string } | undefined
+        if (w) out.push(w.text ?? w.alt ?? w.entity ?? '')
+        else if (d.spec.class === 'cm-lp-link') out.push(`link:${s.sliceDoc(a, b)}`)
+      })
+    return out.filter(Boolean)
+  }
+  it('跨行链接的文字去掉引用标记和续行缩进', () => {
+    expect(widgets('> [跨\n> 行](a.md)')).toEqual(['跨 行'])
+    expect(widgets('> > [深\n> > 层](a.md)')).toEqual(['深 层'])
+    expect(widgets('- [跨\n  行 \\]](a.md)')).toEqual(['跨 行 ]'])
+    expect(widgets('> ![替\n> 代](a.png)')).toEqual(['替 代'])
+  })
+  it('自动链接只显示地址、裸链接加链接样式、实体保留原文交给浏览器解码', () => {
+    expect(widgets('<https://x.com> www.a.com &amp;')).toEqual(['link:https://x.com', 'link:www.a.com', '&amp;'])
+  })
+})

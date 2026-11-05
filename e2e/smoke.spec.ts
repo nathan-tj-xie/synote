@@ -839,6 +839,11 @@ const allSyntax = [
   '',
   '[图]: ../attachments/a.png',
   '',
+  '自动链接 <https://example.com> 与 &amp; 和 \\*转义',
+  '',
+  '> [引用里',
+  '> 跨行](其他.md)',
+  '',
   '- 圆点',
   '  1. 有序',
   '- [ ] 待办',
@@ -888,7 +893,8 @@ test('live preview renders every syntax and never changes source bytes', async (
   // 光标在第一行：标题源码可见，其余渲染
   await expect(editor).toContainText('# 一级标题')
   await expect(win.locator('.cm-lp-h2')).toHaveText('二级 斜 粗 删 码')
-  await expect(win.locator('.cm-lp-link')).toHaveText(['名字', '链 接', '引用链接'])
+  await expect(win.locator('.cm-lp-link')).toHaveText(['名字', '链 接', '引用链接', 'https://example.com', '引用里 跨行'])
+  await expect(editor).toContainText('自动链接 https://example.com 与 & 和 *转义')
   await expect(editor).not.toContainText('其他.md')
   // 内联写法和引用式写法的图片都按笔记目录解析、内联显示
   await expect(win.locator('.cm-lp-image img')).toHaveCount(2)
@@ -897,7 +903,7 @@ test('live preview renders every syntax and never changes source bytes', async (
   await expect(win.locator('.cm-lp-bullet').first()).toHaveText('•') // 行内装饰只建视口，后面的列表不一定已渲染
   await expect(win.locator('.cm-lp-task')).toHaveCount(2)
   await expect(win.locator('.cm-lp-task').nth(1)).toBeChecked()
-  await expect(win.locator('.cm-line.cm-lp-quote')).toHaveText('引用 粗')
+  await expect(win.locator('.cm-line.cm-lp-quote')).toHaveText(['引用里 跨行', '引用 粗']) // 跨行链接整段替换后两行显示为一行
   await expect(win.locator('.cm-lp-hr')).toHaveCount(1)
   await expect(win.locator('.cm-lp-fence')).toHaveText('ts')
   await expect(win.locator('.cm-lp-table').first().locator('th')).toHaveText(['左', '中', '右'])
