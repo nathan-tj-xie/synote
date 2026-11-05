@@ -1,4 +1,4 @@
-// 颜色只在这里维护一份，生成 CSS 变量（ADR 0005），主进程的窗口背景色也取这里；组件中不允许硬编码颜色
+// 颜色（和代码字体）只在这里维护一份，生成 CSS 变量（ADR 0005），主进程的窗口背景色也取这里；组件中不允许硬编码颜色
 export const tokens = {
   bg: '#1e1f22',
   bgRaised: '#26272b',
@@ -13,6 +13,8 @@ export const tokens = {
   // diff 的增删底色（带透明度，叠在 bg 上）
   diffInserted: '#3fb95026',
   diffRemoved: '#ef5b5b26',
+  // 代码字体（--font-mono）：CM6 的代码块、行内代码用它；Monaco diff 整个编辑器只有一种字体，沿用与 CM6 正文共用的 body 字体（ADR 0003）
+  fontMono: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
   // 实时预览：代码块 / 行内代码底色，代码块语法高亮
   codeBg: '#2a2b30',
   synKeyword: '#c792ea',

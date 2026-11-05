@@ -300,10 +300,10 @@ function imageWidget(state: EditorState, text: string, target: string): ImageWid
 
 // 表格：整块替换成只读的 HTML 表格；点一下把光标放进表格，切回源码编辑
 class TableWidget extends WidgetType {
+  private cells: { rows: string[][]; align: (string | null)[] } | null = null
   constructor(
     readonly source: string,
-    readonly rows: string[][],
-    readonly align: (string | null)[],
+    private readonly parse: () => { rows: string[][]; align: (string | null)[] }, // 单元格用到时才切分：按源码判等，没变的表格不再算
     readonly quoted: boolean, // 在引用里：整行（含 `> `）都被替换，引用的左边线由表格自己画
     readonly indent: number, // 在列表里：表格前的缩进列数
     readonly markers: string[], // 表格就在列表项首行时，被一起替换掉的列表标记（`•`、`7.`），由表格自己画出来
@@ -312,6 +312,12 @@ class TableWidget extends WidgetType {
   }
   eq(o: TableWidget) {
     return o.source === this.source
+  }
+  get rows() {
+    return (this.cells ??= this.parse()).rows
+  }
+  get align() {
+    return (this.cells ??= this.parse()).align
   }
   get estimatedHeight() {
     return this.rows.length * 30 + 8
@@ -347,12 +353,28 @@ class TableWidget extends WidgetType {
   }
 }
 
-function tableWidget(state: EditorState, n: SyntaxNode): TableWidget {
+// 一行表格的各个单元格：按行内的 `|`（TableDelimiter 节点，转义的 `\|` 不算）切分。空单元格没有 TableCell 节点，
+// 只收集 TableCell 会丢掉它们、让后面的内容错列。行首、行尾的 `|` 可省略
+export function tableCells(state: EditorState, row: SyntaxNode): string[] {
+  const pipes = row.getChildren('TableDelimiter')
+  const segs: [number, number][] = []
+  let start = row.from
+  for (const p of pipes) {
+    segs.push([start, p.from])
+    start = p.to
+  }
+  segs.push([start, row.to])
+  if (pipes[0]?.from === row.from) segs.shift()
+  if (pipes.at(-1)?.to === row.to) segs.pop()
+  return segs.map(([a, b]) => unescapeMd(state.sliceDoc(a, b).trim()))
+}
+
+function tableCellsOf(state: EditorState, n: SyntaxNode): { rows: string[][]; align: (string | null)[] } {
   const text = (a: number, b: number) => unescapeMd(state.sliceDoc(a, b).trim())
   const rows: string[][] = []
   let align: (string | null)[] = []
   for (let c = n.firstChild; c; c = c.nextSibling) {
-    if (c.name === 'TableHeader' || c.name === 'TableRow') rows.push(c.getChildren('TableCell').map((cell) => text(cell.from, cell.to)))
+    if (c.name === 'TableHeader' || c.name === 'TableRow') rows.push(tableCells(state, c))
     else if (c.name === 'TableDelimiter' && c.from !== c.to && /-/.test(state.sliceDoc(c.from, c.to)))
       align = text(c.from, c.to)
         .replace(/^\||\|$/g, '')
@@ -362,6 +384,14 @@ function tableWidget(state: EditorState, n: SyntaxNode): TableWidget {
           return s.startsWith(':') && s.endsWith(':') ? 'center' : s.endsWith(':') ? 'right' : s.startsWith(':') ? 'left' : null
         })
   }
+  // 每行按表头列数补齐 / 截断（GFM：多出的单元格忽略，缺的补空）
+  const cols = rows[0]?.length ?? 0
+  for (const r of rows) r.splice(cols, Infinity, ...Array<string>(Math.max(0, cols - r.length)).fill(''))
+  align = align.slice(0, cols)
+  return { rows, align }
+}
+
+function tableWidget(state: EditorState, n: SyntaxNode): TableWidget {
   let quoted = false
   const start = state.doc.lineAt(n.from).from
   // 在这一行开始的列表项（`- | a |`、`7. | a |`、`- 1. | a |`）：标记在表格替换的整行范围里，交给 widget 画
@@ -373,7 +403,7 @@ function tableWidget(state: EditorState, n: SyntaxNode): TableWidget {
   }
   const markers = marks.map((m) => (m.parent?.parent?.name === 'BulletList' ? '•' : state.sliceDoc(m.from, m.to)))
   const indent = quoted ? 0 : (marks[0]?.from ?? n.from) - start
-  return new TableWidget(state.sliceDoc(start, n.to), rows, align, quoted, indent, markers)
+  return new TableWidget(state.sliceDoc(start, n.to), () => tableCellsOf(state, n), quoted, indent, markers)
 }
 
 // 引用定义所在的块级容器（linkRefs 只往这些节点里走）
@@ -643,7 +673,6 @@ const highlight = HighlightStyle.define([
 ])
 
 const theme = EditorView.theme({
-  '&': { '--font-mono': 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' },
   '.cm-lp-h1': { fontSize: '1.8em', lineHeight: '1.4' },
   '.cm-lp-h2': { fontSize: '1.45em', lineHeight: '1.4' },
   '.cm-lp-h3': { fontSize: '1.2em' },

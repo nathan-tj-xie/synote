@@ -329,7 +329,7 @@ describe('容器嵌套的生成式测试', () => {
   const blocks = [
     ['段落', ['p 文字 **粗**', '续行 *斜*']],
     ['围栏代码块', ['```js', 'a > b', '```']],
-    ['表格', ['| h |', '|---|', '| c |']],
+    ['表格', ['| h | i | j |', '|---|:-:|--:|', '|  | c | |']],
     ['Setext 标题', ['题', '===']],
     ['ATX 标题', ['## 题']],
   ] as const
@@ -367,6 +367,9 @@ describe('容器嵌套的生成式测试', () => {
         const widgets: string[][] = []
         buildBlocks(s).between(0, s.doc.length, (_a, _b, d) => void widgets.push((d.spec.widget as { markers: string[] }).markers))
         expect(widgets).toEqual([stack.filter((c) => c.first !== '> ').map((c) => (c.first === '- ' ? '•' : '1.'))])
+        const rows: string[][][] = []
+        buildBlocks(s).between(0, s.doc.length, (_a, _b, d) => void rows.push((d.spec.widget as { rows: string[][] }).rows))
+        expect(rows).toEqual([[['h', 'i', 'j'], ['', 'c', '']]]) // 空单元格不丢、不错列
       }
       // 光标在块的第一行：这一行原样显示源码
       const t = state(3, src)
@@ -393,5 +396,24 @@ describe('列表项以表格开头', () => {
     expect(markers('> - | a |\n>   |---|\n>   | b |')).toEqual([['•']])
   })
   it('表格在列表项续行上时不画标记', () => expect(markers('- 项\n\n  | a |\n  |---|\n  | b |')).toEqual([[]]))
+})
+
+// 表格空单元格（审查第 9 轮）：按 `|` 切分，按表头列数补齐 / 截断
+describe('表格单元格', () => {
+  const table = (text: string) => {
+    const s = state(1, `首行\n\n${text}`)
+    const out: { rows: string[][]; align: (string | null)[] }[] = []
+    buildBlocks(s).between(0, s.doc.length, (_a, _b, d) => void out.push(d.spec.widget as { rows: string[][]; align: (string | null)[] }))
+    return out.map((w) => ({ rows: w.rows, align: w.align }))
+  }
+  it('中间空', () => expect(table('| a | b | c |\n|---|---|---|\n| | x | |')[0].rows).toEqual([['a', 'b', 'c'], ['', 'x', '']]))
+  it('首尾空', () => expect(table('a | b | c\n--|---|--\n| | x | |')[0].rows).toEqual([['a', 'b', 'c'], ['', 'x', '']]))
+  // GFM：行首、行尾的 | 只是可省略的边界，不是空单元格
+  it('省略行首行尾的 |', () => expect(table('a | b | c\n--|---|--\n | x |\nx | y')[0].rows).toEqual([['a', 'b', 'c'], ['x', '', ''], ['x', 'y', '']]))
+  it('空表头', () => expect(table('| | b |\n|---|---|\n| 1 | 2 |')[0].rows).toEqual([['', 'b'], ['1', '2']]))
+  it('行比表头少列补空、多列截断', () =>
+    expect(table('| a | b |\n|---|---|\n| 1 |\n| 1 | 2 | 3 |')[0].rows).toEqual([['a', 'b'], ['1', ''], ['1', '2']]))
+  it('转义的 | 不切分', () => expect(table('| a | b |\n|---|---|\n| x \\| y | z |')[0].rows).toEqual([['a', 'b'], ['x | y', 'z']]))
+  it('对齐按列应用', () => expect(table('| a | b | c |\n|:--|:-:|--:|\n| 1 | 2 | 3 |')[0].align).toEqual(['left', 'center', 'right']))
 })
 
