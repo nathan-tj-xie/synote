@@ -7,7 +7,7 @@ import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, typ
 import type { SyntaxNode } from '@lezer/common'
 import { tags as t } from '@lezer/highlight'
 import { i18next } from '../../shared/i18n'
-import { dataUrl, destination, imageMime, MAX_IMAGE, normalizeLabel, resolveImage, unescapeMd } from './diffUtil'
+import { dataUrl, decodeEntities, destination, imageMime, MAX_IMAGE, normalizeLabel, resolveImage, unescapeMd } from './diffUtil'
 
 // 当前正文属于哪个库的哪篇笔记：图片按笔记目录解析、经现有 readBytes（带库标识校验）读取
 type Note = { vault: string; path: string }
@@ -177,7 +177,7 @@ class ImageWidget extends WidgetType {
   }
 }
 
-// HTML 实体（`&amp;`、`&#35;`）显示成它代表的字符；交给浏览器解码，先校验确实只是一个实体
+// HTML 实体（`&amp;`、`&#35;`）显示成它代表的字符；识别和解码与链接目标共用 diffUtil.decodeEntities
 class EntityWidget extends WidgetType {
   constructor(readonly entity: string) {
     super()
@@ -187,8 +187,7 @@ class EntityWidget extends WidgetType {
   }
   toDOM() {
     const el = document.createElement('span')
-    if (/^&(#\d{1,7}|#x[\da-f]{1,6}|[a-z][a-z\d]{0,31});$/i.test(this.entity)) el.innerHTML = this.entity
-    else el.textContent = this.entity
+    el.textContent = decodeEntities(this.entity)
     return el
   }
 }
@@ -217,7 +216,7 @@ export function linkRefs(state: EditorState): Map<string, string> {
       if (n.name !== 'LinkReference') return CONTAINERS.has(n.name)
       const label = n.node.getChild('LinkLabel')
       const url = n.node.getChild('URL')
-      const key = label && normalizeLabel(sourceText(state, label.from, label.to))
+      const key = label && normalizeLabel(sourceText(state, label.from + 1, label.to - 1)) // 标签内容，不含外层方括号
       if (key && url && !refs.has(key)) refs.set(key, state.sliceDoc(url.from, url.to)) // 重复定义以第一个为准
       return false
     },
@@ -287,7 +286,7 @@ function linkParts(state: EditorState, n: SyntaxNode, refs: () => Map<string, st
   if (marks.length > 2) return { text, target: '' } // `[文]()`：空地址
   const label = n.getChild('LinkLabel')
   // 标签匹配用源码（不反转义），显示文字另用 plainText
-  const key = normalizeLabel(label && label.to - label.from > 2 ? sourceText(state, label.from, label.to) : sourceText(state, marks[0].to, marks[1].from))
+  const key = normalizeLabel(label && label.to - label.from > 2 ? sourceText(state, label.from + 1, label.to - 1) : sourceText(state, marks[0].to, marks[1].from))
   // `[^1]` 是脚注写法（MVP 不支持脚注），不当成引用链接，保持源码
   const target = key.startsWith('^') ? undefined : refs().get(key)
   return { text, target: target === undefined ? null : destination(target) }
@@ -307,6 +306,7 @@ class TableWidget extends WidgetType {
     readonly align: (string | null)[],
     readonly quoted: boolean, // 在引用里：整行（含 `> `）都被替换，引用的左边线由表格自己画
     readonly indent: number, // 在列表里：表格前的缩进列数
+    readonly markers: string[], // 表格就在列表项首行时，被一起替换掉的列表标记（`•`、`7.`），由表格自己画出来
   ) {
     super()
   }
@@ -320,6 +320,12 @@ class TableWidget extends WidgetType {
     const wrap = document.createElement('div')
     wrap.className = this.quoted ? 'cm-lp-table cm-lp-quote' : 'cm-lp-table'
     wrap.style.marginLeft = `${this.indent}ch`
+    if (this.markers.length) wrap.style.display = 'flex'
+    for (const m of this.markers) {
+      const el = wrap.appendChild(document.createElement('span'))
+      el.className = m === '•' ? 'cm-lp-bullet cm-lp-table-mark' : 'cm-lp-table-mark'
+      el.textContent = m
+    }
     const table = wrap.appendChild(document.createElement('table'))
     this.rows.forEach((cells, i) => {
       const tr = (i === 0 ? table.createTHead() : (table.tBodies[0] ?? table.createTBody())).insertRow()
@@ -357,9 +363,17 @@ function tableWidget(state: EditorState, n: SyntaxNode): TableWidget {
         })
   }
   let quoted = false
-  for (let p = n.parent; p; p = p.parent) quoted ||= p.name === 'Blockquote'
   const start = state.doc.lineAt(n.from).from
-  return new TableWidget(state.sliceDoc(start, n.to), rows, align, quoted, quoted ? 0 : n.from - start)
+  // 在这一行开始的列表项（`- | a |`、`7. | a |`、`- 1. | a |`）：标记在表格替换的整行范围里，交给 widget 画
+  const marks: SyntaxNode[] = []
+  for (let p = n.parent; p; p = p.parent) {
+    quoted ||= p.name === 'Blockquote'
+    const mark = p.name === 'ListItem' && p.from >= start ? p.getChild('ListMark') : null
+    if (mark) marks.unshift(mark)
+  }
+  const markers = marks.map((m) => (m.parent?.parent?.name === 'BulletList' ? '•' : state.sliceDoc(m.from, m.to)))
+  const indent = quoted ? 0 : (marks[0]?.from ?? n.from) - start
+  return new TableWidget(state.sliceDoc(start, n.to), rows, align, quoted, indent, markers)
 }
 
 // 引用定义所在的块级容器（linkRefs 只往这些节点里走）
@@ -648,6 +662,7 @@ const theme = EditorView.theme({
   '.cm-lp-image-missing': { color: 'var(--fg-muted)', border: '1px dashed var(--border)', borderRadius: '3px', padding: '0 4px' },
   '.cm-lp-table': { padding: '4px 0', overflowX: 'auto', cursor: 'text' },
   '.cm-lp-table table': { borderCollapse: 'collapse' },
+  '.cm-lp-table-mark': { flex: 'none', marginRight: '1ch', lineHeight: '2.2' },
   '.cm-lp-table th, .cm-lp-table td': { border: '1px solid var(--border)', padding: '4px 10px' },
   '.cm-lp-table th': { backgroundColor: 'var(--bg-raised)' },
 })

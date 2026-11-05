@@ -246,6 +246,12 @@ describe('目标解码与标签匹配', () => {
     const t = state(1, '首行\n\n[x][a*b]\n\n[a\\*b]: note.md')
     expect(replaced(t, buildInline(t, t.doc.line(3).from, t.doc.line(3).to))).toEqual([])
   })
+  it('标签末尾是转义的 ]：简写、折叠、图片都匹配定义', () => {
+    const s = state(1, '首行\n\n[a\\]] [a\\]][] ![a\\]]\n\n[a\\]]: b.png')
+    // 两个链接都只藏方括号，显示文字里的转义反斜杠另由 Escape 藏掉（显示为 `a]`）；图片整块替换
+    expect(replaced(s, buildInline(s, s.doc.line(3).from, s.doc.line(3).to)).sort()).toEqual(['[', ']', '[', '][]', '![a\\]]', '\\', '\\'].sort())
+    expect(srcs('![a\\]]\n\n[a\\]]: b.png')).toEqual(['b.png'])
+  })
   it('大小写、空白差异能匹配', () => {
     expect(srcs('![x][Foo  Bar]\n\n[foo bar]: a.png')).toEqual(['a.png'])
     expect(srcs('![x][ẞ]\n\n[ss]: b.png')).toEqual(['b.png']) // Unicode case fold：ẞ ≡ ss
@@ -356,6 +362,12 @@ describe('容器嵌套的生成式测试', () => {
       }
       shown += s.sliceDoc(pos)
       expect(shown.replace(/a > b/g, '')).not.toContain('>')
+      // 列表项首行就是表格：生成的所有容器都从这一行开始，首行上的列表标记都要由表格 widget 画出来（不被整行替换吞掉）
+      if (kind === '表格') {
+        const widgets: string[][] = []
+        buildBlocks(s).between(0, s.doc.length, (_a, _b, d) => void widgets.push((d.spec.widget as { markers: string[] }).markers))
+        expect(widgets).toEqual([stack.filter((c) => c.first !== '> ').map((c) => (c.first === '- ' ? '•' : '1.'))])
+      }
       // 光标在块的第一行：这一行原样显示源码
       const t = state(3, src)
       const hidden: string[] = []
@@ -365,3 +377,21 @@ describe('容器嵌套的生成式测试', () => {
     })
   }
 })
+
+// 列表项首行就是表格（审查第 8 轮）：列表标记在表格替换的整行里，由表格 widget 画出来
+describe('列表项以表格开头', () => {
+  const markers = (text: string) => {
+    const s = state(1, `首行\n\n${text}`)
+    const out: string[][] = []
+    buildBlocks(s).between(0, s.doc.length, (_a, _b, d) => void out.push((d.spec.widget as { markers: string[] }).markers))
+    return out
+  }
+  it('有序 / 无序 / 嵌套', () => {
+    expect(markers('7. | a |\n   |---|\n   | b |')).toEqual([['7.']])
+    expect(markers('- | a |\n  |---|\n  | b |')).toEqual([['•']])
+    expect(markers('- 1. | a |\n     |---|\n     | b |')).toEqual([['•', '1.']])
+    expect(markers('> - | a |\n>   |---|\n>   | b |')).toEqual([['•']])
+  })
+  it('表格在列表项续行上时不画标记', () => expect(markers('- 项\n\n  | a |\n  |---|\n  | b |')).toEqual([[]]))
+})
+

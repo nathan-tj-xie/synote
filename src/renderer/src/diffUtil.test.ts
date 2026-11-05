@@ -65,7 +65,8 @@ describe('destination / normalizeLabel', () => {
   })
   it('没有 DOM 时未知命名实体保留原文', () => expect(decodeEntities('&copy;')).toBe('&copy;'))
   it('标签：折叠空白、case fold、不反转义', () => {
-    expect(normalizeLabel('[ Foo \n Bar ]')).toBe(normalizeLabel('foo bar'))
+    expect(normalizeLabel(' Foo \n Bar ')).toBe(normalizeLabel('foo bar'))
+    expect(normalizeLabel('a\\]')).toBe('A\\]') // 不剥方括号：末尾的转义 ] 保留
     expect(normalizeLabel('ẞ')).toBe(normalizeLabel('ss'))
     expect(normalizeLabel('a\\*b')).not.toBe(normalizeLabel('a*b'))
   })

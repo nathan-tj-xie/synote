@@ -67,9 +67,9 @@ export function destination(raw: string): string {
   )
 }
 
-// 引用标签的匹配键（CommonMark）：去外层方括号，折叠空白，Unicode case fold；不反转义（`[a\*b]` 只匹配 `[a\*b]`）
-export const normalizeLabel = (s: string) =>
-  s.replace(/^\[|\]$/g, '').trim().replace(/\s+/g, ' ').toLowerCase().toUpperCase()
+// 引用标签的匹配键（CommonMark）：折叠空白，Unicode case fold；不反转义（`[a\*b]` 只匹配 `[a\*b]`）。
+// 传入的是标签内容，不含外层方括号（由调用方按语法树的 LinkLabel 边界取），所以末尾的转义 `\]` 不会被误删
+export const normalizeLabel = (s: string) => s.trim().replace(/\s+/g, ' ').toLowerCase().toUpperCase()
 
 // 图片引用的 src 解析成相对笔记库根的路径（ADR 0001 的相对链接）：按笔记所在目录解析，以 / 开头的按库根；
 // 外链、越出笔记库、不是图片时为 null。diff 悬停和实时预览共用
