@@ -77,6 +77,9 @@ export type OrphanAttachment = { path: string; tracked: boolean }
 // status 是该提交对它的改动（A / M / R / D…），time 为秒
 export type LogEntry = { hash: string; time: number; author: string; subject: string; path: string; status: string }
 
+// 一个路径的存在状态：missing 不存在（含越出笔记库）；present 存在；lfs 存在但内容是 LFS 指针、还没下载（S17）
+export type Presence = { state: 'missing' } | { state: 'present' } | { state: 'lfs'; pointer: LfsPointer }
+
 export type ItemMenuAction = Extract<CommandId, 'newNote' | 'rename' | 'trash'> | null
 
 // 重命名 / 移动后改写过的笔记（旧路径）：改写前的正文和改写（偏移按 before），渲染进程据此更新已打开的笔记
@@ -94,8 +97,8 @@ export interface SynoteApi {
   readFile(vault: string, path: string): Promise<string>
   writeFile(vault: string, path: string, content: string): Promise<void>
   readBytes(vault: string, path: string): Promise<Uint8Array>
-  // 每个路径是否存在（实时预览的附件缺失占位用）；存在且是 LFS 指针（内容没下载，S17）时给出指针
-  exists(vault: string, paths: string[]): Promise<(boolean | LfsPointer)[]>
+  // 每个路径的存在状态（实时预览的附件缺失 / LFS 未下载占位、跳转前检查笔记是否存在）
+  presence(vault: string, paths: string[]): Promise<Presence[]>
   createNote(vault: string, dir: string): Promise<string>
   // 粘贴 / 拖入的附件写进 attachments/（S10），name 为 null 表示剪贴板图片；内容相同的已有文件直接复用。
   // warn：large 为超过 50 MiB，huge 为超过 100 MiB 且不走 LFS

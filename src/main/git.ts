@@ -454,12 +454,14 @@ export class Git {
   }
 
   // 用户点了"下载"才调用：把历史里的指针经 `git lfs smudge` 换成真实内容（会联网、走系统凭据），对象顺带存进本地 LFS 存储。
-  // 不是指针时原样返回；失败时 smudge 退出码 2、stdout 是指针本身，按 stderr 分类抛出
+  // 不是指针时原样返回；失败时 smudge 退出码 2、stdout 是指针本身，按 stderr 分类抛出。
+  // 用户点了才下载：清空 lfs.fetchinclude / fetchexclude，否则被排除的路径 smudge 退出码 0 却原样吐回指针（实测 git-lfs 3.8）
   async lfsSmudge(spec: string, rel: string): Promise<Buffer | null> {
     const b = await this.readBlob(spec)
     if (!b || !parseLfsPointer(b)) return b
-    return new Promise((resolve, reject) => {
-      const proc = spawn(this.bin, [...CONFIG_OVERRIDES, 'lfs', 'smudge', '--', rel], { cwd: this.cwd, env: this.env, windowsHide: true })
+    const out = await new Promise<Buffer>((resolve, reject) => {
+      const args = [...CONFIG_OVERRIDES, '-c', 'lfs.fetchinclude=', '-c', 'lfs.fetchexclude=', 'lfs', 'smudge', '--', rel]
+      const proc = spawn(this.bin, args, { cwd: this.cwd, env: this.env, windowsHide: true })
       const out: Buffer[] = []
       let err = ''
       proc.stdout.on('data', (d: Buffer) => out.push(d))
@@ -469,6 +471,8 @@ export class Git {
       proc.on('close', (code) => (code === 0 ? resolve(Buffer.concat(out)) : reject(new GitError(classifyGitError(err), code ?? -1, err))))
       proc.stdin.end(b)
     })
+    stillPointer(out, 'git lfs smudge', rel)
+    return out
   }
 
   // 工作区里是指针的文件，下载真实内容写回工作区：`git lfs pull --include=<仓库根相对路径>`。--include 是 gitignore 式的模式，
@@ -479,7 +483,7 @@ export class Git {
     const pattern = (await this.prefix()) + rel
     await this.mutate(['lfs', 'pull', `--include=${pattern.replace(/[\\*?[\]]/g, '\\$&').replace(/,/g, '?')}`, '--exclude='])
     const after = await fs.readFile(path.join(this.cwd, rel)).catch(() => null)
-    if (after && parseLfsPointer(after)) throw new GitError('lfsFilter', 0, `git lfs pull finished but ${rel} is still an LFS pointer`)
+    if (after) stillPointer(after, 'git lfs pull', rel)
   }
 
   // 读任意版本的 blob（如 `HEAD:a.md`），不存在时为 null；复用常驻的 cat-file --batch 进程
@@ -501,6 +505,12 @@ export class Git {
     this.cat?.close()
     this.cat = null
   }
+}
+
+// 下载（smudge / pull）"成功"后结果仍是指针：多半是 lfs.fetchinclude / fetchexclude 之类的配置让它跳过了，按 lfsFilter 报出来，
+// 不当作成功静默返回
+function stillPointer(b: Buffer, cmd: string, rel: string) {
+  if (parseLfsPointer(b)) throw new GitError('lfsFilter', 0, `${cmd} finished but ${rel} is still an LFS pointer (check lfs.fetchinclude / lfs.fetchexclude and the LFS remote)`)
 }
 
 // 常驻 `git cat-file --batch`：按行协议，2.38 起都可用；请求里不能有换行（由 readBlob 处理）

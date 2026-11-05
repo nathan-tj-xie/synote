@@ -4,7 +4,7 @@ import { existsSync, promises as fs, statSync, watch, type FSWatcher } from 'nod
 import path from 'node:path'
 import { i18next, i18nOptions } from '../shared/i18n'
 import { commands } from '../shared/commands'
-import { indexMethods, type GitDone, type GitOpResult, type GitState, type OrphanAttachment, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
+import { indexMethods, type GitDone, type GitOpResult, type GitState, type OrphanAttachment, type ItemMenuAction, type Presence, type VaultConfig, type VaultInfo } from '../shared/api'
 import { parseLfsPointer } from '../shared/lfs'
 import { tokens } from '../shared/tokens'
 import { exec, findGit, Git, GitError, StagedOutsideError, type GitDetectionResult } from './git'
@@ -263,14 +263,15 @@ ipcMain.handle('vault:writeConfig', async (_e, vault: string, config: VaultConfi
 ipcMain.handle('file:read', async (_e, vault: string, rel: string) => fs.readFile(await realInVault(checkVault(vault), rel), 'utf8'))
 // 实时预览查附件链接是否存在（S10）：一批路径一次查，同样按真实路径校验，越出笔记库的按不存在。
 // 小于 1024 字节的文件顺带识别 LFS 指针（S17），是指针就给出指针（大文件不读内容）
-ipcMain.handle('file:exists', async (_e, vault: string, rels: string[]) => {
+ipcMain.handle('file:presence', async (_e, vault: string, rels: string[]) => {
   const r = checkVault(vault)
-  const probe = async (p: string) => {
+  const probe = async (p: string): Promise<Presence> => {
     const abs = await realInVault(r, p)
     const st = await fs.stat(abs)
-    return (st.isFile() && st.size < 1024 && parseLfsPointer(await fs.readFile(abs))) || true
+    const pointer = st.isFile() && st.size < 1024 ? parseLfsPointer(await fs.readFile(abs)) : null
+    return pointer ? { state: 'lfs', pointer } : { state: 'present' }
   }
-  return Promise.all(rels.map((p) => probe(p).catch(() => false)))
+  return Promise.all(rels.map((p) => probe(p).catch((): Presence => ({ state: 'missing' }))))
 })
 ipcMain.handle('file:readBytes', async (_e, vault: string, rel: string) => fs.readFile(await realInVault(checkVault(vault), rel)))
 // diff / 历史用的 git：没有可用 git、不是仓库时报错（不像 vaultRepo 那样当作非 git 目录）

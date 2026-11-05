@@ -419,7 +419,7 @@ async function followLink(h: Href, from: string) {
   const t = resolveHref(h, from)
   const v = vault
   if (!v) return
-  if (!t || !t.path.endsWith('.md') || !(await window.synote.exists(v, [t.path]))[0]) {
+  if (!t || !t.path.endsWith('.md') || (await window.synote.presence(v, [t.path]))[0].state === 'missing') {
     useUi.getState().setError(i18next.t('noteMissing', { path: t?.path ?? ('wiki' in h ? h.wiki : h.href) }))
     return
   }

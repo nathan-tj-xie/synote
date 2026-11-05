@@ -7,6 +7,7 @@ import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, typ
 import type { SyntaxNode } from '@lezer/common'
 import { tags as t } from '@lezer/highlight'
 import { i18next } from '../../shared/i18n'
+import type { Presence } from '../../shared/api'
 import { parseLfsPointer, sizeLabel, type LfsPointer } from '../../shared/lfs'
 import { linkHref, linkRefs as treeRefs, RAW, wikiLinks } from '../../shared/mdLinks'
 import { parseWiki } from '../../shared/url'
@@ -129,11 +130,11 @@ function loadImage(vault: string, path: string): Promise<string | LfsPointer | n
   return p
 }
 
-// 非图片附件链接的目标是否存在（缺失时显示占位）：按库 + 路径缓存，没有的项一次重建里攒成一批，经 exists 查一次，
+// 非图片附件链接的目标是否存在（缺失时显示占位）：按库 + 路径缓存，没有的项一次重建里攒成一批，经 presence 查一次，
 // 不是每次渲染都查。查到缺失或 LFS 指针（S17）才需要重建（默认按存在渲染）；查询失败按存在处理，免得反复查
-const present = new Map<string, boolean | LfsPointer>()
+const present = new Map<string, Presence>()
 const asking = new Map<string, Set<string>>() // 库 → 待查路径
-function isPresent(vault: string, path: string): boolean | LfsPointer | undefined {
+function presenceOf(vault: string, path: string): Presence | undefined {
   const key = `${vault}\0${path}`
   if (present.has(key)) return present.get(key)
   if (!asking.size) queueMicrotask(askPresent)
@@ -143,13 +144,13 @@ function isPresent(vault: string, path: string): boolean | LfsPointer | undefine
 function askPresent() {
   for (const [vault, set] of asking) {
     const paths = [...set]
-    window.synote.exists(vault, paths).then(
+    window.synote.presence(vault, paths).then(
       (r) => {
         if (present.size >= 5000) present.clear() // shortcut: 满了整个清空而不是 LRU，附件链接极多时再换
         paths.forEach((p, i) => present.set(`${vault}\0${p}`, r[i]))
-        if (r.some((x) => x !== true)) rebuildViews()
+        if (r.some((x) => x.state !== 'present')) rebuildViews()
       },
-      () => paths.forEach((p) => present.set(`${vault}\0${p}`, true)),
+      () => paths.forEach((p) => present.set(`${vault}\0${p}`, { state: 'present' })),
     )
   }
   asking.clear()
@@ -185,7 +186,7 @@ function broken(state: EditorState, h: Href): boolean {
   if (!info) return false
   const t = resolveHref(h, info.path)
   if (!t) return 'wiki' in h
-  return !t.path.startsWith('attachments/') && isPresent(info.vault, t.path) === false
+  return !t.path.startsWith('attachments/') && presenceOf(info.vault, t.path)?.state === 'missing'
 }
 const linkClass = (state: EditorState, h: Href) => (broken(state, h) ? 'cm-lp-link cm-lp-broken' : 'cm-lp-link')
 
@@ -257,8 +258,8 @@ function missingWidget(state: EditorState, target: string): MissingWidget | null
   const info = state.facet(note)
   const path = info && target ? resolveLink(target, info.path) : null
   if (!path?.startsWith('attachments/')) return null
-  const p = isPresent(info!.vault, path)
-  return p === false ? new MissingWidget(info!.vault, path, null) : typeof p === 'object' ? new MissingWidget(info!.vault, path, p.size) : null
+  const p = presenceOf(info!.vault, path)
+  return p?.state === 'missing' ? new MissingWidget(info!.vault, path, null) : p?.state === 'lfs' ? new MissingWidget(info!.vault, path, p.pointer.size) : null
 }
 
 class ImageWidget extends WidgetType {

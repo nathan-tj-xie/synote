@@ -653,8 +653,9 @@ describe('Git（系统 git）', () => {
     expect(ptr?.toString()).toMatch(/^version https:\/\/git-lfs/)
     expect(await git.readFileAt('HEAD~1:./attachments/old.png')).toEqual(await git.readBlob('HEAD~1:./attachments/old.png'))
 
-    // 工作区：pull 只下这一个（带 [ ] * , 和空格的另一个仍是指针）。lfs.fetchexclude 排除了附件也照样下（用户点了才下载）
-    g(vault, 'config', 'lfs.fetchexclude', '笔 记/attachments/**')
+    // 工作区：pull 只下这一个（带 [ ] * , 和空格的另一个仍是指针）。lfs.fetchexclude 排除了一切，pull 和下面的历史 smudge
+    // 照样下（用户点了才下载）
+    g(vault, 'config', 'lfs.fetchexclude', '*')
     await git.lfsPull('attachments/x.png')
     expect(readFileSync(att('x.png'))).toEqual(files['x.png'])
     expect(readFileSync(att('a b[1]*,c.png')).length).toBeLessThan(200)
@@ -678,6 +679,17 @@ describe('Git（系统 git）', () => {
     await git.lfsPull('attachments/a b[1]*,c.png')
     expect(readFileSync(att('a b[1]*,c.png'))).toEqual(files['a b[1]*,c.png'])
     expect((await git.status()).files).toEqual([])
+    git.close()
+  })
+
+  // 下载命令退出码 0 却没换出内容（比如被别的配置跳过）：用一个包装过的 git 模拟，smudge 原样吐回指针、pull 什么都不做
+  it.skipIf(!hasLfs || process.platform === 'win32')('下载"成功"后仍是指针：smudge / pull 都报 lfsFilter', async () => {
+    const { dir, vault, env } = lfsRepo()
+    const fake = path.join(dir, 'fake-git')
+    writeFileSync(fake, `#!/bin/sh\ncase " $* " in\n  *" lfs smudge "*) cat; exit 0;;\n  *" lfs pull "*) exit 0;;\nesac\nexec git "$@"\n`, { mode: 0o755 })
+    const git = new Git(fake, process.env.PATH!, vault, undefined, env)
+    await expect(git.lfsSmudge('HEAD~1:./attachments/old.png', 'attachments/old.png')).rejects.toMatchObject({ kind: 'lfsFilter', stderr: expect.stringContaining('still an LFS pointer') })
+    await expect(git.lfsPull('attachments/x.png')).rejects.toMatchObject({ kind: 'lfsFilter', stderr: expect.stringContaining('still an LFS pointer') })
     git.close()
   })
 
