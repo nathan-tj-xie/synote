@@ -1189,3 +1189,69 @@ test('cmd-click follows links to anchors, broken links, backlinks panel', async 
   await expect(win.getByRole('tab', { name: 'b b' })).toHaveAttribute('aria-selected', 'true')
   await app.close()
 })
+
+// 孤儿附件（S11）：删掉最后一处引用后 1 s 内变孤儿，撤销后恢复（自动保存 500 ms + 写盘后立即对账）
+test('removing the last reference makes an orphan within 1 s; undo restores it', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '首行\n![图](attachments/x.png)\n', 'b.md': '', 'attachments/x.png': 'png' })
+  await expect.poll(() => win.evaluate((v) => window.synote.attachmentRefs(v, 'attachments/x.png').catch(() => 0), vault), { timeout: 5000 }).toBe(1)
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await win.locator('.cm-content').click()
+  await win.keyboard.press('ControlOrMeta+a')
+  await win.keyboard.press('Backspace')
+  const orphans = () => win.evaluate((v) => window.synote.orphans(v), vault)
+  await expect.poll(orphans, { timeout: 1000, intervals: [50] }).toEqual(['attachments/x.png'])
+  await win.keyboard.press('ControlOrMeta+z')
+  await expect.poll(orphans, { timeout: 1000, intervals: [50] }).toEqual([])
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('首行\n![图](attachments/x.png)\n')
+  await app.close()
+})
+
+async function cleanOrphans(win: Page) {
+  await win.keyboard.press('ControlOrMeta+Shift+p')
+  await win.keyboard.type('清理孤儿附件')
+  await win.keyboard.press('Enter')
+  return win.getByRole('dialog', { name: '清理孤儿附件' })
+}
+
+// 非 git 目录：确认后移到回收站；确认框打开期间新加了引用的不删，attachments/ 以外的从不删
+test('clean orphans in a plain folder trashes only orphans confirmed at delete time', async () => {
+  const { app, win, vault } = await launch({
+    'a.md': '![](attachments/keep.png)',
+    'attachments/keep.png': 'k',
+    'attachments/gone.png': 'g',
+    'attachments/late.png': 'l',
+    'loose.png': 'x',
+  })
+  await expect.poll(() => win.evaluate((v) => window.synote.orphans(v).catch(() => []), vault), { timeout: 5000 }).toEqual(['attachments/gone.png', 'attachments/late.png'])
+  const dialog = await cleanOrphans(win)
+  await expect(dialog.getByRole('listitem')).toHaveText(['attachments/gone.png回收站', 'attachments/late.png回收站'])
+  writeFileSync(path.join(vault, 'b.md'), '[刚加的](attachments/late.png)')
+  await dialog.getByRole('button', { name: '删除 2 个' }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(existsSync(path.join(vault, 'attachments/gone.png'))).toBe(false)
+  expect(['keep.png', 'late.png'].map((f) => existsSync(path.join(vault, 'attachments', f)))).toEqual([true, true])
+  expect(existsSync(path.join(vault, 'loose.png'))).toBe(true)
+  await expect.poll(() => win.evaluate((v) => window.synote.orphans(v), vault)).toEqual([])
+  // 没有孤儿时只提示
+  await expect(await cleanOrphans(win)).toContainText('没有孤儿附件')
+  await win.keyboard.press('Escape')
+  await app.close()
+})
+
+// git 仓库：已跟踪的 git rm（暂存删除），未跟踪的移到回收站
+test('clean orphans in a git repo: tracked are git rm-ed, untracked are trashed', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '![](attachments/keep.png)', 'attachments/keep.png': 'k', 'attachments/old.png': 'o' })
+  const git = (...args: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: vault }).toString()
+  git('init', '-q')
+  git('add', '.')
+  git('commit', '-qm', 'init')
+  writeFileSync(path.join(vault, 'attachments/new.png'), 'n')
+  await expect.poll(() => win.evaluate((v) => window.synote.orphans(v).catch(() => []), vault), { timeout: 5000 }).toEqual(['attachments/new.png', 'attachments/old.png'])
+  const dialog = await cleanOrphans(win)
+  await expect(dialog.getByRole('listitem')).toHaveText(['attachments/new.png回收站', 'attachments/old.pnggit rm'], { timeout: 10_000 })
+  await dialog.getByRole('button', { name: '删除 2 个' }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(readdirSync(path.join(vault, 'attachments'))).toEqual(['keep.png'])
+  expect(git('status', '--porcelain')).toBe('D  attachments/old.png\n')
+  await app.close()
+})

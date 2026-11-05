@@ -37,6 +37,9 @@ export type GitState =
   // name / email 有一个为 null 就禁用提交；lfs：本机是否装了 git-lfs（供 S17）
   | { status: 'ready'; version: string; name: string | null; email: string | null; changes: number; lfs: boolean }
 
+// 孤儿附件（S11）：tracked 为 git 已跟踪，删除时执行 git rm；否则（含非 git 目录）移到回收站
+export type OrphanAttachment = { path: string; tracked: boolean }
+
 export type ItemMenuAction = Extract<CommandId, 'newNote' | 'trash'> | null
 
 export interface SynoteApi {
@@ -69,6 +72,10 @@ export interface SynoteApi {
   attachmentRefs(vault: string, path: string): Promise<number>
   orphans(vault: string): Promise<string[]>
   rebuildIndex(vault: string): Promise<void>
+  // "将删除的孤儿附件"清单（S11，S13 的 commit 面板分组也用），按路径排序；取之前主进程先对账，以落盘内容为准
+  listOrphans(vault: string): Promise<OrphanAttachment[]>
+  // 删除用户确认过的孤儿附件，返回实际删除的路径：已不是孤儿、不在 attachments/ 内（含符号链接越界）的跳过
+  deleteOrphans(vault: string, paths: string[]): Promise<string[]>
   // 索引更新后推送变化的路径；反链、引用计数、孤儿列表据此重新查询
   onIndexChanged(cb: (e: { root: string; paths: string[] }) => void): () => void
   // git（S12）

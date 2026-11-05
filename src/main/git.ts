@@ -220,6 +220,17 @@ export class Git {
     return res
   }
 
+  // 清理孤儿附件（S11）：哪些路径已被跟踪。--literal-pathspecs：文件名里的 * ? [ 不当通配符；输出相对 cwd
+  async tracked(paths: string[]): Promise<string[]> {
+    if (!paths.length) return []
+    return (await this.run(['--literal-pathspecs', 'ls-files', '-z', '--', ...paths])).split('\0').filter(Boolean)
+  }
+
+  // 删除已跟踪的文件并暂存这次删除。不加 -f：有未提交的改动时 git 整批拒绝，不丢内容
+  rm(paths: string[]): Promise<string> {
+    return this.mutate(['--literal-pathspecs', 'rm', '-q', '--', ...paths])
+  }
+
   // 读任意版本的 blob（如 `HEAD:a.md`），不存在时为 null；复用常驻的 cat-file --batch 进程
   async readBlob(spec: string): Promise<Buffer | null> {
     // 按行协议传不了含换行的路径（-Z 要 2.42+），先用 rev-parse 换成 oid 再读

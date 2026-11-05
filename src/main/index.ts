@@ -4,9 +4,10 @@ import { existsSync, promises as fs, statSync, watch, type FSWatcher } from 'nod
 import path from 'node:path'
 import { i18next, i18nOptions } from '../shared/i18n'
 import { commands } from '../shared/commands'
-import { indexMethods, type GitState, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
+import { indexMethods, type GitState, type OrphanAttachment, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
 import { tokens } from '../shared/tokens'
 import { exec, findGit, Git, GitError, type GitDetectionResult } from './git'
+import { checkOrphans, removeOrphans, trackedOf } from './orphans'
 import { attachmentName, isHidden, realInVault, realParentInVault, resolveInVault, saveAttachment, scanEntries, toPosix, uniqueNoteName, writeTarget } from './vault'
 
 i18next.init(i18nOptions)
@@ -261,7 +262,11 @@ ipcMain.handle('git:readHead', async (_e, vault: string, rel: string) => {
   }
 })
 // 写入、新建、回收同样按真实路径校验：父目录（或被跟随的链接）被换成指向库外时拒绝
-ipcMain.handle('file:write', async (_e, vault: string, rel: string, content: string) => fs.writeFile(await writeTarget(checkVault(vault), rel), content))
+ipcMain.handle('file:write', async (_e, vault: string, rel: string, content: string) => {
+  await fs.writeFile(await writeTarget(checkVault(vault), rel), content)
+  // 不等 watcher 防抖，写完立即对账：删掉或撤销最后一处引用后，孤儿状态 1 s 内更新（S11）
+  callIndex('reconcile').catch((e) => console.error('[index] reconcile failed', e))
+})
 ipcMain.handle('file:createNote', async (_e, vault: string, dir: string) => {
   const r = checkVault(vault)
   const entries = await scanEntries(r)
@@ -277,6 +282,44 @@ ipcMain.handle('file:saveAttachment', (_e, vault: string, name: string | null, b
   const job = attaching.then(async () => {
     const rel = await saveAttachment(r, attachmentName(name, new Date()), bytes)
     return { path: rel, warn: await sizeWarning(r, rel, bytes.length) }
+  })
+  attaching = job.catch(() => {})
+  return job
+})
+
+// 孤儿附件（S11）以落盘内容为准：先对账一次，补上 watcher 防抖里还没进索引的改动，再取孤儿列表
+async function currentOrphans(): Promise<string[]> {
+  await callIndex('reconcile')
+  return (await callIndex('orphans')) as string[]
+}
+
+// 当前库是 git 仓库时返回它的 git；没有可用的 git、不是仓库都按非 git 目录处理（返回 null）
+async function vaultRepo(r: string): Promise<Git | null> {
+  const res = await repoGit()
+  if (!('g' in res)) return null
+  if (res.g.cwd !== r) throw new Error(t('vaultSwitched', { vault: r })) // 等 git 检测期间切了库
+  return (await res.g.isRepo()) ? res.g : null
+}
+
+// "将删除的孤儿附件"清单：清理命令的确认框和 S13 的 commit 面板分组都用它
+ipcMain.handle('orphans:list', async (_e, vault: string): Promise<OrphanAttachment[]> => {
+  const r = checkVault(vault)
+  const list = await currentOrphans()
+  const tracked = await trackedOf(await vaultRepo(r), list)
+  return list.map((p) => ({ path: p, tracked: tracked.has(p) }))
+})
+// 删除用户确认过的孤儿附件：以删除时刻的索引复核（期间加了引用的不删），路径再按真实路径校验。
+// 和附件写入串在同一条链上：粘贴复用某个孤儿文件时，不会在写入途中被删
+ipcMain.handle('orphans:delete', (_e, vault: string, paths: string[]) => {
+  const r = checkVault(vault)
+  if (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string')) throw new Error('invalid paths')
+  const job = attaching.then(async () => {
+    const targets = await checkOrphans(r, paths, new Set(await currentOrphans()))
+    try {
+      return await removeOrphans(targets, await vaultRepo(r), (p) => shell.trashItem(p))
+    } finally {
+      callIndex('reconcile').catch((e) => console.error('[index] reconcile failed', e))
+    }
   })
   attaching = job.catch(() => {})
   return job

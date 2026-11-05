@@ -31,6 +31,8 @@ const api: SynoteApi = {
   attachmentRefs: (v, p) => ipcRenderer.invoke('index:call', v, 'attachmentRefs', p),
   orphans: (v) => ipcRenderer.invoke('index:call', v, 'orphans'),
   rebuildIndex: (v) => ipcRenderer.invoke('index:call', v, 'rebuild'),
+  listOrphans: (v) => ipcRenderer.invoke('orphans:list', v),
+  deleteOrphans: (v, p) => ipcRenderer.invoke('orphans:delete', v, p),
   onIndexChanged: subscribe('index:changed'),
   gitState: () => ipcRenderer.invoke('git:state'),
   redetectGit: () => ipcRenderer.invoke('git:redetect'),

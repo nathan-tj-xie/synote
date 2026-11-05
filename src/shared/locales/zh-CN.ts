@@ -46,5 +46,13 @@ export const zhCN = {
     noteMissing: '笔记不存在：{{path}}',
     backlinks: '反链',
     noBacklinks: '没有笔记链接到这里',
+    cleanOrphans: '清理孤儿附件',
+    noOrphans: '没有孤儿附件',
+    orphansHint: '以下附件没有被任何笔记引用。已跟踪的执行 git rm（进入下次提交，可从历史恢复），其余移到回收站。',
+    orphanGitRm: 'git rm',
+    orphanTrash: '回收站',
+    deleteOrphans: '删除 {{n}} 个',
+    cancel: '取消',
+    orphansUnsaved: '有未保存的改动没能写入，没有清理孤儿附件',
   },
 } as const

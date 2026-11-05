@@ -37,7 +37,7 @@ export function resolveInVault(root: string, rel: string): string {
 }
 
 // 真实路径 a 是否在真实库根 r 之内（含 r 自身）
-function within(r: string, a: string): boolean {
+export function within(r: string, a: string): boolean {
   const back = path.relative(r, a)
   return back !== '..' && !back.startsWith(`..${path.sep}`) && !path.isAbsolute(back)
 }

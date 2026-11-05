@@ -120,6 +120,29 @@ describe('Indexer', () => {
     expect(idx.backlinks('x/b b.md').map((b) => b.path)).toEqual(['c.md'])
   })
 
+  // 孤儿 = 全库引用计数为 0（S11）：删掉最后一处引用变孤儿，撤销、挪到别的笔记、代码块里的引用都算回来；删笔记也会让附件变孤儿
+  test('orphans follow reference edits', async () => {
+    const { idx, write, root } = setup({
+      'a.md': '![](attachments/p.png)',
+      'sub/b.md': '```\n![](../attachments/q.png)\n```',
+      'c.md': '[文档](attachments/r.pdf)',
+      'attachments/p.png': '',
+      'attachments/q.png': '',
+      'attachments/r.pdf': '',
+    })
+    await idx.reconcile()
+    expect(idx.orphans()).toEqual([])
+    write('a.md', '没有引用了')
+    await idx.reconcile()
+    expect(idx.orphans()).toEqual(['attachments/p.png'])
+    write('sub/b.md', '![](../attachments/p.png) ```\n![](../attachments/q.png)\n```')
+    await idx.reconcile()
+    expect(idx.orphans()).toEqual([])
+    rmSync(path.join(root, 'c.md'))
+    await idx.reconcile()
+    expect(idx.orphans()).toEqual(['attachments/r.pdf'])
+  })
+
   test('short queries are ranked by occurrence count', async () => {
     const { idx } = setup({ 'a.md': '预览', 'b.md': '预览 预览 预览', 'c.md': '预览 预览' })
     await idx.reconcile()
