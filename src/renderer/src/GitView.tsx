@@ -1,5 +1,6 @@
 // git 视图（S12 引导状态，S13 面板，#11 方案 A）：分支与 push / pull、提交框、已暂存 / 更改 / 将删除的孤儿附件、底部折叠的仓库历史。
 // 没有 git / 版本过低 / 不是仓库时显示引导；git 操作失败时内联错误卡片
+import * as Dialog from '@radix-ui/react-dialog'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -63,6 +64,7 @@ function Panel({ root, state }: { root: string; state: Ready }) {
   const [card, setCard] = useState<Card | null>(null)
   const [orphans, setOrphans] = useState<OrphanAttachment[]>([])
   const [unchecked, setUnchecked] = useState<ReadonlySet<string>>(new Set())
+  const [deleted, setDeleted] = useState<{ path: string; head: string; mod: typeof import('./diff') } | null>(null)
   const staged = useMemo(() => state.files.filter((f) => f.x !== '.' && f.x !== '?'), [state.files])
   const unstaged = useMemo(() => state.files.filter((f) => f.y !== '.'), [state.files])
   const checked = orphans.filter((o) => !unchecked.has(o.path)).map((o) => o.path)
@@ -110,6 +112,12 @@ function Panel({ root, state }: { root: string; state: Ready }) {
   const stage = (paths: string[] | null) => run('stage', () => window.synote.gitStage(root, paths))
   // 重命名要连同旧路径一起取消暂存；旧路径在库外时只取消新路径
   const unstage = (f: GitFile) => run('unstage', () => window.synote.gitUnstage(root, [f.path, ...(f.orig && !f.orig.startsWith('../') ? [f.orig] : [])]))
+  // 删除的笔记：读 HEAD 里的正文，只读展示
+  const openDeleted = (path: string) =>
+    Promise.all([import('./diff'), window.synote.readRev(root, 'HEAD', path)]).then(
+      ([mod, b]) => useVault.getState().vault?.root === root && setDeleted({ path, head: b ? new TextDecoder().decode(b) : '', mod }),
+      fail,
+    )
   const canCommit = !busy && !noIdentity && !!message.trim() && (state.files.length > 0 || checked.length > 0)
 
   return (
@@ -171,6 +179,7 @@ function Panel({ root, state }: { root: string; state: Ready }) {
         orphans={orphans}
         unchecked={unchecked}
         busy={!!busy}
+        onOpenDeleted={openDeleted}
         onStage={stage}
         onUnstage={unstage}
         onToggle={(p) =>
@@ -182,6 +191,7 @@ function Panel({ root, state }: { root: string; state: Ready }) {
         }
       />
       <RepoHistory root={root} state={state} />
+      <DeletedDiff file={deleted} onClose={() => setDeleted(null)} />
     </>
   )
 }
@@ -263,6 +273,7 @@ function Changes(p: {
   orphans: OrphanAttachment[]
   unchecked: ReadonlySet<string>
   busy: boolean
+  onOpenDeleted: (path: string) => void
   onStage: (paths: string[] | null) => void
   onUnstage: (f: GitFile) => void
   onToggle: (path: string) => void
@@ -308,15 +319,15 @@ function Changes(p: {
             )
           const f = r.file
           const st = r.staged ? f.x : f.y === '?' ? 'U' : f.y
-          // 只有笔记能打开对比；删除的文件工作区里没有
-          const openable = f.path.endsWith('.md') && st !== 'D'
+          // 只有笔记能打开对比；删除的笔记工作区里没有，单独只读展示
+          const openable = f.path.endsWith('.md')
           return (
             <div
               key={`${r.staged ? 's' : 'u'}:${f.path}`}
               className={`${s.row} ${openable ? s.openable : ''}`}
               style={style}
               title={f.orig ? `${f.orig} → ${f.path}` : f.path}
-              onClick={() => openable && openDiff(f.path)}
+              onClick={() => openable && (st === 'D' ? p.onOpenDeleted(f.path) : openDiff(f.path))}
             >
               <span className={`${s.st} ${s[`st${st}`] ?? ''}`}>{st}</span>
               <span className={s.name}>{baseName(f.path)}</span>
@@ -370,5 +381,23 @@ function RepoHistory({ root, state }: { root: string; state: Ready }) {
         </div>
       )}
     </div>
+  )
+}
+
+// 删除对比（只读）：左 HEAD 正文、右空。不能在这里编辑"复活"文件，要恢复走 git restore 或新建
+function DeletedDiff({ file, onClose }: { file: { path: string; head: string; mod: typeof import('./diff') } | null; onClose: () => void }) {
+  const { t } = useTranslation()
+  const [box, setBox] = useState<HTMLDivElement | null>(null)
+  useEffect(() => (file && box ? file.mod.showDeleted(box, file.head) : undefined), [file, box])
+  return (
+    <Dialog.Root open={file !== null} onOpenChange={(o) => !o && onClose()}>
+      <Dialog.Portal>
+        <Dialog.Content className={s.deleted} aria-describedby={undefined}>
+          <Dialog.Title className={s.deletedTitle}>{file && t('gitDeletedDiff', { path: file.path })}</Dialog.Title>
+          <div ref={setBox} className={s.deletedBody} />
+          <Dialog.Close className={s.small}>{t('close')}</Dialog.Close>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   )
 }

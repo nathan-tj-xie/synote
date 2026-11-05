@@ -139,6 +139,35 @@ export function create(parent: HTMLElement, onEdit: (changes: Change[]) => void,
   })
 }
 
+// 删除的笔记（S13）：工作区里已没有它，不进 CM6 / 标签页，单独开一个只读 diff：左 HEAD 正文、右空。返回销毁函数
+export function showDeleted(parent: HTMLElement, head: string): () => void {
+  const body = getComputedStyle(document.body)
+  const ed = monaco.editor.createDiffEditor(parent, {
+    theme: 'synote',
+    automaticLayout: true,
+    readOnly: true,
+    originalEditable: false,
+    renderSideBySide: true,
+    useInlineViewWhenSpaceIsLimited: false,
+    wordWrap: 'on',
+    diffWordWrap: 'on',
+    minimap: { enabled: false },
+    scrollBeyondLastLine: false,
+    fontFamily: body.fontFamily,
+    fontSize: parseFloat(body.fontSize),
+    lineHeight: 1.7,
+    renderGutterMenu: false,
+  })
+  const original = monaco.editor.createModel(head, 'markdown')
+  const modified = monaco.editor.createModel('', 'markdown')
+  ed.setModel({ original, modified })
+  return () => {
+    ed.dispose()
+    original.dispose()
+    modified.dispose()
+  }
+}
+
 // rev / base：左侧是哪个版本（HEAD 或历史提交的 oid）、笔记在那个版本里的路径，悬停图片时按它解析、从同一版本读
 export function show(vault: string, path: string, rev: string, base: string, head: string, doc: string, readOnly: boolean) {
   hide()

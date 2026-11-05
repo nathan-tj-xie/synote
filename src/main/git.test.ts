@@ -418,6 +418,28 @@ describe('Git（系统 git）', () => {
     expect(await git.status()).toMatchObject({ ahead: 0, behind: 0 })
   })
 
+  it('用户配置（color=always、diff.relative、status.relativePaths 等）不影响解析：status / stagedOutside / stagedMentions / fileLog', async () => {
+    const { repo, env, sh } = setup()
+    sh('init', '-q', '-b', 'main')
+    for (const [k, v] of [['color.ui', 'always'], ['color.grep', 'always'], ['color.diff', 'always'], ['color.status', 'always'], ['diff.relative', 'true'], ['status.relativePaths', 'false'], ['core.quotePath', 'true'], ['log.showSignature', 'true']])
+      sh('config', k, v)
+    mkdirSync(path.join(repo, '笔记'))
+    writeFileSync(path.join(repo, '笔记', '旧 名.md'), '![](attachments/图.png)\n')
+    writeFileSync(path.join(repo, '库外.md'), '1\n')
+    sh('add', '.')
+    sh('commit', '-qm', '1')
+    sh('mv', '笔记/旧 名.md', '笔记/新 名.md')
+    sh('commit', '-qm', '2')
+    writeFileSync(path.join(repo, '库外.md'), '2\n')
+    sh('add', '库外.md')
+    writeFileSync(path.join(repo, '笔记', '新 名.md'), '') // 工作区删了引用，暂存区里还在
+    const git = new Git('git', process.env.PATH!, path.join(repo, '笔记'), undefined, env)
+    expect((await git.status()).files).toEqual([{ path: '新 名.md', x: '.', y: 'M' }])
+    expect(await git.stagedOutside()).toEqual(['库外.md'])
+    expect(await git.stagedMentions(['attachments/图.png'])).toEqual(['attachments/图.png'])
+    expect((await git.fileLog('新 名.md')).map((e) => [e.subject, e.status, e.path])).toEqual([['2', 'R', '新 名.md'], ['1', 'A', '旧 名.md']])
+  })
+
   it('stagedMentions：按暂存区版本的笔记查附件引用（编码形式、大小写不敏感），不看工作区', async () => {
     const { repo, env, sh } = setup()
     sh('init', '-q')

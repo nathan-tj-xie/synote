@@ -45,3 +45,7 @@
 .historyHead { background: none; border: none; color: var(--fg-muted); text-align: left; padding: 4px 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; cursor: pointer; }
 .historyList { overflow: auto; min-height: 0; }
 .paths { margin: 0; padding-left: 16px; font-family: var(--font-mono); word-break: break-all; }
+.deleted { position: fixed; inset: 6vh 5vw; display: flex; flex-direction: column; gap: 8px; padding: 12px; background: var(--bg-raised); border: 1px solid var(--border); border-radius: 8px; outline: none; }
+.deletedTitle { margin: 0; font-size: 14px; font-weight: 600; }
+.deletedBody { flex: 1; min-height: 0; }
+.deleted > button { align-self: flex-end; }

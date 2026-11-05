@@ -1,6 +1,6 @@
 import { _electron as electron, expect, test, type Page } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -315,5 +315,31 @@ test('git panel: commit staged keeps orphans still referenced by staged notes', 
   expect(readFileSync(path.join(vault, 'attachments/x.png'), 'utf8')).toBe('x')
   await expect(win.getByRole('alert').filter({ hasText: '仍被暂存区里的笔记引用' })).toContainText('attachments/x.png')
   expect(git('status', '--porcelain')).toBe(' M a.md\n')
+  await app.close()
+})
+
+// 删除的笔记：点开只读的删除对比（左 HEAD 正文、右空），不开标签页，也不能在里面编辑出文件来
+test('git panel: a deleted note opens a read-only deletion diff', async () => {
+  const { app, win, vault } = await launchRepo({ 'a.md': 'a\n', '删 掉.md': '# 旧内容\n第二行\n' })
+  rmSync(path.join(vault, '删 掉.md'))
+  const changes = await openGit(win)
+  await expect(row(changes, '删 掉.md')).toContainText('D', { timeout: 10_000 })
+  await row(changes, '删 掉.md').click({ position: { x: 30, y: 10 } })
+  const dialog = win.getByRole('dialog', { name: '删 掉.md（已删除，HEAD ↔ 工作区，只读）' })
+  const original = dialog.locator('.editor.original .view-lines')
+  await expect(original).toContainText('旧内容', { timeout: 10_000 })
+  await expect(original).toContainText('第二行')
+  const modified = dialog.locator('.editor.modified .view-lines')
+  await expect(modified).toHaveText('')
+  await modified.click()
+  await win.keyboard.type('复活')
+  await expect(modified).toHaveText('')
+  await expect(win.getByRole('tab')).toHaveCount(0)
+  await dialog.getByRole('button', { name: '关闭' }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(existsSync(path.join(vault, '删 掉.md'))).toBe(false)
+  // 再开一次（Monaco 已加载）照样显示
+  await row(changes, '删 掉.md').click({ position: { x: 30, y: 10 } })
+  await expect(original).toContainText('旧内容')
   await app.close()
 })

@@ -54,6 +54,7 @@ export const zhCN = {
     gitCommitUnsaved: '有未保存的改动没能写入，没有提交',
     worktreeBusy: '编辑器正被其他操作锁定（切换笔记库、重命名等），稍后重试',
     gitPullUnsaved: '有未保存的改动没能写入，没有 pull',
+    gitDeletedDiff: '{{path}}（已删除，HEAD ↔ 工作区，只读）',
     gitHistoryHint: '点提交：当前笔记与该提交里的版本对比',
     gitCopy: '复制',
     gitRaw: 'git 原始输出',

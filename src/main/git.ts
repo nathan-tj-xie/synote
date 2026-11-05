@@ -197,6 +197,33 @@ const onExit1 =
     throw e
   }
 
+// 每条 git 命令都带上，压掉会改变输出格式的用户配置：解析靠的是固定格式，用户的 ~/.gitconfig 不能让它失效
+// - color.*：=always 时输出（含 stderr 的提示）带 ANSI 码，路径匹配和错误分类都会失败；color.ui 管不住单项配置，逐项关
+// - core.quotePath：非 -z 的输出里中文路径会被转成八进制转义
+// - diff.relative：diff / log --name-status 只列 cwd 以内、路径变成相对 cwd（库外暂存检查、跨库外改名的历史都依赖完整路径）
+// - grep.fullName：git grep 输出相对仓库根而不是 cwd
+// - status.relativePaths：porcelain 本来就不受影响，一并固定
+// - log.showSignature：log 里插入签名校验输出，打乱 parseLog
+// - core.pager：配合 GIT_PAGER=cat，不起分页器
+const CONFIG_OVERRIDES = [
+  'color.ui=false',
+  'color.diff=false',
+  'color.grep=false',
+  'color.status=false',
+  'color.branch=false',
+  'color.decorate=false',
+  'color.advice=false',
+  'color.push=false',
+  'color.remote=false',
+  'color.transport=false',
+  'core.quotePath=false',
+  'diff.relative=false',
+  'grep.fullName=false',
+  'status.relativePaths=false',
+  'log.showSignature=false',
+  'core.pager=cat',
+].flatMap((kv) => ['-c', kv])
+
 export class Git {
   private readonly env: NodeJS.ProcessEnv
   private cat: CatFile | null = null
@@ -211,12 +238,13 @@ export class Git {
     env: NodeJS.ProcessEnv = process.env,
     private readonly run_: Exec = exec,
   ) {
-    // GIT_TERMINAL_PROMPT=0：没有凭据时直接失败，不卡在等待终端输入
-    this.env = { ...env, PATH, LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0' }
+    // GIT_TERMINAL_PROMPT=0：没有凭据时直接失败，不卡在等待终端输入；GIT_PAGER / NO_COLOR 与 CONFIG_OVERRIDES 同理。
+    // LC_ALL=C 保留（S12 起就有）：错误分类按英文文本匹配；路径不受它影响（-z 输出原样字节，quotePath 已关）
+    this.env = { ...env, PATH, LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat', NO_COLOR: '1' }
   }
 
   async run(args: string[]): Promise<string> {
-    const r = await this.run_(this.bin, args, { cwd: this.cwd, env: this.env })
+    const r = await this.run_(this.bin, [...CONFIG_OVERRIDES, ...args], { cwd: this.cwd, env: this.env })
     if (r.code !== 0) throw new GitError(classifyGitError(r.stderr, r.stdout), r.code, r.stderr, r.stdout)
     return r.stdout
   }
@@ -261,10 +289,9 @@ export class Git {
   }
 
   // 暂存区里笔记库之外的路径（相对仓库根，--no-renames 让改名的两侧都列出来）。笔记库就是仓库根时为空。
-  // diff.relative=true 会只列 cwd 以内、正好漏掉要找的：配置和参数都强制关掉
   async stagedOutside(): Promise<string[]> {
     const [out, prefix] = await Promise.all([
-      this.run(['-c', 'diff.relative=false', 'diff', '--cached', '--no-relative', '--name-only', '-z', '--no-renames']),
+      this.run(['diff', '--cached', '--name-only', '-z', '--no-renames']),
       this.prefix(),
     ])
     return prefix ? out.split('\0').filter((p) => p && !p.startsWith(prefix)) : []
@@ -278,8 +305,8 @@ export class Git {
     for (const p of paths) {
       const name = path.posix.basename(p)
       const forms = [...new Set([name, encodeSegment(name), encodeURIComponent(name), encodeURI(name)])].flatMap((f) => ['-e', f])
-      // grep.fullName / color 等用户配置不影响 -l -z 的输出；没有命中时退出码为 1
-      const out = await this.run(['--literal-pathspecs', '-c', 'grep.fullName=false', 'grep', '--cached', '-F', '-i', '-l', '-z', ...forms, '--', '.']).catch(onExit1(''))
+      // 没有命中时退出码为 1
+      const out = await this.run(['--literal-pathspecs', 'grep', '--cached', '-F', '-i', '-l', '-z', ...forms, '--', '.']).catch(onExit1(''))
       if (out.split('\0').some((f) => f.toLowerCase().endsWith('.md'))) hit.push(p)
     }
     return hit
@@ -367,8 +394,7 @@ export class Git {
   async fileLog(rel: string): Promise<LogEntry[]> {
     if (!(await this.hasHead())) return []
     const [out, p] = await Promise.all([
-      // diff.relative=true 会让 --name-status 的路径变成相对 cwd、并丢掉库外那段改名历史：强制关掉
-      this.run(['--literal-pathspecs', '-c', 'diff.relative=false', 'log', '--follow', '-z', '--name-status', LOG_FORMAT, '--', rel]),
+      this.run(['--literal-pathspecs', 'log', '--follow', '-z', '--name-status', LOG_FORMAT, '--', rel]),
       this.prefix(),
     ])
     return parseLog(out).map((e) => ({ ...e, path: path.posix.relative(p, e.path) }))
@@ -377,7 +403,7 @@ export class Git {
   // 从历史恢复附件：最后一个还有 rel 的提交（改动过它、且不是删除它的最近一个提交），找不到为 null
   async restoreSource(rel: string): Promise<LogEntry | null> {
     if (!(await this.hasHead())) return null
-    const out = await this.run(['--literal-pathspecs', '-c', 'diff.relative=false', 'log', '-1', '-z', '--name-status', '--diff-filter=d', LOG_FORMAT, 'HEAD', '--', rel])
+    const out = await this.run(['--literal-pathspecs', 'log', '-1', '-z', '--name-status', '--diff-filter=d', LOG_FORMAT, 'HEAD', '--', rel])
     const e = parseLog(out)[0]
     return e && (await this.isFileAt(e.hash, rel)) ? e : null
   }
