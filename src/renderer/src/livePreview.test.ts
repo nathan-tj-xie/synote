@@ -22,8 +22,8 @@ const doc = [
 ].join('\n')
 
 // 光标放在第 cursorLine 行（从 1 起）行首
-function state(cursorLine: number) {
-  const s0 = EditorState.create({ doc, extensions: [markdown({ base: markdownLanguage })] })
+function state(cursorLine: number, text = doc) {
+  const s0 = EditorState.create({ doc: text, extensions: [markdown({ base: markdownLanguage })] })
   const s = s0.update({ selection: { anchor: s0.doc.line(cursorLine).from } }).state
   ensureSyntaxTree(s, s.doc.length)
   return s
@@ -71,4 +71,27 @@ describe('buildTables', () => {
     const t = state(11)
     expect(replaced(t, buildTables(t))).toEqual([])
   })
+})
+
+describe('嵌套表格', () => {
+  const nested = ['正文', '', '> | a | b |', '> |---|--:|', '> | 1 | 2 |', '', '- 项', '', '  | c |', '  |---|', '  | 3 |', ''].join('\n')
+  it('引用、列表里的表格按整行替换（含 `> ` 和缩进）', () => {
+    const s = state(1, nested)
+    expect(replaced(s, buildTables(s))).toEqual(['> | a | b |\n> |---|--:|\n> | 1 | 2 |', '  | c |\n  |---|\n  | 3 |'])
+  })
+  it('光标在嵌套表格里时显示源码', () => {
+    const s = state(4, nested)
+    expect(replaced(s, buildTables(s))).toEqual(['  | c |\n  |---|\n  | 3 |'])
+  })
+})
+
+describe('跨行链接与图片', () => {
+  const r = (text: string) => {
+    const s = state(1, `首行\n${text}`)
+    return replaced(s, buildInline(s, 0, s.doc.length))
+  }
+  it('目标跨行的链接整个显示源码', () => expect(r('[名字](\na.md)')).toEqual([]))
+  it('文字跨行的链接正常渲染：只藏标记和目标', () => expect(r('[跨\n行](a.md)')).toEqual(['[', '](a.md)']))
+  it('跨行的图片整个显示源码', () => expect(r('![替\n代](a.png)')).toEqual([]))
+  it('单行图片整块替换', () => expect(r('![图](a.png)')).toEqual(['![图](a.png)']))
 })

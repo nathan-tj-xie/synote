@@ -35,6 +35,16 @@ export function resolveInVault(root: string, rel: string): string {
   return abs
 }
 
+// 读之前再按真实路径查一次：resolveInVault 只看字面，符号链接（文件本身或路径上的某个目录）可能指向库外。
+// 目标的真实路径必须仍在库的真实路径之内，否则拒绝
+export async function realInVault(root: string, rel: string): Promise<string> {
+  const abs = resolveInVault(root, rel)
+  const [r, a] = await Promise.all([fs.realpath(root), fs.realpath(abs)])
+  const back = path.relative(r, a)
+  if (!back || back === '..' || back.startsWith(`..${path.sep}`) || path.isAbsolute(back)) throw new Error(`path outside vault: ${rel}`)
+  return a
+}
+
 export function toPosix(p: string): string {
   return p.split(path.sep).join('/')
 }

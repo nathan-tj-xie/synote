@@ -7,7 +7,7 @@ import { commands } from '../shared/commands'
 import { indexMethods, type GitState, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
 import { tokens } from '../shared/tokens'
 import { exec, findGit, Git, GitError, type GitDetectionResult } from './git'
-import { isHidden, resolveInVault, scanEntries, toPosix, uniqueNoteName } from './vault'
+import { isHidden, realInVault, resolveInVault, scanEntries, toPosix, uniqueNoteName } from './vault'
 
 i18next.init(i18nOptions)
 const t = i18next.t
@@ -239,8 +239,9 @@ ipcMain.handle('vault:writeConfig', async (_e, vault: string, config: VaultConfi
   await fs.mkdir(path.dirname(file), { recursive: true })
   await fs.writeFile(file, `${JSON.stringify(config, null, 2)}\n`)
 })
-ipcMain.handle('file:read', (_e, vault: string, rel: string) => fs.readFile(vaultPath(vault, rel), 'utf8'))
-ipcMain.handle('file:readBytes', (_e, vault: string, rel: string) => fs.readFile(vaultPath(vault, rel)))
+// 读取跟随符号链接，所以按真实路径校验（实时预览会自动读图片，不能让一个指向库外的链接读出库外文件）
+ipcMain.handle('file:read', async (_e, vault: string, rel: string) => fs.readFile(await realInVault(checkVault(vault), rel), 'utf8'))
+ipcMain.handle('file:readBytes', async (_e, vault: string, rel: string) => fs.readFile(await realInVault(checkVault(vault), rel)))
 // 工作区对比的 HEAD 一侧（S14）：经常驻 cat-file 读，HEAD 里没有这个文件时为 null。
 // `HEAD:./` 按 git 的工作目录（即笔记库）解析，笔记库是仓库子目录时也对
 ipcMain.handle('git:readHead', async (_e, vault: string, rel: string) => {

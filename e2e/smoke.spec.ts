@@ -851,10 +851,20 @@ const allSyntax = [
   '|:---|:--:|---:|',
   '| a | b | c |',
   '',
+  '> | 引 | 用 |',
+  '> |---|---|',
+  '> | x | y |',
+  '',
+  '- 列表里的表格',
+  '',
+  '  | 列 |',
+  '  |---|',
+  '  | z |',
+  '',
   '最后一行\t带 tab  ',
 ].join('\n')
 
-// 只打开、不编辑：保存后磁盘字节不变（含 BOM、行尾空白、tab、无结尾换行），进出 ⌘⇧D 再保存也不变
+// 只打开、不编辑：⌘S 后磁盘字节不变（含 BOM、行尾空白、tab、无结尾换行），进出 ⌘⇧D 再 ⌘S 也不变
 test('live preview renders every syntax and never changes source bytes', async () => {
   const files = { '笔记/全语法.md': allSyntax, '笔记/带BOM.md': '﻿# 标题\n\n- [ ] 任务\n| a |\n|---|\n| 1 |', '空.md': '' }
   const { app, win, vault } = await launch({ ...files })
@@ -877,27 +887,33 @@ test('live preview renders every syntax and never changes source bytes', async (
   await expect(editor).not.toContainText('其他.md')
   await expect(win.locator('.cm-lp-image img')).toHaveAttribute('src', /^data:image\/png;base64,/)
   await expect(win.locator('.cm-lp-image-missing')).toHaveText('外链')
-  await expect(win.locator('.cm-lp-bullet')).toHaveCount(1)
+  await expect(win.locator('.cm-lp-bullet')).toHaveCount(2)
   await expect(win.locator('.cm-lp-task')).toHaveCount(2)
   await expect(win.locator('.cm-lp-task').nth(1)).toBeChecked()
-  await expect(win.locator('.cm-lp-quote')).toHaveText('引用 粗')
+  await expect(win.locator('.cm-line.cm-lp-quote')).toHaveText('引用 粗')
   await expect(win.locator('.cm-lp-hr')).toHaveCount(1)
   await expect(win.locator('.cm-lp-fence')).toHaveText('ts')
-  await expect(win.locator('.cm-lp-table th')).toHaveText(['左', '中', '右'])
-  await expect(win.locator('.cm-lp-table td').nth(2)).toHaveCSS('text-align', 'right')
+  await expect(win.locator('.cm-lp-table').first().locator('th')).toHaveText(['左', '中', '右'])
+  await expect(win.locator('.cm-lp-table').first().locator('td').nth(2)).toHaveCSS('text-align', 'right')
+  // 引用、列表里的表格也渲染（连同行首的 `> ` / 缩进）
+  await expect(win.locator('.cm-lp-table')).toHaveCount(3)
+  await expect(win.locator('.cm-lp-table.cm-lp-quote td')).toHaveText(['x', 'y'])
+  await expect(win.locator('.cm-lp-table').nth(2).locator('td')).toHaveText(['z'])
+  await expect(editor).not.toContainText('|---|')
   // 代码块按语言懒加载高亮：关键字有自己的颜色
   await expect.poll(() => win.locator('.cm-lp-codeblock span').count()).toBeGreaterThan(2)
 
   // 光标移进表格：表格切回源码
-  await win.locator('.cm-lp-table').click()
+  await win.locator('.cm-lp-table').first().click()
   await expect(editor).toContainText('|:---|:--:|---:|')
-  await expect(win.locator('.cm-lp-table')).toHaveCount(0)
+  await expect(win.locator('.cm-lp-table')).toHaveCount(2)
 
   const stat = (p: string) => statSync(path.join(vault, p)).mtimeMs
   const save = async (p: string) => {
     const before = stat(p)
     await win.keyboard.press('ControlOrMeta+s')
-    await expect.poll(() => stat(p)).toBeGreaterThan(before) // 确实写了盘
+    await win.waitForTimeout(300)
+    expect(stat(p)).toBe(before) // 正文与磁盘一致：⌘S 不写盘
     expect(readFileSync(path.join(vault, p), 'utf8')).toBe(files[p as keyof typeof files])
   }
   await save('笔记/全语法.md')
@@ -959,5 +975,49 @@ test('IME composition keeps the cursor line stable', async () => {
   await expect(editor.locator('.cm-line').nth(2)).toHaveText('前 **粗** 后你好')
   await win.keyboard.type('!')
   await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('# 标题\n\n前 **粗** 后你好!\n\n- [ ] 任务\n')
+  await app.close()
+})
+
+// CRLF 笔记：CM6 内部按 \n 处理，保存时按读进来时的换行符写回（只打开不写盘，编辑后仍是 CRLF，diff 里编辑也一样）
+test('CRLF notes keep their line endings', async () => {
+  const crlf = '# 标题\r\n\r\n- [ ] 任务\r\n正文\r\n'
+  const { app, win, vault } = await launch({ 'a.md': crlf, 'b.md': crlf, 'c.md': crlf })
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(vault, '..', 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' }
+  writeFileSync(env.GIT_CONFIG_GLOBAL, '[core]\n\tautocrlf = false\n')
+  const git = (...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: vault, env })
+  git('init', '-q')
+  git('add', '.')
+  git('commit', '-qm', '1')
+  const read = (p: string) => readFileSync(path.join(vault, p), 'utf8')
+  const editor = win.locator('.cm-content')
+
+  // 只打开 + ⌘S：字节不变
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(editor).toContainText('# 标题')
+  await win.keyboard.press('ControlOrMeta+s')
+  await win.waitForTimeout(500)
+  expect(read('a.md')).toBe(crlf)
+
+  // 正文里编辑：仍是 CRLF
+  await win.getByRole('treeitem', { name: 'b.md' }).click()
+  await expect(editor).toContainText('# 标题')
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('新行')
+  await win.keyboard.press('Enter')
+  await win.keyboard.press('ControlOrMeta+s')
+  await expect.poll(() => read('b.md')).toBe(crlf + '新行\r\n')
+
+  // diff 里编辑：仍是 CRLF，左右两侧不因换行符不同而整篇标红
+  await win.getByRole('treeitem', { name: 'c.md' }).click()
+  await expect(editor).toContainText('# 标题')
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  const diff = win.locator('.monaco-diff-editor')
+  await expect(diff).toBeVisible({ timeout: 10_000 })
+  await expect(diff.locator('.editor.modified .view-lines')).toContainText('正文')
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('在 diff 里写')
+  await win.keyboard.press('ControlOrMeta+s')
+  await expect.poll(() => read('c.md')).toBe(crlf + '在 diff 里写')
+  await expect(diff.locator('.line-insert')).toHaveCount(1)
   await app.close()
 })

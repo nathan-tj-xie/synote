@@ -183,6 +183,8 @@ class TableWidget extends WidgetType {
     readonly source: string,
     readonly rows: string[][],
     readonly align: (string | null)[],
+    readonly quoted: boolean, // 在引用里：整行（含 `> `）都被替换，引用的左边线由表格自己画
+    readonly indent: number, // 在列表里：表格前的缩进列数
   ) {
     super()
   }
@@ -194,7 +196,8 @@ class TableWidget extends WidgetType {
   }
   toDOM(view: EditorView) {
     const wrap = document.createElement('div')
-    wrap.className = 'cm-lp-table'
+    wrap.className = this.quoted ? 'cm-lp-table cm-lp-quote' : 'cm-lp-table'
+    wrap.style.marginLeft = `${this.indent}ch`
     const table = wrap.appendChild(document.createElement('table'))
     this.rows.forEach((cells, i) => {
       const tr = (i === 0 ? table.createTHead() : (table.tBodies[0] ?? table.createTBody())).insertRow()
@@ -231,23 +234,38 @@ function tableWidget(state: EditorState, n: SyntaxNode): TableWidget {
           return s.startsWith(':') && s.endsWith(':') ? 'center' : s.endsWith(':') ? 'right' : s.startsWith(':') ? 'left' : null
         })
   }
-  return new TableWidget(state.sliceDoc(n.from, n.to), rows, align)
+  let quoted = false
+  for (let p = n.parent; p; p = p.parent) quoted ||= p.name === 'Blockquote'
+  const start = state.doc.lineAt(n.from).from
+  return new TableWidget(state.sliceDoc(start, n.to), rows, align, quoted, quoted ? 0 : n.from - start)
 }
 
-// 跨行替换（表格）必须由 StateField 提供，ViewPlugin 不能替换换行。
-// shortcut: 只渲染顶层表格（列表、引用里的表格显示源码）；有需要时改成遍历整棵树
+// 能装下表格的容器：只往这些节点里走，段落、代码块等叶子块整块跳过，每次重建只付块级结构的代价
+const CONTAINERS = new Set(['Document', 'Blockquote', 'BulletList', 'OrderedList', 'ListItem'])
+
+// 跨行替换（表格）必须由 StateField 提供，ViewPlugin 不能替换换行。块级替换按整行：
+// 引用、列表里的表格连同行首的 `> ` / 缩进一起替换（行内插件跳过这些行，不会叠加装饰）
 export function buildTables(state: EditorState): DecorationSet {
   const out: Range<Decoration>[] = []
-  for (let c = syntaxTree(state).topNode.firstChild; c; c = c.nextSibling)
-    if (c.name === 'Table' && !touches(state, c.from, c.to)) out.push(Decoration.replace({ widget: tableWidget(state, c), block: true }).range(c.from, c.to))
+  syntaxTree(state).iterate({
+    enter(n) {
+      if (n.name !== 'Table') return CONTAINERS.has(n.name)
+      if (!touches(state, n.from, n.to))
+        out.push(Decoration.replace({ widget: tableWidget(state, n.node), block: true }).range(state.doc.lineAt(n.from).from, n.to))
+      return false
+    },
+  })
   return Decoration.set(out)
 }
+
+// 组字状态：由 DOM 的 compositionstart / end 维护。StateField 拿不到 view.composing，靠它在组字期间不重建表格
+let ime = false
 
 type TableValue = { decos: DecorationSet; key: string; stale: boolean }
 const tables = StateField.define<TableValue>({
   create: (s) => ({ decos: buildTables(s), key: activeKey(s), stale: false }),
   update(v, tr) {
-    if (tr.isUserEvent('input.type.compose')) return { ...v, decos: v.decos.map(tr.changes), stale: true }
+    if (ime || tr.isUserEvent('input.type.compose')) return { ...v, decos: v.decos.map(tr.changes), stale: true }
     const key = activeKey(tr.state)
     if (v.stale || tr.docChanged || key !== v.key || syntaxTree(tr.state) !== syntaxTree(tr.startState) || refreshed([tr]))
       return { decos: buildTables(tr.state), key, stale: false }
@@ -263,12 +281,23 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
   const out: Range<Decoration>[] = []
   const doc = state.doc
   const info = state.facet(note)
+  // 已整块渲染成表格的范围（引用、列表里的表格）：里面的 `> `、缩进等不再加装饰
+  const rendered = state.field(tables, false)?.decos
+  const inTable = (a: number, b: number) => {
+    let hit = false
+    rendered?.between(a, a, (x, y) => {
+      if (x <= a && b <= y) hit = true
+    })
+    return hit
+  }
   // 块内的每一行加 line 装饰，只加视口里的那些行（大代码块不必整块走一遍）
   const lines = (a: number, b: number, cls: (first: boolean, last: boolean) => string) => {
     const first = doc.lineAt(a).number
     const last = doc.lineAt(b).number
-    for (let i = Math.max(first, doc.lineAt(from).number); i <= Math.min(last, doc.lineAt(to).number); i++)
-      out.push(line(cls(i === first, i === last)).range(doc.line(i).from))
+    for (let i = Math.max(first, doc.lineAt(from).number); i <= Math.min(last, doc.lineAt(to).number); i++) {
+      const l = doc.line(i)
+      if (!inTable(l.from, l.to)) out.push(line(cls(i === first, i === last)).range(l.from))
+    }
   }
   // ViewPlugin 的替换不能跨行（跨行的图片、链接标题等罕见写法就显示源码）
   const oneLine = (a: number, b: number) => a < b && doc.lineAt(a).to >= b
@@ -282,6 +311,7 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
     to,
     enter(n) {
       const name = n.name
+      if (inTable(n.from, n.to)) return false
       const active = () => touches(state, n.from, n.to)
       const h = /^(ATX|Setext)Heading(\d)$/.exec(name)
       if (h) {
@@ -334,14 +364,16 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
         case 'Link': {
           const marks = n.node.getChildren('LinkMark')
           if (active() || marks.length < 2) return
-          // [名字](路径) → 只显示名字
+          // [名字](路径) → 只显示名字。目标跨行（`](\n路径)`）时整个链接显示源码，不能只藏一半
+          if (!oneLine(marks[1].from, n.to)) return
           hide(marks[0].from, marks[0].to)
           if (marks[0].to < marks[1].from) out.push(mark('cm-lp-link').range(marks[0].to, marks[1].from))
           hide(marks[1].from, n.to)
           return
         }
         case 'Image': {
-          if (active()) return false
+          // 跨行的图片整个显示源码（ViewPlugin 不能替换换行）
+          if (active() || !oneLine(n.from, n.to)) return false
           const url = n.node.getChild('URL')
           const src = url ? doc.sliceString(url.from, url.to) : ''
           const marks = n.node.getChildren('LinkMark')
@@ -388,8 +420,12 @@ const inline = ViewPlugin.fromClass(
   {
     decorations: (v) => v.decorations,
     eventHandlers: {
+      compositionstart() {
+        ime = true
+      },
       // 组字结束：补一次重建（组字期间只映射了旧装饰）
       compositionend(_e, view) {
+        ime = false
         setTimeout(() => views.has(view) && view.dispatch({ effects: refresh.of(null) }))
       },
     },
