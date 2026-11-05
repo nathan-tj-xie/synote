@@ -24,6 +24,8 @@ const api: SynoteApi = {
   saveAttachment: (v, n, b) => ipcRenderer.invoke('file:saveAttachment', v, n, b),
   attachmentSettled: (v, p) => ipcRenderer.invoke('file:attachmentSettled', v, p),
   trash: (v, p) => ipcRenderer.invoke('file:trash', v, p),
+  planRename: (v, f, t) => ipcRenderer.invoke('file:planRename', v, f, t),
+  rename: (v, f, t, files) => ipcRenderer.invoke('file:rename', v, f, t, files),
   showItemMenu: (p, dir) => ipcRenderer.invoke('menu:item', p, dir),
   reportReady: () => ipcRenderer.send('app:ready'),
   onVaultChanged: subscribe('vault:changed'),

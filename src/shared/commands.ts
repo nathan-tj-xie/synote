@@ -9,6 +9,7 @@ export const commands = {
   search: { title: 'search', key: 'Mod-Shift-f' },
   toggleDiff: { title: 'toggleDiff', key: 'Mod-Shift-d' },
   newNote: { title: 'newNote' },
+  rename: { title: 'rename' },
   trash: { title: 'trash' },
   rebuildIndex: { title: 'rebuildIndex' },
   cleanOrphans: { title: 'cleanOrphans' },

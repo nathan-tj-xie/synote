@@ -26,6 +26,9 @@ export function relativeLink(note: string, target: string): string {
   return [...from.slice(i).map(() => '..'), ...to.slice(i)].map(encodeSegment).join('/')
 }
 
+// 把 from（文件或文件夹）移到 to 之后，p 的新路径；不在 from 之下的不变（S9）
+export const movePath = (p: string, from: string, to: string) => (p === from ? to : p.startsWith(`${from}/`) ? to + p.slice(from.length) : p)
+
 // HTML 实体解码：数字实体和常用命名实体自己解；其余命名实体有 DOM 时交给浏览器（渲染进程），没有就保留原文
 const named: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0' }
 const ENTITY = '&(#\\d{1,7}|#x[\\da-f]{1,6}|[a-z][a-z\\d]{0,31});'

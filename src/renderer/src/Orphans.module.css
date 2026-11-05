@@ -5,6 +5,7 @@
 .list { margin: 0; padding: 0; list-style: none; max-height: 360px; overflow: auto; }
 .list li { display: flex; gap: 12px; padding: 3px 0; }
 .path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.input { width: 100%; box-sizing: border-box; padding: 6px 8px; background: var(--bg); color: inherit; border: 1px solid var(--border); border-radius: 4px; font: inherit; }
 .actions { display: flex; justify-content: flex-end; gap: 8px; }
 .actions button { border: 1px solid var(--border); background: none; color: inherit; padding: 4px 12px; border-radius: 4px; cursor: pointer; font: inherit; }
 .actions .primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }

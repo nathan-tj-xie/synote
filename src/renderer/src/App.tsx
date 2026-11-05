@@ -9,6 +9,7 @@ import { FileTree } from './FileTree'
 import { GitView } from './GitView'
 import { Orphans } from './Orphans'
 import { Palette } from './Palette'
+import { Rename } from './Rename'
 import { Search } from './Search'
 import { useUi, useVault } from './store'
 import { Welcome } from './Welcome'
@@ -65,6 +66,7 @@ export function App() {
       </Group>
       <Palette />
       <Orphans />
+      <Rename />
       {error && (
         <div className={s.error} role="alert" onClick={() => useUi.getState().setError(null)}>
           {error}

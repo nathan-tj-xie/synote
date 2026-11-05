@@ -231,6 +231,11 @@ export class Git {
     return this.mutate(['--literal-pathspecs', 'rm', '-q', '--', ...paths])
   }
 
+  // 重命名 / 移动（S9）：git mv 保留历史；文件夹里没跟踪的文件随文件夹一起移动
+  mv(from: string, to: string): Promise<string> {
+    return this.mutate(['mv', '--', from, to])
+  }
+
   // 读任意版本的 blob（如 `HEAD:a.md`），不存在时为 null；复用常驻的 cat-file --batch 进程
   async readBlob(spec: string): Promise<Buffer | null> {
     // 按行协议传不了含换行的路径（-Z 要 2.42+），先用 rev-parse 换成 oid 再读

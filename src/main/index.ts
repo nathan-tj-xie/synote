@@ -8,6 +8,7 @@ import { indexMethods, type GitState, type OrphanAttachment, type ItemMenuAction
 import { tokens } from '../shared/tokens'
 import { exec, findGit, Git, GitError, type GitDetectionResult } from './git'
 import { checkOrphans, removeOrphans, trackedOf } from './orphans'
+import { commitRename, planRename } from './rename'
 import { attachmentName, isHidden, realInVault, realParentInVault, resolveInVault, saveAttachment, scanEntries, toPosix, uniqueNoteName, writeTarget } from './vault'
 
 i18next.init(i18nOptions)
@@ -89,15 +90,20 @@ function watchVault(dir: string): FSWatcher {
     if (isHidden(rel)) return
     changed.add(rel)
     clearTimeout(timer)
-    timer = setTimeout(async () => {
-      if (root !== dir) return
-      const list = [...changed]
-      changed.clear()
-      const entries = await scanEntries(dir)
-      if (root !== dir) return // 扫描期间切了库：迟到的结果不发
-      win?.webContents.send('vault:changed', { root: dir, entries, changed: list })
-    }, 150)
+    timer = setTimeout(fire, 150)
   })
+  async function fire() {
+    if (root !== dir) return
+    // 重命名进行中（或扫描跨过了一次重命名）：改动攒着，等结束后再推，渲染进程先按 rename 的回执改好标签路径
+    if (moving) return void (timer = setTimeout(fire, 150))
+    const gen = moves
+    const list = [...changed]
+    const entries = await scanEntries(dir)
+    if (root !== dir) return // 扫描期间切了库：迟到的结果不发
+    if (moving || gen !== moves) return void (timer = setTimeout(fire, 150))
+    for (const p of list) changed.delete(p)
+    win?.webContents.send('vault:changed', { root: dir, entries, changed: list })
+  }
 }
 
 function forkIndexer(dir: string): UtilityProcess {
@@ -377,13 +383,59 @@ ipcMain.handle('git:choose', async () => {
   detectGit()
   return gitState()
 })
+// 重命名 / 移动（S9）：串成一条链，期间 watcher 的推送暂停
+let renaming: Promise<unknown> = Promise.resolve()
+let moving = false
+let moves = 0
+const relOk = (rel: unknown): rel is string =>
+  typeof rel === 'string' && rel.split('/').every((s) => s && s !== '.' && s !== '..') && !(process.platform === 'win32' && /[\\:*?"<>|]/.test(rel))
+
+// 校验一次移动，返回真实路径：两边都在库内、不是隐藏路径（attachments/ 不在 MVP 范围），不移进自身；
+// 源存在，目标不存在（只改大小写时目标就是源本身），笔记仍以 .md 结尾
+async function checkMove(r: string, from: unknown, to: unknown): Promise<{ src: string; dst: string; from: string; to: string }> {
+  if (!relOk(from) || !relOk(to) || isHidden(from) || isHidden(to) || to === from || to.startsWith(`${from}/`)) throw new Error(t('renameInvalid', { path: String(to) }))
+  const [src, dst] = await Promise.all([realParentInVault(r, from), realParentInVault(r, to)])
+  const st = await fs.lstat(src)
+  if (!st.isDirectory() && from.endsWith('.md') !== to.endsWith('.md')) throw new Error(t('renameKeepMd'))
+  const there = await fs.lstat(dst).catch(() => null)
+  if (there && !(there.ino === st.ino && there.dev === st.dev)) throw new Error(t('renameExists', { path: to }))
+  return { src, dst, from, to }
+}
+ipcMain.handle('file:planRename', async (_e, vault: string, from: string, to: string) => {
+  const r = checkVault(vault)
+  await checkMove(r, from, to)
+  return (await planRename(r, from, to)).map((p) => p.path)
+})
+ipcMain.handle('file:rename', (_e, vault: string, from: string, to: string, files: string[]) => {
+  const r = checkVault(vault)
+  if (!Array.isArray(files)) throw new Error('invalid files')
+  const job = renaming.then(async () => {
+    moving = true
+    moves++
+    try {
+      const m = await checkMove(r, from, to)
+      const plans = await planRename(r, m.from, m.to)
+      if (plans.map((p) => p.path).join('\0') !== files.join('\0')) throw new Error(t('renameChanged'))
+      // 仓库里有跟踪的就 git mv 保留历史，否则（含非 git 目录）直接 rename
+      const repo = await vaultRepo(r)
+      const git = repo && (await repo.tracked([m.from])).length ? repo : null
+      await commitRename(plans, async () => void (git ? await git.mv(m.from, m.to) : await fs.rename(m.src, m.dst)))
+      return plans.map((p) => ({ path: p.path, before: p.before, edits: p.edits }))
+    } finally {
+      moving = false
+      callIndex('reconcile').catch((e) => console.error('[index] reconcile failed', e))
+    }
+  })
+  renaming = job.catch(() => {})
+  return job
+})
 ipcMain.handle('file:trash', async (_e, vault: string, rel: string) => shell.trashItem(await realParentInVault(checkVault(vault), rel)))
 ipcMain.handle(
   'menu:item',
   (_e, _rel: string, dir: boolean) =>
     new Promise<ItemMenuAction>((resolve) => {
       let picked: ItemMenuAction = null
-      const ids: NonNullable<ItemMenuAction>[] = dir ? ['newNote', 'trash'] : ['trash']
+      const ids: NonNullable<ItemMenuAction>[] = dir ? ['newNote', 'rename', 'trash'] : ['rename', 'trash']
       const items = ids.map((id) => ({ label: t(commands[id].title), click: () => (picked = id) }))
       Menu.buildFromTemplate(items).popup({ window: win!, callback: () => resolve(picked) })
     }),

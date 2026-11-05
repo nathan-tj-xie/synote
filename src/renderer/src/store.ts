@@ -18,6 +18,8 @@ type EditorState = {
   // 换了笔记库：标签、活动文件、dirty 全清（两库同名文件也不沿用）
   reset: () => void
   setDirty: (path: string, dirty: boolean) => void
+  // 重命名 / 移动之后（S9）：标签、活动文件、dirty 跟着换路径
+  rename: (move: (p: string) => string) => void
 }
 
 type UiState = {
@@ -26,10 +28,13 @@ type UiState = {
   sidebar: 'files' | 'search' | 'git'
   // "清理孤儿附件"确认框：清单来自哪个库（确认时按它删，期间切了库主进程会拒绝）
   orphans: { root: string; list: OrphanAttachment[] } | null
+  // "重命名 / 移动"对话框：要移动的路径和它所在的库
+  rename: { root: string; from: string } | null
   setError: (e: string | null) => void
   setPalette: (p: UiState['palette']) => void
   setSidebar: (v: UiState['sidebar']) => void
   setOrphans: (o: UiState['orphans']) => void
+  setRename: (r: UiState['rename']) => void
 }
 
 export const useVault = create<VaultState>((set, get) => ({
@@ -67,6 +72,8 @@ export const useEditor = create<EditorState>((set) => ({
       else delete d[path]
       return { dirty: d }
     }),
+  rename: (move) =>
+    set((s) => ({ tabs: s.tabs.map(move), active: s.active && move(s.active), dirty: Object.fromEntries(Object.keys(s.dirty).map((p) => [move(p), true])) })),
 }))
 
 export const useUi = create<UiState>((set) => ({
@@ -74,10 +81,12 @@ export const useUi = create<UiState>((set) => ({
   palette: null,
   sidebar: 'files',
   orphans: null,
+  rename: null,
   setError: (error) => set({ error }),
   setPalette: (palette) => set({ palette }),
   setSidebar: (sidebar) => set({ sidebar }),
   setOrphans: (orphans) => set({ orphans }),
+  setRename: (rename) => set({ rename }),
 }))
 
 // git 领域的 store（ADR 0005）：主进程状态的只读镜像，由 git:changed 推送更新
