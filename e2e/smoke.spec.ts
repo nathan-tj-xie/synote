@@ -1238,6 +1238,29 @@ test('clean orphans in a plain folder trashes only orphans confirmed at delete t
   await app.close()
 })
 
+// 引用解析的回归（codex #47 P1）：文件名里有 [ ] ( )、带 ?query / #fragment、%20、引用式、<img src> 的在用附件都不算孤儿，
+// 清理不删；只在正文里提到文件名（引用解析认不出）的，第二道防线拦下并提示
+test('clean orphans never deletes attachments referenced in unusual forms', async () => {
+  const used = ['report[1].pdf', 'a(1).png', 'book.pdf', 'x.png', 'y z.png', 'ref.png', 'img.png']
+  const { app, win, vault } = await launch({
+    'sub/n.md': [
+      '[报告](../attachments/report[1].pdf) ![](../attachments/a(1).png) [书](../attachments/book.pdf#page=2)',
+      '![](../attachments/x.png?v=1) ![](../attachments/y%20z.png) ![图][id] <img src="../attachments/img.png">',
+      '',
+      '[id]: ../attachments/ref.png',
+      '',
+      '截图另见 attachments 目录里的 shot.png',
+    ].join('\n'),
+    ...Object.fromEntries([...used, 'shot.png', 'gone.png'].map((f) => [`attachments/${f}`, f])),
+  })
+  await expect.poll(() => win.evaluate((v) => window.synote.orphans(v).catch(() => []), vault), { timeout: 5000 }).toEqual(['attachments/gone.png', 'attachments/shot.png'])
+  const dialog = await cleanOrphans(win)
+  await dialog.getByRole('button', { name: '删除 2 个' }).click()
+  await expect(win.getByRole('alert')).toContainText('attachments/shot.png')
+  expect(readdirSync(path.join(vault, 'attachments')).sort()).toEqual([...used, 'shot.png'].sort())
+  await app.close()
+})
+
 // git 仓库：已跟踪的 git rm（暂存删除），未跟踪的移到回收站
 test('clean orphans in a git repo: tracked are git rm-ed, untracked are trashed', async () => {
   const { app, win, vault } = await launch({ 'a.md': '![](attachments/keep.png)', 'attachments/keep.png': 'k', 'attachments/old.png': 'o' })

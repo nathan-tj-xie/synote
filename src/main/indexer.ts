@@ -6,10 +6,10 @@ import { setImmediate as tick } from 'node:timers/promises'
 import { parser } from '@lezer/markdown'
 import type { Backlink, SearchHit, SearchMatch } from '../shared/api'
 import { findLinks } from '../shared/mdLinks'
-import { decodeComponent, parseWiki, pickWiki, resolveLink } from '../shared/url'
+import { decodeComponent, decodeEntities, encodeSegment, parseWiki, pickWiki, resolveLink } from '../shared/url'
 import { isHidden, toPosix } from './vault'
 
-const VERSION = 2
+const VERSION = 3 // 3：附件引用改按语法树解析（S11），旧索引里截断的引用要重建
 const BATCH = 200
 
 type Link = { dst: string; kind: 'note' | 'wiki' | 'att'; at: number } // at：在正文里的偏移（使用处），反链的上下文用
@@ -32,19 +32,30 @@ export function extractLinks(src: string, text: string): Link[] {
       else if (w?.name) add({ dst: w.name, kind: 'wiki', at: l.from })
     } else if (!l.href.startsWith('#')) {
       // 笔记内的锚点不算双链
+      // resolveLink 去掉 ?query #fragment；附件引用和渲染进程同一套解析（S11）
       const dst = resolveLink(l.href, src)
       if (dst?.endsWith('.md')) add({ dst, kind: 'note', at: l.from })
+      else if (dst?.startsWith('attachments/')) add({ dst, kind: 'att', at: l.from })
+    }
+  }
+  // 宽松识别（代码块、HTML、纯文本里的路径）切不准边界：`)`、`]`、`#`、`?` 可能是文件名的一部分，也可能是链接语法或 query。
+  // 每个可能的切点都算一处引用（多算只会少判孤儿），解码方式同上：实体、百分号
+  const loose = (rest: string, at: number) => {
+    const cuts = [...rest.matchAll(/[)\]#?]/g)].map((m) => m.index)
+    for (const end of [...cuts, rest.length]) {
+      const name = decodeComponent(decodeEntities(rest.slice(0, end).trim()))
+      if (name) add({ dst: `attachments/${name}`, kind: 'att', at })
     }
   }
   // <img src="..."> 有引号界定，路径里可以有空格；先认出来，下面的通用规则跳过这些范围
   const quoted: [number, number][] = []
   for (const m of text.matchAll(/\bsrc\s*=\s*(["'])[^"'\n]*?attachments\/([^"'\n]+)\1/gi)) {
     quoted.push([m.index, m.index + m[0].length])
-    add({ dst: `attachments/${decodeComponent(m[2].trim())}`, kind: 'att', at: m.index }) // 引号里的首尾空白不属于路径
+    loose(m[2], m.index) // 引号里的首尾空白不属于路径（loose 里 trim）
   }
-  for (const m of text.matchAll(/attachments\/([^\s)"'<>\]|`]+)/g)) {
+  for (const m of text.matchAll(/attachments\/([^\s"'<>|`]+)/g)) {
     if (quoted.some(([a, b]) => m.index >= a && m.index < b)) continue
-    add({ dst: `attachments/${decodeComponent(m[1])}`, kind: 'att', at: m.index })
+    loose(m[1], m.index)
   }
   return [...links, ...att.values()]
 }
@@ -257,6 +268,23 @@ export class Indexer {
       )
       .all() as { path: string }[]
     return rows.map((r) => r.path)
+  }
+
+  // 删除孤儿前的第二道防线（S11）：给定的附件里，哪些的文件名（原样、百分号编码两种写法）仍出现在某篇笔记的正文里。
+  // 和引用解析无关，只看文本，所以解析漏判时也拦得住；多拦只是少删
+  // shortcut: 每次全表扫一遍正文（10k 篇约几十 MB），只在用户确认删除时调用；变慢时改用 trigram MATCH 预筛
+  mentioned(paths: string[]): string[] {
+    const forms = paths.map((p) => {
+      const name = path.posix.basename(p)
+      return [p, [...new Set([name, encodeSegment(name), encodeURIComponent(name), encodeURI(name)])]] as const
+    })
+    const hit = new Set<string>()
+    const scan = (body: string) => {
+      for (const [p, names] of forms) if (!hit.has(p) && names.some((n) => body.includes(n))) hit.add(p)
+    }
+    for (const r of this.db.prepare('SELECT body FROM fts').iterate() as Iterable<{ body: string }>) scan(r.body)
+    for (const body of this.pending.values()) scan(body) // 还没写进全文索引的正文
+    return paths.filter((p) => hit.has(p))
   }
 
   // ≥ 3 字走 trigram MATCH（BM25 排序）；1–2 字只能 LIKE 全表扫描，按出现次数排序

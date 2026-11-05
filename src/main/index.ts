@@ -308,15 +308,18 @@ ipcMain.handle('orphans:list', async (_e, vault: string): Promise<OrphanAttachme
   const tracked = await trackedOf(await vaultRepo(r), list)
   return list.map((p) => ({ path: p, tracked: tracked.has(p) }))
 })
-// 删除用户确认过的孤儿附件：以删除时刻的索引复核（期间加了引用的不删），路径再按真实路径校验。
+// 删除用户确认过的孤儿附件：以删除时刻的索引复核（期间加了引用的不删），路径再按真实路径校验；
+// 文件名仍出现在某篇笔记正文里的也不删（第二道防线，防引用解析漏判），放进 kept 告诉用户。
 // 和附件写入串在同一条链上：粘贴复用某个孤儿文件时，不会在写入途中被删
 ipcMain.handle('orphans:delete', (_e, vault: string, paths: string[]) => {
   const r = checkVault(vault)
   if (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string')) throw new Error('invalid paths')
   const job = attaching.then(async () => {
-    const targets = await checkOrphans(r, paths, new Set(await currentOrphans()))
+    const checked = await checkOrphans(r, paths, new Set(await currentOrphans()))
+    const kept = (await callIndex('mentioned', checked.map(([p]) => p))) as string[]
+    const targets = checked.filter(([p]) => !kept.includes(p))
     try {
-      return await removeOrphans(targets, await vaultRepo(r), (p) => shell.trashItem(p))
+      return { deleted: await removeOrphans(targets, await vaultRepo(r), (p) => shell.trashItem(p)), kept }
     } finally {
       callIndex('reconcile').catch((e) => console.error('[index] reconcile failed', e))
     }

@@ -14,8 +14,9 @@ export function Orphans() {
     if (!orphans) return
     setBusy(true)
     try {
-      await window.synote.deleteOrphans(orphans.root, orphans.list.map((o) => o.path))
+      const { kept } = await window.synote.deleteOrphans(orphans.root, orphans.list.map((o) => o.path))
       close()
+      if (kept.length) useUi.getState().setError(t('orphansKept', { paths: kept.join('、') }))
     } catch (e) {
       useUi.getState().setError(String(e))
     } finally {

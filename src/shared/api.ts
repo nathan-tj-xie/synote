@@ -74,8 +74,9 @@ export interface SynoteApi {
   rebuildIndex(vault: string): Promise<void>
   // "将删除的孤儿附件"清单（S11，S13 的 commit 面板分组也用），按路径排序；取之前主进程先对账，以落盘内容为准
   listOrphans(vault: string): Promise<OrphanAttachment[]>
-  // 删除用户确认过的孤儿附件，返回实际删除的路径：已不是孤儿、不在 attachments/ 内（含符号链接越界）的跳过
-  deleteOrphans(vault: string, paths: string[]): Promise<string[]>
+  // 删除用户确认过的孤儿附件。deleted：实际删除的路径；已不是孤儿、不在 attachments/ 内（含符号链接越界）的静默跳过；
+  // kept：文件名仍出现在笔记正文里、为保险没删的
+  deleteOrphans(vault: string, paths: string[]): Promise<{ deleted: string[]; kept: string[] }>
   // 索引更新后推送变化的路径；反链、引用计数、孤儿列表据此重新查询
   onIndexChanged(cb: (e: { root: string; paths: string[] }) => void): () => void
   // git（S12）
