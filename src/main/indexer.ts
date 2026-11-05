@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { setImmediate as tick } from 'node:timers/promises'
 import { parser } from '@lezer/markdown'
 import type { SearchHit, SearchMatch } from '../shared/api'
+import { decodeComponent } from '../shared/url'
 import { isHidden, toPosix } from './vault'
 
 const VERSION = 1
@@ -16,14 +17,6 @@ type Stat = { mtime: number; size: number }
 const isNote = (rel: string) => rel.endsWith('.md') && !isHidden(rel)
 const isAtt = (rel: string) => rel.startsWith('attachments/') && !rel.split('/').some((p) => p.startsWith('.'))
 const noteName = (rel: string) => (isNote(rel) ? path.posix.basename(rel, '.md') : null)
-// 按路径组件解码：decodeURI 不解码 %23、%3F 等保留字符，而文件名里可以有 # 和 ?
-const decode = (s: string) => {
-  try {
-    return decodeURIComponent(s)
-  } catch {
-    return s
-  }
-}
 
 // 标准链接走 lezer（排除代码），[[...]] 只扫非代码区，附件引用在全文上宽松识别（宁可多算，不误判孤儿）
 export function extractLinks(src: string, text: string): Link[] {
@@ -39,7 +32,7 @@ export function extractLinks(src: string, text: string): Link[] {
       if (n.name !== 'URL') return
       let url = text.slice(n.from, n.to).replace(/^<(.*)>$/, '$1')
       if (/^[a-z][a-z0-9+.-]*:/i.test(url) || url.startsWith('#')) return
-      url = decode(url.replace(/[#?].*$/, ''))
+      url = decodeComponent(url.replace(/[#?].*$/, ''))
       if (!url) return
       const dst = url.startsWith('/') ? path.posix.normalize(url.slice(1)) : path.posix.join(path.posix.dirname(src), url)
       if (dst.startsWith('..')) return
@@ -57,11 +50,11 @@ export function extractLinks(src: string, text: string): Link[] {
   const quoted: [number, number][] = []
   for (const m of text.matchAll(/\bsrc\s*=\s*(["'])[^"'\n]*?attachments\/([^"'\n]+)\1/gi)) {
     quoted.push([m.index, m.index + m[0].length])
-    add({ dst: `attachments/${decode(m[2].trim())}`, kind: 'att' }) // 引号里的首尾空白不属于路径
+    add({ dst: `attachments/${decodeComponent(m[2].trim())}`, kind: 'att' }) // 引号里的首尾空白不属于路径
   }
   for (const m of text.matchAll(/attachments\/([^\s)"'<>\]|`]+)/g)) {
     if (quoted.some(([a, b]) => m.index >= a && m.index < b)) continue
-    add({ dst: `attachments/${decode(m[1])}`, kind: 'att' })
+    add({ dst: `attachments/${decodeComponent(m[1])}`, kind: 'att' })
   }
   return [...out.values()]
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bomOffset, imageAt, minimalEdit } from './diffUtil'
+import { bomOffset, decodeEntities, destination, imageAt, minimalEdit, normalizeLabel, resolveImage } from './diffUtil'
 
 const apply = (a: string, e: ReturnType<typeof minimalEdit>) => (e ? a.slice(0, e.from) + e.insert + a.slice(e.to) : a)
 
@@ -49,3 +49,44 @@ describe('imageAt', () => {
   it('以 / 开头按库根', () => expect(imageAt('![](/attachments/x.PNG)', 2, 'a/b/c.md')?.path).toBe('attachments/x.PNG'))
   it('不是图片为 null', () => expect(imageAt('![](note.md)', 2, 'a.md')).toBeNull())
 })
+
+describe('destination / normalizeLabel', () => {
+  it('去尖括号、反转义、解码实体', () => {
+    expect(destination('<a b.png>')).toBe('a b.png')
+    expect(destination('a\\(1\\).png')).toBe('a(1).png')
+    expect(destination('a&amp;b&#35;&#x41;.png')).toBe('a&b#A.png')
+    expect(destination('a\\b.png')).toBe('a\\b.png') // 反斜杠后不是标点：保留
+  })
+  it('一次扫描：转义和实体产出的字符不再被重新解释', () => {
+    expect(destination('a\\&amp;b.png')).toBe('a&amp;b.png') // 转义的 & 不再开启实体
+    expect(destination('a&amp;b.png')).toBe('a&b.png')
+    expect(destination('a\\\\&amp;b')).toBe('a\\&b') // 转义的反斜杠之后照常解实体
+    expect(destination('&amp;lt;')).toBe('&lt;') // 实体解出的 & 不再开启实体
+  })
+  it('没有 DOM 时未知命名实体保留原文', () => expect(decodeEntities('&copy;')).toBe('&copy;'))
+  it('标签：折叠空白、case fold、不反转义', () => {
+    expect(normalizeLabel(' Foo \n Bar ')).toBe(normalizeLabel('foo bar'))
+    expect(normalizeLabel('a\\]')).toBe('A\\]') // 不剥方括号：末尾的转义 ] 保留
+    expect(normalizeLabel('ẞ')).toBe(normalizeLabel('ss'))
+    expect(normalizeLabel('a\\*b')).not.toBe(normalizeLabel('a*b'))
+  })
+  it('diff 悬停的图片同样先解码', () => expect(imageAt('![](a\\(1\\).png)', 2, 'n.md')?.path).toBe('a(1).png'))
+})
+
+// 图片路径按段 decodeURIComponent（审查第 7 轮）
+describe('resolveImage 百分号解码', () => {
+  it('保留字符也解码', () => {
+    expect(resolveImage('a%23b.png', '笔记/n.md')).toBe('笔记/a#b.png')
+    expect(resolveImage('a%26b.png', 'n.md')).toBe('a&b.png')
+    expect(resolveImage('a%20b%3Fc.png', 'n.md')).toBe('a b?c.png')
+  })
+  it('解出 / 的段整条拒绝，解出的 .. 越界也拒绝', () => {
+    expect(resolveImage('%2e%2e%2fx.png', 'n.md')).toBeNull()
+    expect(resolveImage('a%2Fb.png', 'n.md')).toBeNull()
+    expect(resolveImage('%5c..%5cx.png', 'n.md')).toBeNull()
+    expect(resolveImage('%2e%2e/x.png', 'n.md')).toBeNull()
+    expect(resolveImage('%2e%2e/x.png', 'd/n.md')).toBe('x.png') // 库内的上一级照常
+  })
+  it('不是合法编码时按原文', () => expect(resolveImage('a%zz.png', 'n.md')).toBe('a%zz.png'))
+})
+

@@ -1,6 +1,6 @@
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, closeSync, constants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs'
+import { chmodSync, closeSync, constants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -122,7 +122,8 @@ test('open vault, edit, save, reload external change', async () => {
   await expect.poll(() => readFileSync(file, 'utf8'), { timeout: 5000 }).toContain('写点东西')
 
   writeFileSync(file, '# 外部改的\n')
-  await expect(editor).toContainText('# 外部改的', { timeout: 5000 })
+  // 整篇替换后光标落到末行，标题行不在光标处，按实时预览渲染：`# ` 隐藏
+  await expect(editor.locator('.cm-lp-h1')).toHaveText('外部改的', { timeout: 5000 })
 
   // 非 git 目录：上面的笔记库本身就不是 git 仓库，没有报错即可；打开库不创建 .synote/config.json，写配置时才创建
   await expect(win.getByRole('alert')).toHaveCount(0)
@@ -821,5 +822,226 @@ test('workspace diff outside a git repo reports and stays in prose', async () =>
   await win.keyboard.press('ControlOrMeta+Shift+d')
   await expect(win.getByRole('alert')).toContainText('不是 git 仓库')
   await expect(win.locator('.cm-content')).toBeVisible()
+  await app.close()
+})
+
+// 实时预览（S3）：覆盖所有语法的笔记
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64')
+const allSyntax = [
+  '# 一级标题',
+  '',
+  '## 二级 *斜* **粗** ~~删~~ `码`',
+  '',
+  '正文 [名字](其他.md) 和 ![图](../attachments/a.png) 还有 ![外链](https://example.com/x.png)',
+  '',
+  '跨行的 [链',
+  '接](其他.md) 和引用式 ![引用图][图] 与 [引用链接][图] 及 ![转义](../attachments/a\\(1\\)&amp;b.png) ![百分号](../attachments/a%23b%26c.png)',
+  '',
+  '[图]: ../attachments/a.png',
+  '',
+  '自动链接 <https://example.com> 与 &amp; 和 \\*转义',
+  '',
+  '> [引用里',
+  '> 跨行](其他.md)',
+  '',
+  '- 圆点',
+  '  1. 有序',
+  '- [ ] 待办',
+  '- [x] 已办',
+  '',
+  '> 引用 **粗**',
+  '',
+  '---',
+  '',
+  '```ts',
+  'const n: number = 1 // 注释',
+  '```',
+  '',
+  '| 左 | 中 | 右 |',
+  '|:---|:--:|---:| ', // 对齐行带行尾空白也要认成表格（gfmTable.ts）
+  '| a | b | c |',
+  '',
+  '> | 引 | 用 |',
+  '> |---|---|',
+  '> | x | y |',
+  '',
+  '- 列表里的表格',
+  '',
+  '  | 列 |',
+  '  |---|',
+  '  | z |',
+  '',
+  '最后一行\t带 tab  ',
+].join('\n')
+
+// 只打开、不编辑：⌘S 后磁盘字节不变（含 BOM、行尾空白、tab、无结尾换行），进出 ⌘⇧D 再 ⌘S 也不变
+test('live preview renders every syntax and never changes source bytes', async () => {
+  const files = { '笔记/全语法.md': allSyntax, '笔记/带BOM.md': '﻿# 标题\n\n- [ ] 任务\n| a |\n|---|\n| 1 |', '空.md': '' }
+  const { app, win, vault } = await launch({ ...files })
+  mkdirSync(path.join(vault, 'attachments'))
+  writeFileSync(path.join(vault, 'attachments/a.png'), PNG)
+  writeFileSync(path.join(vault, 'attachments/a(1)&b.png'), PNG) // 地址里的转义和实体要先解码
+  writeFileSync(path.join(vault, 'attachments/a#b&c.png'), PNG) // %23、%26 按段 decodeURIComponent
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(vault, '..', 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' }
+  writeFileSync(env.GIT_CONFIG_GLOBAL, '')
+  const git = (...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: vault, env })
+  git('init', '-q')
+  git('add', '.')
+  git('commit', '-qm', '1')
+
+  const editor = win.locator('.cm-content')
+  await win.getByRole('treeitem', { name: '笔记' }).click()
+  await win.getByRole('treeitem', { name: '全语法.md' }).click()
+  // 光标在第一行：标题源码可见，其余渲染
+  await expect(editor).toContainText('# 一级标题')
+  await expect(win.locator('.cm-lp-h2')).toHaveText('二级 斜 粗 删 码')
+  await expect(win.locator('.cm-lp-link')).toHaveText(['名字', '链 接', '引用链接', 'https://example.com', '引用里 跨行'])
+  await expect(editor).toContainText('自动链接 https://example.com 与 & 和 *转义')
+  await expect(editor).not.toContainText('其他.md')
+  // 内联写法和引用式写法的图片都按笔记目录解析、内联显示
+  await expect(win.locator('.cm-lp-image img')).toHaveCount(4)
+  for (const img of await win.locator('.cm-lp-image img').all()) await expect(img).toHaveAttribute('src', /^data:image\/png;base64,/)
+  await expect(win.locator('.cm-lp-image-missing')).toHaveText('外链')
+  await expect(win.locator('.cm-lp-bullet').first()).toHaveText('•') // 行内装饰只建视口，后面的列表不一定已渲染
+  await expect(win.locator('.cm-lp-task')).toHaveCount(2)
+  await expect(win.locator('.cm-lp-task').nth(1)).toBeChecked()
+  await expect(win.locator('.cm-line.cm-lp-quote')).toHaveText(['引用里 跨行', '引用 粗']) // 跨行链接整段替换后两行显示为一行
+  await expect(win.locator('.cm-lp-hr')).toHaveCount(1)
+  await expect(win.locator('.cm-lp-fence')).toHaveText('ts')
+  await expect(win.locator('.cm-lp-table').first().locator('th')).toHaveText(['左', '中', '右'])
+  await expect(win.locator('.cm-lp-table').first().locator('td').nth(2)).toHaveCSS('text-align', 'right')
+  // 引用、列表里的表格也渲染（连同行首的 `> ` / 缩进）；它们在文末，先滚过去（只渲染视口）
+  const scroll = (to: 'top' | 'bottom') => win.locator('.cm-scroller').evaluate((e, to) => (e.scrollTop = to === 'top' ? 0 : e.scrollHeight), to)
+  await scroll('bottom')
+  await expect(win.locator('.cm-lp-table.cm-lp-quote td')).toHaveText(['x', 'y'])
+  await expect(win.locator('.cm-lp-table').last().locator('td')).toHaveText(['z'])
+  await expect(editor).not.toContainText('|---|')
+  await scroll('top')
+  // 代码块按语言懒加载高亮：关键字有自己的颜色
+  await expect.poll(() => win.locator('.cm-lp-codeblock span').count()).toBeGreaterThan(2)
+
+  // 光标移进表格：表格切回源码
+  await win.locator('.cm-lp-table').first().click()
+  await expect(editor).toContainText('|:---|:--:|---:|')
+
+  const stat = (p: string) => statSync(path.join(vault, p)).mtimeMs
+  const save = async (p: string) => {
+    const before = stat(p)
+    await win.keyboard.press('ControlOrMeta+s')
+    await win.waitForTimeout(300)
+    expect(stat(p)).toBe(before) // 正文与磁盘一致：⌘S 不写盘
+    expect(readFileSync(path.join(vault, p), 'utf8')).toBe(files[p as keyof typeof files])
+  }
+  await save('笔记/全语法.md')
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  await expect(win.locator('.monaco-diff-editor')).toBeVisible({ timeout: 10_000 })
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  await expect(editor).toBeVisible()
+  await save('笔记/全语法.md')
+  expect(git('status', '--porcelain').toString()).toBe('')
+
+  for (const name of ['带BOM.md', '空.md']) {
+    await win.getByRole('treeitem', { name }).click()
+    await expect(win.getByRole('tab', { name: name.replace(/\.md$/, ''), selected: true })).toBeVisible()
+    await save(name === '空.md' ? name : `笔记/${name}`)
+  }
+  expect(git('status', '--porcelain').toString()).toBe('')
+  await app.close()
+})
+
+// 任务勾选走普通编辑事务：写回正文、自动保存；只改中间那个字符
+test('clicking a task checkbox toggles it through the save path', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '# 待办\n\n- [ ] 买菜\n- [x] 洗衣\n' })
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  const boxes = win.locator('.cm-lp-task')
+  await expect(boxes).toHaveCount(2)
+  await boxes.first().click()
+  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('# 待办\n\n- [x] 买菜\n- [x] 洗衣\n')
+  await boxes.nth(1).click()
+  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('# 待办\n\n- [x] 买菜\n- [ ] 洗衣\n')
+  // 勾选不移动光标：光标仍在第一行，任务行保持渲染
+  await expect(boxes).toHaveCount(2)
+  await app.close()
+})
+
+// 中文输入法：用 CDP 模拟组字。组字期间光标所在行的装饰不重建（DOM 节点不被替换）、光标不跳；上屏后内容正确
+test('IME composition keeps the cursor line stable', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '# 标题\n\n前 **粗** 后\n\n- [ ] 任务\n' })
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  const editor = win.locator('.cm-content')
+  await expect(win.locator('.cm-lp-h1')).toBeVisible()
+  // 光标放到第 3 行「后」之后
+  await editor.locator('.cm-line').nth(2).click()
+  await win.keyboard.press('End')
+  await expect(editor.locator('.cm-line').nth(2)).toHaveText('前 **粗** 后')
+  await win.evaluate(() => {
+    const line = document.querySelectorAll('.cm-line')[2]
+    ;(window as unknown as { probe: Element }).probe = line
+  })
+  const cdp = await win.context().newCDPSession(win)
+  for (const text of ['n', 'ni', 'nih', 'niha', 'nihao']) {
+    await cdp.send('Input.imeSetComposition', { text, selectionStart: text.length, selectionEnd: text.length })
+    // 同一个行节点、内容只多了组字文本，其它行的渲染不变
+    expect(await win.evaluate(() => (window as unknown as { probe: Element }).probe.isConnected)).toBe(true)
+    await expect(editor.locator('.cm-line').nth(2)).toHaveText(`前 **粗** 后${text}`)
+    await expect(win.locator('.cm-lp-task')).toHaveCount(1)
+    await expect(win.locator('.cm-lp-h1')).toHaveText('标题')
+  }
+  await cdp.send('Input.insertText', { text: '你好' })
+  await expect(editor.locator('.cm-line').nth(2)).toHaveText('前 **粗** 后你好')
+  await win.keyboard.type('!')
+  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('# 标题\n\n前 **粗** 后你好!\n\n- [ ] 任务\n')
+  await app.close()
+})
+
+// CRLF 笔记：CM6 内部按 \n 处理，保存时按读进来时的换行符写回（只打开不写盘，编辑后仍是 CRLF，diff 里编辑也一样）
+test('CRLF notes keep their line endings', async () => {
+  const crlf = '# 标题\r\n\r\n- [ ] 任务\r\n正文\r\n'
+  const mixed = '# 混合\r\n一\n二\r\n三\r四'
+  const { app, win, vault } = await launch({ 'a.md': crlf, 'b.md': crlf, 'c.md': crlf, 'd.md': mixed })
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(vault, '..', 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' }
+  writeFileSync(env.GIT_CONFIG_GLOBAL, '[core]\n\tautocrlf = false\n')
+  const git = (...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: vault, env })
+  git('init', '-q')
+  git('add', '.')
+  git('commit', '-qm', '1')
+  const read = (p: string) => readFileSync(path.join(vault, p), 'utf8')
+  const editor = win.locator('.cm-content')
+
+  // 只打开 + ⌘S：字节不变
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(editor).toContainText('# 标题')
+  await win.keyboard.press('ControlOrMeta+s')
+  await win.waitForTimeout(500)
+  expect(read('a.md')).toBe(crlf)
+
+  // 混合换行只打开 + ⌘S：不写盘，字节不变（编辑后才会统一成多数那种）
+  await win.getByRole('treeitem', { name: 'd.md' }).click()
+  await expect(editor).toContainText('# 混合')
+  await win.keyboard.press('ControlOrMeta+s')
+  await win.waitForTimeout(500)
+  expect(read('d.md')).toBe(mixed)
+
+  // 正文里编辑：仍是 CRLF
+  await win.getByRole('treeitem', { name: 'b.md' }).click()
+  await expect(editor).toContainText('# 标题')
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('新行')
+  await win.keyboard.press('Enter')
+  await win.keyboard.press('ControlOrMeta+s')
+  await expect.poll(() => read('b.md')).toBe(crlf + '新行\r\n')
+
+  // diff 里编辑：仍是 CRLF，左右两侧不因换行符不同而整篇标红
+  await win.getByRole('treeitem', { name: 'c.md' }).click()
+  await expect(editor).toContainText('# 标题')
+  await win.keyboard.press('ControlOrMeta+Shift+d')
+  const diff = win.locator('.monaco-diff-editor')
+  await expect(diff).toBeVisible({ timeout: 10_000 })
+  await expect(diff.locator('.editor.modified .view-lines')).toContainText('正文')
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('在 diff 里写')
+  await win.keyboard.press('ControlOrMeta+s')
+  await expect.poll(() => read('c.md')).toBe(crlf + '在 diff 里写')
+  await expect(diff.locator('.line-insert')).toHaveCount(1)
   await app.close()
 })

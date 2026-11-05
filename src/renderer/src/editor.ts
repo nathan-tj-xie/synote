@@ -1,9 +1,12 @@
 // CM6 薄封装：一个 EditorView，按标签页缓存 EditorState，不放进 React state（ADR 0005）
-import { markdown } from '@codemirror/lang-markdown'
-import { Annotation, Compartment, EditorSelection, EditorState, Transaction, type ChangeSpec } from '@codemirror/state'
+import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
+import { languages } from '@codemirror/language-data'
+import { Annotation, Compartment, EditorSelection, EditorState, StateEffect, StateField, Transaction, type ChangeSpec } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { vscodeKeymap } from '@replit/codemirror-vscode-keymap'
 import { minimalSetup } from 'codemirror'
+import { tableTrailingSpace } from './gfmTable'
+import { livePreview } from './livePreview'
 import { useEditor, useUi, useVault } from './store'
 
 // 缓存不变式：视图里那份（shown）永远是该文件最新的正文，states 只缓存不在视图里的已打开文件。
@@ -51,15 +54,26 @@ const theme = EditorView.theme(
   { dark: true },
 )
 
-function makeState(doc: string): EditorState {
+// 换行符：CM6 内部一律是 \n（diff.ts 与 Monaco 的偏移同步也按 \n 算），写盘时换回读进来时的换行符。
+// 混合换行的文件按占多数的那种统一写回
+const detectEol = (text: string) => ((text.split('\r\n').length - 1) * 2 > text.split('\n').length - 1 ? '\r\n' : '\n')
+const setEol = StateEffect.define<string>()
+const eol = StateField.define<string>({
+  create: () => '\n',
+  update: (v, tr) => tr.effects.reduce((v, e) => (e.is(setEol) ? e.value : v), v),
+})
+
+function makeState(doc: string, path: string): EditorState {
   return EditorState.create({
     doc,
     extensions: [
+      eol.init(() => detectEol(doc)),
       keymap.of(vscodeKeymap), // 键位贴近 Monaco（ADR 0003），放在前面优先于 minimalSetup 的默认键位
       minimalSetup,
       editable(),
       EditorState.allowMultipleSelections.of(true), // ⌘D、⌥ 点击等多光标键位需要
-      markdown(),
+      markdown({ base: markdownLanguage, codeLanguages: languages, extensions: [tableTrailingSpace] }), // GFM（表格、任务列表、删除线）；代码块按语言懒加载高亮
+      livePreview(vault ? { vault, path } : null),
       EditorView.lineWrapping,
       theme,
       EditorView.updateListener.of((u) => {
@@ -71,8 +85,12 @@ function makeState(doc: string): EditorState {
   })
 }
 
+// 按磁盘上的样子（原换行符）取正文
 function docOf(path: string): string | undefined {
-  return (path === shown ? view?.state : states.get(path))?.doc.toString()
+  const s = path === shown ? view?.state : states.get(path)
+  if (!s) return undefined
+  const text = s.doc.toString()
+  return s.field(eol, false) === '\r\n' ? text.replace(/\n/g, '\r\n') : text
 }
 
 function scheduleSave(path: string) {
@@ -219,7 +237,7 @@ export async function show(path: string | null) {
         throw e
       }
       if (my !== seq) return // 读文件期间又切走、关掉或换了库
-      s = makeState(text)
+      s = makeState(text, path)
     }
     setView(path, s)
   }
@@ -248,7 +266,8 @@ export function reveal(path: string, line: number, col: number, len: number) {
   useEditor.getState().open(path)
 }
 
-export const saveCurrent = () => !locked && shown && flush(shown)
+// 正文与上次落盘一致（没有未保存改动）时不写盘
+export const saveCurrent = () => !locked && shown && (timers.has(shown) || useEditor.getState().dirty[shown]) && flush(shown)
 
 export function setLocked(on: boolean) {
   locked = on
@@ -287,8 +306,8 @@ export async function reloadIfClean(path: string) {
   // 读文件期间换了库、有本地输入（不论是否已存盘）或标签页已关：以本地为准，读到的可能是旧快照
   if (vault !== v || docOf(path) !== before || useEditor.getState().dirty[path]) return
   if (text === before) return // 自己写入触发的事件
-  if (path === shown && view) view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text }, annotations: Transaction.remote.of(true) })
-  else states.set(path, makeState(text))
+  if (path === shown && view) view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text }, effects: setEol.of(detectEol(text)), annotations: Transaction.remote.of(true) })
+  else states.set(path, makeState(text, path))
   useEditor.getState().setDirty(path, false)
 }
 
