@@ -4,7 +4,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { GitErrorKind, GitFile, GitOpResult, GitState, LogEntry, OrphanAttachment } from '../../shared/api'
-import { attachmentsSettled, compareWith, flushAll, openDiff } from './editor'
+import { attachmentsSettled, compareWith, flushAll, openDiff, withWorktreeLock } from './editor'
 import s from './GitView.module.css'
 import { CommitList } from './History'
 import { isMac } from './match'
@@ -104,12 +104,8 @@ function Panel({ root, state }: { root: string; state: Ready }) {
       if (res.ok) setMessage('')
       return res
     })
-  // pull 会改写工作区：同样先落盘，git 发现本地改动和远端冲突时会拒绝，而不是被编辑器之后的保存覆盖
-  const pull = () =>
-    run('pull', async () => {
-      if (!(await flushAll())) throw new Error(t('gitPullUnsaved'))
-      return window.synote.gitPull(root)
-    })
+  // pull 会改写工作区：先落盘（本地改动和远端冲突时 git 会拒绝），期间编辑器只读，结束后按磁盘重载已打开的笔记
+  const pull = () => run('pull', () => withWorktreeLock(t('gitPullUnsaved'), () => window.synote.gitPull(root)))
   const push = () => run('push', () => window.synote.gitPush(root))
   const stage = (paths: string[] | null) => run('stage', () => window.synote.gitStage(root, paths))
   // 重命名要连同旧路径一起取消暂存；旧路径在库外时只取消新路径
@@ -144,7 +140,8 @@ function Panel({ root, state }: { root: string; state: Ready }) {
               card.done.staged ? t('gitDoneStaged') : '',
               card.op === 'commit' ? t('gitNotCommitted') : '',
             ].filter(Boolean)}
-            raw={card.raw}
+            raw={card.outside ? undefined : card.raw}
+            paths={card.outside?.paths}
             commands={card.kind === 'noIdentity' ? identityCommands({ name: null, email: null }) : commandsFor(card)}
             onPull={card.kind === 'nonFastForward' ? pull : undefined}
             onRetry={card.op === 'push' ? push : card.op === 'pull' ? pull : undefined}
@@ -192,7 +189,11 @@ function Panel({ root, state }: { root: string; state: Ready }) {
 const identityCommands = (st: { name: string | null; email: string | null }) =>
   [!st.name && 'git config --global user.name "Your Name"', !st.email && 'git config --global user.email "you@example.com"'].filter((c): c is string => !!c)
 
+// 给 shell 用的单引号转义
+const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
+
 function commandsFor(card: Card): string[] {
+  if (card.outside) return [`git -C ${sq(card.outside.top)} reset -q -- ${card.outside.paths.map(sq).join(' ')}`]
   if (card.kind === 'noCredentials') return [`git ${card.op}`]
   if (card.kind === 'conflict') return ['git merge --abort']
   return []
@@ -202,6 +203,7 @@ function commandsFor(card: Card): string[] {
 function ErrorCard(p: {
   kind: GitErrorKind
   title?: string
+  paths?: string[]
   done?: string[]
   raw?: string
   commands: string[]
@@ -215,6 +217,13 @@ function ErrorCard(p: {
     <div className={s.card} role="alert">
       {p.title && <div className={s.cardTitle}>{p.title}</div>}
       <div>{t(`gitErr_${p.kind}`)}</div>
+      {p.paths && (
+        <ul className={s.paths}>
+          {p.paths.map((x) => (
+            <li key={x}>{x}</li>
+          ))}
+        </ul>
+      )}
       {p.done && p.done.length > 0 && <div className={s.muted}>{p.done.join('；')}</div>}
       {p.commands.map((c) => (
         <div key={c} className={s.cmdRow}>

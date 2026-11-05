@@ -107,8 +107,11 @@ describe('removeOrphans', () => {
   it('非 git 目录：一律移到回收站', async () => {
     const { root } = vault({ 'attachments/x.png': '', 'attachments/y.png': '' })
     const targets = await checkOrphans(root, ['attachments/x.png', 'attachments/y.png'], new Set(['attachments/x.png', 'attachments/y.png']))
-    const trash = vi.fn((p: string) => rm(p))
-    expect(await removeOrphans(targets, null, trash)).toEqual(['attachments/x.png', 'attachments/y.png'])
+    // 第二个回收失败：已删的一个照样经 progress 报出来
+    const trash = vi.fn((p: string) => (p.endsWith('y.png') ? Promise.reject(new Error('busy')) : rm(p)))
+    let n = 0
+    await expect(removeOrphans(targets, null, trash, () => n++)).rejects.toThrow('busy')
+    expect(n).toBe(1)
     expect(trash).toHaveBeenCalledTimes(2)
     expect(existsSync(path.join(root, 'attachments', 'x.png'))).toBe(false)
   })

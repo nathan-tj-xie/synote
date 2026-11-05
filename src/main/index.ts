@@ -6,7 +6,7 @@ import { i18next, i18nOptions } from '../shared/i18n'
 import { commands } from '../shared/commands'
 import { indexMethods, type GitDone, type GitOpResult, type GitState, type OrphanAttachment, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
 import { tokens } from '../shared/tokens'
-import { exec, findGit, Git, GitError, type GitDetectionResult } from './git'
+import { exec, findGit, Git, GitError, StagedOutsideError, type GitDetectionResult } from './git'
 import { attachmentTarget, checkOrphans, isAttachmentPath, removeOrphans, trackedOf } from './orphans'
 import { commitRename, planRename } from './rename'
 import { attachmentName, isHidden, realInVault, realParentInVault, resolveInVault, saveAttachment, scanEntries, toPosix, uniqueNoteName, writeTarget } from './vault'
@@ -418,7 +418,7 @@ ipcMain.handle('orphans:delete', (_e, vault: string, paths: string[]) => {
 })
 const isStrings = (xs: unknown): xs is string[] => Array.isArray(xs) && xs.every((p) => typeof p === 'string')
 // 清理命令和 git 面板的提交（S13）共用
-function deleteOrphans(r: string, paths: string[]) {
+function deleteOrphans(r: string, paths: string[], progress?: () => void) {
   const job = attaching.then(async () => {
     const checked = await checkOrphans(r, paths, new Set(await currentOrphans()))
     await pruneFresh(r)
@@ -434,7 +434,7 @@ function deleteOrphans(r: string, paths: string[]) {
       await callIndex('reconcile')
       const late = new Set((await callIndex('referenced', candidates.map(([p]) => p))) as string[])
       const targets = candidates.filter(([p]) => !late.has(p) && !isFresh(r, p))
-      return { deleted: await removeOrphans(targets, await vaultRepo(r), (p) => shell.trashItem(p)), kept }
+      return { deleted: await removeOrphans(targets, await vaultRepo(r), (p) => shell.trashItem(p), progress), kept }
     } finally {
       deleting = null
       open()
@@ -454,7 +454,8 @@ async function gitOp(r: string, f: (g: Git, done: GitDone) => Promise<unknown>):
     return { ok: true, done }
   } catch (e) {
     const raw = e instanceof GitError ? [e.stderr, e.stdout].map((x) => x.trim()).filter(Boolean).join('\n') : String(e)
-    return { ok: false, kind: e instanceof GitError ? e.kind : 'unknown', raw, done }
+    const outside = e instanceof StagedOutsideError ? { top: e.top, paths: e.paths } : undefined
+    return { ok: false, kind: e instanceof GitError ? e.kind : 'unknown', raw, done, ...(outside && { outside }) }
   } finally {
     pushGitState()
   }
@@ -474,7 +475,7 @@ ipcMain.handle('git:unstage', (_e, vault: string, paths: string[]) => {
   const ps = checkPaths(paths)
   return gitOp(r, (g) => g.unstage(ps))
 })
-// 提交：先查身份（缺身份时什么都不做）→ 删勾选的孤儿附件（git rm 的进入这次提交）→ 全部暂存（all 时）→ 提交。
+// 提交：先查身份、查暂存区里有没有笔记库之外的文件（面板看不到，不替用户提交），有一项不满足就什么都不做 → 删勾选的孤儿附件（git rm 的进入这次提交）→ 全部暂存（all 时）→ 提交。
 // 未保存的正文由渲染进程在调用前落盘
 ipcMain.handle('git:commit', (_e, vault: string, message: string, all: boolean, orphans: string[]) => {
   const r = checkVault(vault)
@@ -482,9 +483,12 @@ ipcMain.handle('git:commit', (_e, vault: string, message: string, all: boolean, 
   return gitOp(r, async (g, done) => {
     const id = await g.identity()
     if (!id.name || !id.email) throw new GitError('noIdentity', -1, '')
+    const outside = await g.stagedOutside()
+    if (outside.length) throw new StagedOutsideError(await g.toplevel(), outside)
     if (orphans.length) {
-      const res = await deleteOrphans(r, orphans)
-      done.deleted = res.deleted.length
+      // 逐个记进度：中途失败时卡片如实报出已删了几个
+      done.deleted = 0
+      const res = await deleteOrphans(r, orphans, () => done.deleted!++)
       done.kept = res.kept
     }
     if (all) {

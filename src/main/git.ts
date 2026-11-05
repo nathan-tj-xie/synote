@@ -178,6 +178,16 @@ export class GitError extends Error {
   }
 }
 
+// 提交前发现库外的已暂存文件：按 GitError 走同一条失败回传，带上要列给用户的路径
+export class StagedOutsideError extends GitError {
+  constructor(
+    readonly top: string,
+    readonly paths: string[],
+  ) {
+    super('stagedOutside', -1, paths.join('\n'))
+  }
+}
+
 // `config --get`、`rev-parse --verify --quiet` 查不到时退出码为 1，记为 fallback；其它失败（配置损坏、权限等）照常抛出
 const onExit1 =
   <T>(fallback: T) =>
@@ -247,6 +257,16 @@ export class Git {
   // 笔记库在仓库里的前缀（如 `笔记/`，库就是仓库根时为空）
   private async prefix(): Promise<string> {
     return (await this.run(['rev-parse', '--show-prefix'])).replace(/\n$/, '')
+  }
+
+  // 暂存区里笔记库之外的路径（相对仓库根，--no-renames 让改名的两侧都列出来）。笔记库就是仓库根时为空
+  async stagedOutside(): Promise<string[]> {
+    const [out, prefix] = await Promise.all([this.run(['diff', '--cached', '--name-only', '-z', '--no-renames']), this.prefix()])
+    return prefix ? out.split('\0').filter((p) => p && !p.startsWith(prefix)) : []
+  }
+
+  async toplevel(): Promise<string> {
+    return (await this.run(['rev-parse', '--show-toplevel'])).trim()
   }
 
   // 暂存（含删除）；paths 为 ['.'] 时暂存笔记库内的全部改动

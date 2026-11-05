@@ -28,6 +28,8 @@ export type GitErrorKind =
   | 'lfsMissing'
   | 'network'
   | 'notRepo'
+  // 提交前发现暂存区里有笔记库之外的文件（S13）：面板看不到它们，不替用户提交
+  | 'stagedOutside'
   | 'unknown'
 
 // 当前笔记库的 git 状态；missing / tooOld / notRepo 时按非 git 目录模式运行
@@ -48,7 +50,10 @@ export type GitFile = { path: string; x: string; y: string; orig?: string }
 // git 面板写操作（S13）的结果。done 是失败前已完成的步骤：deleted 为删掉的孤儿附件数（kept 为没删的），
 // staged 为已"全部暂存"；raw 是 git 的原始输出
 export type GitDone = { deleted?: number; kept?: { path: string; reason: 'mentioned' | 'pending' }[]; staged?: boolean }
-export type GitOpResult = { ok: true; done: GitDone } | { ok: false; kind: GitErrorKind; raw: string; done: GitDone }
+// outside：kind 为 stagedOutside 时，仓库根（top）和那些库外的已暂存路径（相对仓库根）
+export type GitOpResult =
+  | { ok: true; done: GitDone }
+  | { ok: false; kind: GitErrorKind; raw: string; done: GitDone; outside?: { top: string; paths: string[] } }
 
 // 孤儿附件（S11）：tracked 为 git 已跟踪，删除时执行 git rm；否则（含非 git 目录）移到回收站
 export type OrphanAttachment = { path: string; tracked: boolean }

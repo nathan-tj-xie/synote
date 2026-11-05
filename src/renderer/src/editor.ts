@@ -475,6 +475,22 @@ export async function reloadIfClean(path: string) {
   useEditor.getState().setDirty(path, false)
 }
 
+// 会改写工作区的 git 操作（pull 等，S13）：插完在途附件、加锁、所有输入落盘（写不进去就抛 unsaved），操作期间编辑器只读；
+// 结束后（成功或失败）把每个已打开的笔记按磁盘主动重载一次再解锁，不等 watcher：否则解锁后、重载前的输入会把旧正文存回去
+export async function withWorktreeLock<T>(unsaved: string, f: () => Promise<T>): Promise<T> {
+  if (locked) throw new Error(i18next.t('worktreeBusy'))
+  await attachmentsSettled()
+  if (locked) throw new Error(i18next.t('worktreeBusy'))
+  setLocked(true)
+  try {
+    if (!(await flushAll())) throw new Error(unsaved)
+    return await f()
+  } finally {
+    await Promise.all([...new Set([...states.keys(), ...(shown ? [shown] : [])])].map(reloadIfClean))
+    setLocked(false)
+  }
+}
+
 // 重命名 / 移动（S9）：主进程算出并原子地写下所有改写，编辑器这边保证不和它打架——先插完在途附件、加锁、把所有输入落盘
 // （此后磁盘内容就是编辑器内容，dirty 为空；有没写进去的改动就拒绝），确认后执行，再把同一组改写同步进已打开笔记的状态
 // （不再写盘），路径随之改名。交接锁期间拒绝。用户在确认时取消返回 false

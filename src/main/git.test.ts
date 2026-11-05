@@ -375,6 +375,12 @@ describe('Git（系统 git）', () => {
       { path: 'b.md', x: '?', y: '?' },
     ])
     expect(await git.log()).toEqual([])
+    // 库外预先暂存的文件：stagedOutside 列出来，提交前据此拦下
+    expect(await git.stagedOutside()).toEqual([])
+    sh('add', '库外.md')
+    expect(await git.stagedOutside()).toEqual(['库外.md'])
+    expect(await git.toplevel()).toBe(execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: repo, env }).toString().trim())
+    sh('reset', '-q', '--', '库外.md')
     await git.stage(['*.md'])
     expect((await git.status()).files.map((f) => f.x + f.y)).toEqual(['A.', '??'])
     await git.unstage(['*.md']) // 还没有 HEAD：从暂存区移除

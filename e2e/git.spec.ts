@@ -1,32 +1,34 @@
 import { _electron as electron, expect, test, type Page } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-// git 面板（S13）：笔记库是本地 bare 仓库的克隆，独立的全局 git 配置（identity 为 false 时不设提交身份）
-async function launchRepo(files: Record<string, string>, identity = true) {
+// git 面板（S13）：仓库是本地 bare 仓库的克隆，独立的全局 git 配置（identity 为 false 时不设提交身份）。
+// 笔记库是仓库里的 sub 子目录（默认就是仓库根）；files 和 git() 都相对仓库根
+async function launchRepo(files: Record<string, string>, identity = true, sub = '') {
   const base = mkdtempSync(path.join(tmpdir(), 'synote-git-e2e-'))
-  const vault = path.join(base, 'vault')
+  const repo = path.join(base, 'vault')
+  const vault = path.join(repo, sub)
   const remote = path.join(base, 'remote.git')
   const userData = path.join(base, 'user-data')
   const globalConfig = path.join(base, 'gitconfig')
-  mkdirSync(vault)
+  mkdirSync(vault, { recursive: true })
   mkdirSync(userData)
   writeFileSync(globalConfig, identity ? '[user]\n\tname = t\n\temail = t@t\n' : '')
   const env = { ...process.env, GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_NOSYSTEM: '1' }
   // 测试脚本自己的 git 操作总带身份，不受 identity 影响
   const git = (cwd: string, ...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd, env }).toString()
   for (const [p, c] of Object.entries(files)) {
-    mkdirSync(path.dirname(path.join(vault, p)), { recursive: true })
-    writeFileSync(path.join(vault, p), c)
+    mkdirSync(path.dirname(path.join(repo, p)), { recursive: true })
+    writeFileSync(path.join(repo, p), c)
   }
   git(base, 'init', '-q', '--bare', '-b', 'main', remote)
-  git(vault, 'init', '-q', '-b', 'main')
-  git(vault, 'remote', 'add', 'origin', remote)
-  git(vault, 'add', '.')
-  git(vault, 'commit', '-qm', 'init')
-  git(vault, 'push', '-qu', 'origin', 'main')
+  git(repo, 'init', '-q', '-b', 'main')
+  git(repo, 'remote', 'add', 'origin', remote)
+  git(repo, 'add', '.')
+  git(repo, 'commit', '-qm', 'init')
+  git(repo, 'push', '-qu', 'origin', 'main')
   writeFileSync(path.join(userData, 'recent.json'), JSON.stringify([vault]))
   const app = await electron.launch({ args: ['.'], env: { ...env, SYNOTE_USER_DATA: userData } })
   const win = await app.firstWindow()
@@ -40,7 +42,7 @@ async function launchRepo(files: Record<string, string>, identity = true) {
     git(other, 'commit', '-qam', `远端改 ${file}`)
     git(other, 'push', '-q')
   }
-  return { app, win, vault, remote, git: (...a: string[]) => git(vault, ...a), pushFromOther }
+  return { app, win, vault, repo, remote, git: (...a: string[]) => git(repo, ...a), pushFromOther }
 }
 
 const openGit = async (win: Page) => {
@@ -203,5 +205,96 @@ test('git panel: 1000 changes render virtualized', async () => {
   writeFileSync(path.join(vault, 'n', '1000.md'), 'x\n')
   await expect(changes).toHaveAttribute('aria-label', '1001 处更改', { timeout: 10_000 })
   console.log(`[perf] git panel 1000 changes: shown ${shown}ms, ${rendered} rows rendered, update ${Date.now() - t1}ms`)
+  await app.close()
+})
+
+// 笔记库是仓库子目录、库外有预先暂存的文件：面板看不到它们，提交被拦下，卡片列出路径并给出取消暂存的命令；什么都没动
+test('git panel: files staged outside a subfolder vault block the commit', async () => {
+  const { app, win, vault, repo, git } = await launchRepo({ '笔记/a.md': 'a\n', "库外 's.md": '1\n' }, true, '笔记')
+  writeFileSync(path.join(repo, "库外 's.md"), '2\n')
+  git('add', "库外 's.md")
+  writeFileSync(path.join(vault, 'a.md'), 'b\n')
+  const changes = await openGit(win)
+  await expect(row(changes, 'a.md')).toBeVisible({ timeout: 10_000 })
+  await expect(changes.locator('[title*="库外"]')).toHaveCount(0) // 库外的改动不在列表里
+  await win.getByLabel('提交信息（⌘Enter 提交）').fill('x')
+  await win.getByRole('button', { name: '全部暂存并提交' }).click()
+  const card = win.getByRole('alert').filter({ hasText: '提交失败' })
+  await expect(card).toContainText('暂存区里有笔记库之外的文件')
+  await expect(card.getByRole('listitem')).toHaveText(["库外 's.md"])
+  const cmd = `git -C '${realpathSync(repo)}' reset -q -- '库外 '\\''s.md'`
+  await expect(card.getByText(cmd, { exact: true })).toBeVisible()
+  expect(git('log', '--format=%s')).toBe('init\n')
+  expect(git('-c', 'core.quotePath=false', 'status', '--porcelain')).toBe("M  \"库外 's.md\"\n M 笔记/a.md\n")
+  // 照卡片上的命令取消暂存后重试：只提交库内
+  execFileSync('/bin/sh', ['-c', cmd])
+  await win.getByRole('button', { name: '全部暂存并提交' }).click()
+  await expect.poll(() => git('log', '-1', '--format=%s')).toBe('x\n')
+  expect(git('-c', 'core.quotePath=false', 'show', '--name-only', '--format=', 'HEAD')).toBe('笔记/a.md\n')
+  await app.close()
+})
+
+// pull 改写工作区：先把未保存的输入落盘（本地改动与远端冲突时 git 拒绝，本地输入保住）；pull 期间编辑器只读；
+// 结束后已打开的笔记立即按磁盘重载，之后不会有旧正文被存回去覆盖拉取的内容
+test('git panel: pull flushes input first, locks the editor and reloads open notes', async () => {
+  const lines = (first: string, last = '') => `${first}\n\n\n\n\na9\n${last}`
+  const { app, win, vault, git, pushFromOther } = await launchRepo({ 'a.md': lines('a1') })
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  const editor = win.locator('.cm-content')
+  await expect(editor).toContainText('a9')
+  await openGit(win)
+  const pull = win.getByRole('button', { name: 'pull' })
+
+  // 1. 输入还在自动保存的防抖里就 pull：先落盘，git 因本地改动拒绝合并
+  pushFromOther('a.md', lines('a1 远端'))
+  await editor.click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('X')
+  await pull.click()
+  const card = win.getByRole('alert').filter({ hasText: 'pull失败' })
+  await expect(card).toBeVisible()
+  await card.getByText('git 原始输出', { exact: true }).click()
+  await expect(card.locator('pre')).toContainText('would be overwritten')
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe(lines('a1', 'X'))
+  await expect(editor).toContainText('X')
+
+  // 提交本地输入后 pull：干净合并，编辑器跟上
+  await win.getByLabel('提交信息（⌘Enter 提交）').fill('本地')
+  await win.getByRole('button', { name: '全部暂存并提交' }).click()
+  await expect.poll(() => git('log', '-1', '--format=%s')).toBe('本地\n')
+  await pull.click()
+  await expect(editor).toContainText('a1 远端')
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe(lines('a1 远端', 'X'))
+
+  // 2. pull 期间（主进程的 pull 先挂住）输入被拒绝；放行后立即重载，不会把旧正文写回去
+  pushFromOther('a.md', lines('a1 再改', 'X'))
+  await app.evaluate(({ ipcMain }, cwd) => {
+    const { execFile } = process.getBuiltinModule('node:child_process')
+    const g = globalThis as { releasePull?: () => void }
+    const gate = new Promise<void>((r) => (g.releasePull = r))
+    ipcMain.removeHandler('git:pull')
+    ipcMain.handle('git:pull', async () => {
+      await gate
+      await new Promise((res, rej) => execFile('git', ['pull', '-q', '--no-rebase', '--no-edit'], { cwd }, (e) => (e ? rej(e) : res(null))))
+      return { ok: true, done: {} }
+    })
+  }, vault)
+  await pull.click()
+  await expect(win.getByText('正在 pull…')).toBeVisible()
+  await editor.click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('Y')
+  await expect(editor).not.toContainText('Y')
+  await app.evaluate(() => (globalThis as { releasePull?: () => void }).releasePull!())
+  await expect(editor).toContainText('a1 再改')
+  await expect(win.getByText('正在 pull…')).toHaveCount(0)
+  await win.waitForTimeout(1000) // 过了自动保存的 500 ms
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe(lines('a1 再改', 'X'))
+  await expect(win.locator('[role=tab] [title="未保存"]')).toHaveCount(0)
+  // 解锁后照常编辑
+  await editor.click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('Z')
+  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe(lines('a1 再改', 'XZ'))
   await app.close()
 })
