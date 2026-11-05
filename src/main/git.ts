@@ -10,16 +10,18 @@ export type ExecResult = { code: number; stdout: string; stderr: string }
 export type Exec = (
   file: string,
   args: string[],
-  opts?: { cwd?: string; env?: NodeJS.ProcessEnv; timeout?: number },
+  opts?: { cwd?: string; env?: NodeJS.ProcessEnv; timeout?: number; input?: string },
 ) => Promise<ExecResult>
 
-// 启动失败（ENOENT）、超时都记为 code -1，不抛异常
-export const exec: Exec = (file, args, opts = {}) =>
+// 启动失败（ENOENT）、超时都记为 code -1，不抛异常；input 写进子进程的 stdin
+export const exec: Exec = (file, args, { input, ...opts } = {}) =>
   new Promise((resolve) => {
-    execFile(file, args, { ...opts, maxBuffer: 1 << 28, windowsHide: true }, (err, stdout, stderr) => {
+    const cp = execFile(file, args, { ...opts, maxBuffer: 1 << 28, windowsHide: true }, (err, stdout, stderr) => {
       const code = !err ? 0 : typeof err.code === 'number' ? err.code : -1
       resolve({ code, stdout, stderr })
     })
+    cp.stdin?.on('error', () => {}) // 进程提前退出时写 stdin 会 EPIPE，结果以退出码为准
+    if (input !== undefined) cp.stdin?.end(input)
   })
 
 export const MIN_VERSION = [2, 38] as const
@@ -248,8 +250,8 @@ export class Git {
     this.env = { ...env, PATH, LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat', NO_COLOR: '1' }
   }
 
-  async run(args: string[]): Promise<string> {
-    const r = await this.run_(this.bin, [...CONFIG_OVERRIDES, ...args], { cwd: this.cwd, env: this.env })
+  async run(args: string[], input?: string): Promise<string> {
+    const r = await this.run_(this.bin, [...CONFIG_OVERRIDES, ...args], { cwd: this.cwd, env: this.env, input })
     if (r.code !== 0) throw new GitError(classifyGitError(r.stderr, r.stdout), r.code, r.stderr, r.stdout)
     return r.stdout
   }
@@ -365,12 +367,18 @@ export class Git {
     return this.run(['lfs', 'version']).then(() => true, () => false)
   }
 
-  // 笔记库里是否有路径按 .gitattributes 走 LFS：已跟踪文件里有 filter=lfs 的，或 attachments/ 下的新文件会走 LFS。
-  // 只看属性、不需要 git-lfs，用来在没装 git-lfs 时提示
+  // 笔记库里是否有路径按 .gitattributes 走 LFS：已跟踪文件里有 filter=lfs 的；或 attachments/ 下的实际文件（含未跟踪，
+  // 如 `*.png filter=lfs` 时刚粘贴、还没提交的第一张图）、探测路径 attachments/x 会走 LFS。
+  // 只看属性、不需要 git-lfs，用来在没装 git-lfs 时提示；要扫全部附件，调用方负责缓存
   async lfsUsed(): Promise<boolean> {
     // attr 魔法要求不加 --literal-pathspecs；不带路径时只列 cwd（笔记库）以内
-    const [files, att] = await Promise.all([this.run(['ls-files', '-z', '--', ':(attr:filter=lfs)']), this.lfsPaths(['attachments/x'])])
-    return files.length > 0 || att.length > 0
+    if ((await this.run(['ls-files', '-z', '--', ':(attr:filter=lfs)'])).length) return true
+    const att = await this.run(['--literal-pathspecs', 'ls-files', '-z', '-co', '--exclude-standard', '--', 'attachments/'])
+    const paths = ['attachments/x', ...att.split('\0').filter(Boolean)]
+    // --stdin：附件再多也不受命令行长度限制。-z 输出：path NUL attr NUL value NUL
+    const out = (await this.run(['check-attr', '--stdin', '-z', 'filter'], paths.map((p) => `${p}\0`).join(''))).split('\0')
+    for (let i = 2; i < out.length; i += 3) if (out[i] === 'lfs') return true
+    return false
   }
 
   async lfsPaths(paths: string[]): Promise<string[]> {

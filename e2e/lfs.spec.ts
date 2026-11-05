@@ -55,8 +55,14 @@ async function launchLfs(lfs: boolean) {
   git(src, 'commit', '-qm', 'v2')
   git(src, 'push', '-q', `file://${remote}`, 'main')
   execFileSync('git', ['clone', '-q', `file://${remote}`, vault], { env: { ...env, GIT_LFS_SKIP_SMUDGE: '1' } })
-  writeFileSync(path.join(userData, 'recent.json'), JSON.stringify([vault]))
+  return { ...(await launchApp(base, vault, lfs)), appConfig }
+}
 
+// 用 base 下的 user-data 和 gitconfig 打开 vault；lfs 为 false 时 app 用的 git 找不到 git-lfs
+async function launchApp(base: string, vault: string, lfs: boolean) {
+  const userData = path.join(base, 'user-data')
+  const appConfig = path.join(base, 'gitconfig')
+  writeFileSync(path.join(userData, 'recent.json'), JSON.stringify([vault]))
   const appEnv = { ...process.env, GIT_CONFIG_GLOBAL: appConfig, GIT_CONFIG_NOSYSTEM: '1', SYNOTE_USER_DATA: userData } as Record<string, string>
   if (!lfs) {
     // 同 git.test.ts：git 本体链接进一个空目录，设置项指向它；git-lfs 在别的目录里，找不到
@@ -69,7 +75,7 @@ async function launchLfs(lfs: boolean) {
   const app = await electron.launch({ args: ['.'], env: appEnv })
   const win = await app.firstWindow()
   await expect(win.getByRole('tree')).toBeVisible()
-  return { app, win, vault, appConfig, appEnv }
+  return { app, win, vault, appEnv }
 }
 
 test('LFS installed: pointer placeholder downloads in place, dedupe by oid, history pointer downloads only on click', async () => {
@@ -155,5 +161,29 @@ test('LFS not installed: git panel prompts to install, download reports it, stat
     .poll(() => win.evaluate(() => window.synote.redetectGit().then((s) => (s.status === 'ready' ? s.lfsError?.kind : s.status))), { timeout: 10_000 })
     .toBe('lfsMissing')
   await expect(card).toContainText('command not found')
+  await app.close()
+})
+
+// 按扩展名配置 LFS（`*.png filter=lfs`）、仓库里还没有任何 PNG：没装 git-lfs 时起初不提示，粘贴第一张图后面板随即提示（codex #37 第三轮）
+test('LFS not installed: the first pasted attachment matching *.png filter=lfs brings up the install prompt', async () => {
+  const base = mkdtempSync(path.join(tmpdir(), 'synote-lfs-e2e-'))
+  const vault = path.join(base, 'vault')
+  mkdirSync(vault)
+  mkdirSync(path.join(base, 'user-data'))
+  writeFileSync(path.join(base, 'gitconfig'), '[user]\n\tname = t\n\temail = t@t\n')
+  writeFileSync(path.join(vault, '.gitattributes'), '*.png filter=lfs diff=lfs merge=lfs -text\n')
+  writeFileSync(path.join(vault, 'a.md'), 'a\n')
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(base, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' }
+  for (const a of [['init', '-q', '-b', 'main'], ['add', '.'], ['commit', '-qm', 'init']]) execFileSync('git', a, { cwd: vault, env })
+  const { app, win } = await launchApp(base, vault, false)
+
+  await win.getByRole('button', { name: 'Git', exact: true }).click()
+  const message = win.getByRole('textbox', { name: /提交信息/ })
+  await expect(message).toBeVisible({ timeout: 10_000 })
+  const card = win.getByRole('alert').filter({ hasText: '没有安装 git-lfs' })
+  await expect(card).toHaveCount(0)
+  const saved = await win.evaluate(([v, b]) => window.synote.saveAttachment(v, null, new Uint8Array(b)), [vault, [...PNG]] as const)
+  expect(saved.path).toMatch(/^attachments\/image-.*\.png$/)
+  await expect(card).toBeVisible({ timeout: 10_000 })
   await app.close()
 })

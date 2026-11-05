@@ -86,8 +86,9 @@ function watchVault(dir: string): FSWatcher {
   // shortcut: 每批外部改动都全量重扫文件树，10k 库约百毫秒；等 S6 索引服务的 stat 对账就绪后改为增量
   return watch(dir, { recursive: true }, (_event, filename) => {
     if (!filename) return
-    pushGitState() // .git 里的 HEAD、index、refs 变化也算，外部 git 操作能及时反映
     const rel = toPosix(filename.toString())
+    if (lfsAttrPath(rel)) lfsUsedCache = null // 在推送状态之前作废，下一次查询按新文件重算
+    pushGitState() // .git 里的 HEAD、index、refs 变化也算，外部 git 操作能及时反映
     if (isHidden(rel)) return
     changed.add(rel)
     clearTimeout(timer)
@@ -217,8 +218,22 @@ async function gitState(): Promise<GitState> {
 async function queryGit(g: Git, version: string): Promise<GitState> {
   if (!(await g.isRepo())) return { status: 'notRepo', version }
   const [identity, st, lfs] = await Promise.all([g.identity(), lfsStatus(g), g.lfsInstalled()])
-  return { status: 'ready', version, ...identity, ...st, lfs, lfsUsed: !lfs && (await g.lfsUsed()) }
+  return { status: 'ready', version, ...identity, ...st, lfs, lfsUsed: !lfs && (await lfsUsedOf(g)) }
 }
+
+// lfsUsed 要扫 attachments/ 下所有文件的属性（只在没装 git-lfs 时查）：按 git 实例缓存，
+// .gitattributes 或 attachments/ 有变化（watcher、写入附件）时作废；查询失败不缓存
+// shortcut: watcher 只看笔记库目录，库是仓库子目录时仓库根的 .gitattributes 改动要等重新检测或重开库；有人反馈再监视仓库根
+let lfsUsedCache: { g: Git; v: Promise<boolean> } | null = null
+function lfsUsedOf(g: Git): Promise<boolean> {
+  if (lfsUsedCache?.g !== g) {
+    const c = { g, v: g.lfsUsed() }
+    c.v.catch(() => lfsUsedCache === c && (lfsUsedCache = null))
+    lfsUsedCache = c
+  }
+  return lfsUsedCache.v
+}
+const lfsAttrPath = (rel: string) => rel === 'attachments' || rel.startsWith('attachments/') || path.posix.basename(rel) === '.gitattributes' || rel === '.git/info/attributes'
 
 // status 因 LFS filter 失败（S17）时不降级成非 git 目录：照常给出 ready，带上错误由 git 面板引导
 const lfsStatus = (g: Git) =>
@@ -430,6 +445,9 @@ ipcMain.handle('file:saveAttachment', (_e, vault: string, name: string | null, b
     const rel = await saveAttachment(r, attachmentName(name, new Date()), bytes)
     if (!fresh.has(r)) fresh.set(r, new Map())
     fresh.get(r)!.set(rel, Date.now() + FRESH_MS)
+    // 新附件可能按 .gitattributes 走 LFS（如 `*.png filter=lfs` 的第一张图）：重算 lfsUsed 并立即推送，没装 git-lfs 时面板随即提示
+    lfsUsedCache = null
+    pushGitState()
     return { path: rel, warn: await sizeWarning(r, rel, bytes.length) }
   })
   attaching = job.catch(() => {})

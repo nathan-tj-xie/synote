@@ -225,7 +225,9 @@ export const focus = () => editor?.getModifiedEditor().focus()
 // 用户在悬停里点了"下载"的 LFS 图片（S17）：左侧按版本 smudge（对象顺带存进本地 LFS 存储，readRev 下次就能直接读到），
 // 右侧（工作区）git lfs pull。下好后在原处重新弹出悬停。smudge 的结果也记一份，自定义了 lfs.storage 的仓库靠它
 // shortcut: 只增不减，一次会话里下载的历史图片极多时再加上限
+// 只按完整 oid 记：HEAD 会指向别的提交，按字符串 HEAD 记会把旧版本的图当成新的（HEAD 一侧下载后对象已在本地，readRev 直接命中）
 const smudged = new Map<string, Uint8Array>()
+const smudgeKey = (vault: string, rev: string, path: string) => (/^[0-9a-f]{40,64}$/.test(rev) ? `${vault}\0${rev}\0${path}` : null)
 monaco.editor.registerCommand('synote.lfsDownload', async (_acc, side: 'original' | 'modified', line: number, column: number) => {
   const c = cur
   if (!c) return
@@ -235,7 +237,8 @@ monaco.editor.registerCommand('synote.lfsDownload', async (_acc, side: 'original
   try {
     if (side === 'original') {
       const b = await window.synote.lfsSmudge(c.vault, c.rev, ref.path)
-      if (b) smudged.set(`${c.vault}\0${c.rev}\0${ref.path}`, b)
+      const key = smudgeKey(c.vault, c.rev, ref.path)
+      if (b && key) smudged.set(key, b)
     } else await window.synote.lfsPull(c.vault, ref.path)
   } catch (e) {
     return useUi.getState().setError(String(e))
@@ -260,7 +263,7 @@ monaco.languages.registerHoverProvider('markdown', {
     const range = new monaco.Range(pos.lineNumber, ref.start + 1, pos.lineNumber, ref.end + 1)
     const side = model === c.original ? 'original' : 'modified'
     const bytes =
-      (side === 'original' && smudged.get(`${c.vault}\0${c.rev}\0${ref.path}`)) ||
+      (side === 'original' && smudged.get(smudgeKey(c.vault, c.rev, ref.path) ?? '')) ||
       (await (side === 'original' ? window.synote.readRev(c.vault, c.rev, ref.path) : window.synote.readBytes(c.vault, ref.path)).catch(() => null))
     // 文字一律转义：路径来自笔记正文，不能被渲染成链接或 HTML
     const text = (value: string) => ({ range, contents: [{ value: escapeMd(value) }] })

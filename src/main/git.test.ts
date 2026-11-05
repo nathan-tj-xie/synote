@@ -716,6 +716,23 @@ describe('Git（系统 git）', () => {
     required.close()
   })
 
+  // 按扩展名配置 LFS、还没有任何已跟踪的 PNG：第一张粘贴进来的未跟踪图片就要让 lfsUsed 为 true（codex #37 第三轮）
+  it('lfsUsed 看 attachments/ 下的未跟踪文件，忽略的不算', async () => {
+    const { repo, env, sh } = setup()
+    sh('init', '-q')
+    writeFileSync(path.join(repo, '.gitattributes'), '*.png filter=lfs diff=lfs merge=lfs -text\n')
+    writeFileSync(path.join(repo, '.gitignore'), 'attachments/ignored.png\n')
+    mkdirSync(path.join(repo, 'attachments'))
+    writeFileSync(path.join(repo, 'attachments/a.pdf'), 'pdf')
+    writeFileSync(path.join(repo, 'attachments/ignored.png'), 'x')
+    sh('add', '.')
+    sh('commit', '-qm', '1')
+    const git = new Git('git', process.env.PATH!, repo, undefined, env)
+    expect(await git.lfsUsed()).toBe(false) // 只有 pdf（不走 LFS）和被忽略的 png
+    writeFileSync(path.join(repo, 'attachments/图 [1].png'), 'png')
+    expect(await git.lfsUsed()).toBe(true)
+  })
+
   it('没有 LFS 属性的库 lfsUsed 为 false', async () => {
     const { repo, env, sh } = setup()
     sh('init', '-q')
