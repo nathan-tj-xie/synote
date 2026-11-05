@@ -11,6 +11,8 @@ type EditorState = {
   tabs: string[]
   active: string | null
   dirty: Record<string, true>
+  // 处于 diff 形态的文件 → 左侧版本（HEAD 或提交 oid），由 editor.ts 维护
+  compare: Record<string, string>
   open: (path: string) => void
   close: (path: string) => void
   // 只保留仍存在的文件对应的标签页
@@ -20,12 +22,14 @@ type EditorState = {
   setDirty: (path: string, dirty: boolean) => void
   // 重命名 / 移动之后（S9）：标签、活动文件、dirty 跟着换路径
   rename: (move: (p: string) => string) => void
+  setCompare: (path: string, rev: string | null) => void
 }
 
 type UiState = {
   error: string | null
   palette: 'files' | 'commands' | null
   sidebar: 'files' | 'search' | 'git'
+  history: boolean // 历史栏（S15）是否显示
   // "清理孤儿附件"确认框：清单来自哪个库（确认时按它删，期间切了库主进程会拒绝）
   orphans: { root: string; list: OrphanAttachment[] } | null
   // "重命名 / 移动"对话框：要移动的路径和它所在的库
@@ -35,6 +39,7 @@ type UiState = {
   setSidebar: (v: UiState['sidebar']) => void
   setOrphans: (o: UiState['orphans']) => void
   setRename: (r: UiState['rename']) => void
+  toggleHistory: () => void
 }
 
 export const useVault = create<VaultState>((set, get) => ({
@@ -52,6 +57,7 @@ export const useEditor = create<EditorState>((set) => ({
   tabs: [],
   active: null,
   dirty: {},
+  compare: {},
   open: (path) => set((s) => ({ tabs: s.tabs.includes(path) ? s.tabs : [...s.tabs, path], active: path })),
   close: (path) =>
     set((s) => {
@@ -64,7 +70,7 @@ export const useEditor = create<EditorState>((set) => ({
       const tabs = s.tabs.filter((t) => alive.has(t))
       return { tabs, active: s.active && alive.has(s.active) ? s.active : (tabs.at(-1) ?? null) }
     }),
-  reset: () => set({ tabs: [], active: null, dirty: {} }),
+  reset: () => set({ tabs: [], active: null, dirty: {}, compare: {} }),
   setDirty: (path, dirty) =>
     set((s) => {
       const d = { ...s.dirty }
@@ -74,6 +80,13 @@ export const useEditor = create<EditorState>((set) => ({
     }),
   rename: (move) =>
     set((s) => ({ tabs: s.tabs.map(move), active: s.active && move(s.active), dirty: Object.fromEntries(Object.keys(s.dirty).map((p) => [move(p), true])) })),
+  setCompare: (path, rev) =>
+    set((s) => {
+      const c = { ...s.compare }
+      if (rev) c[path] = rev
+      else delete c[path]
+      return { compare: c }
+    }),
 }))
 
 export const useUi = create<UiState>((set) => ({
@@ -82,11 +95,13 @@ export const useUi = create<UiState>((set) => ({
   sidebar: 'files',
   orphans: null,
   rename: null,
+  history: false,
   setError: (error) => set({ error }),
   setPalette: (palette) => set({ palette }),
   setSidebar: (sidebar) => set({ sidebar }),
   setOrphans: (orphans) => set({ orphans }),
   setRename: (rename) => set({ rename }),
+  toggleHistory: () => set((s) => ({ history: !s.history })),
 }))
 
 // git 领域的 store（ADR 0005）：主进程状态的只读镜像，由 git:changed 推送更新

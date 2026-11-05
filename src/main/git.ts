@@ -1,7 +1,7 @@
 // git 服务（ADR 0004）：只用系统 git CLI 子进程；查找、porcelain 解析、错误分类、常驻 cat-file
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import path from 'node:path'
-import type { GitErrorKind } from '../shared/api'
+import type { GitErrorKind, LogEntry } from '../shared/api'
 
 export type ExecResult = { code: number; stdout: string; stderr: string }
 export type Exec = (
@@ -103,6 +103,32 @@ export function parseStatus(out: string): StatusEntry[] {
     else if (p[0] === 'u') res.push({ kind: 'unmerged', xy, path: rest(p, 10) })
     else if (p[0] === '?') res.push({ kind: 'untracked', path: p.slice(2) })
     else if (p[0] === '!') res.push({ kind: 'ignored', path: p.slice(2) })
+  }
+  return res
+}
+
+// 与 parseLog 配套的格式：每条提交 4 个字段，-z 下各以 NUL 结尾
+export const LOG_FORMAT = '--format=%H%x00%at%x00%an%x00%s'
+
+// 解析 `log -z --name-status LOG_FORMAT`：字段后面跟以 \n 开头的状态段，R / C 带旧、新两个路径，其余一个。
+// path 是该提交里文件的路径（相对仓库根）；没有状态段的提交（如 merge）用更旧一侧的路径，即较新那条改名之前的名字
+export function parseLog(out: string): LogEntry[] {
+  const t = out.split('\0')
+  const res: LogEntry[] = []
+  let before = '' // 已解析的最旧一条提交之前，文件叫什么
+  let i = 0
+  while (i + 3 < t.length && t[i]) {
+    const [hash, time, author, subject] = t.slice(i, (i += 4))
+    let path = before
+    let status = ''
+    while (t[i]?.startsWith('\n')) {
+      status = t[i].slice(1)
+      const two = status[0] === 'R' || status[0] === 'C'
+      path = t[i + (two ? 2 : 1)]
+      before = t[i + 1]
+      i += two ? 3 : 2
+    }
+    res.push({ hash, time: Number(time), author, subject, path, status: status[0] ?? '' })
   }
   return res
 }
@@ -234,6 +260,41 @@ export class Git {
   // 重命名 / 移动（S9）：git mv 保留历史；文件夹里没跟踪的文件随文件夹一起移动
   mv(from: string, to: string): Promise<string> {
     return this.mutate(['mv', '--', from, to])
+  }
+
+  // 还没有任何提交时 log 会报错，按没有历史处理
+  private hasHead(): Promise<boolean> {
+    return this.run(['rev-parse', '--verify', '--quiet', 'HEAD']).then(() => true, onExit1(false))
+  }
+
+  // 历史栏（S15）：rel（相对 cwd）的提交历史，--follow 跨重命名；path 换成相对 cwd 的写法（改名前在库外时以 ../ 开头）
+  async fileLog(rel: string): Promise<LogEntry[]> {
+    if (!(await this.hasHead())) return []
+    const [out, prefix] = await Promise.all([
+      this.run(['--literal-pathspecs', 'log', '--follow', '-z', '--name-status', LOG_FORMAT, '--', rel]),
+      this.run(['rev-parse', '--show-prefix']),
+    ])
+    const p = prefix.replace(/\n$/, '')
+    return parseLog(out).map((e) => ({ ...e, path: path.posix.relative(p, e.path) }))
+  }
+
+  // 从历史恢复附件：最后一个还有 rel 的提交（改动过它、且不是删除它的最近一个提交），找不到为 null
+  async restoreSource(rel: string): Promise<LogEntry | null> {
+    if (!(await this.hasHead())) return null
+    const out = await this.run(['--literal-pathspecs', 'log', '-1', '-z', '--name-status', '--diff-filter=d', LOG_FORMAT, 'HEAD', '--', rel])
+    const e = parseLog(out)[0]
+    return e && (await this.isFileAt(e.hash, rel)) ? e : null
+  }
+
+  // 提交 hash 里 rel 是否为普通文件（100644 / 100755）；目录、符号链接、子模块都不算
+  async isFileAt(hash: string, rel: string): Promise<boolean> {
+    const out = await this.run(['--literal-pathspecs', 'ls-tree', '-z', hash, '--', rel])
+    return /^100(644|755) blob /.test(out) && out.split('\0').filter(Boolean).length === 1
+  }
+
+  // 只写工作区，结果是一处未提交的改动
+  restore(hash: string, rel: string): Promise<string> {
+    return this.mutate(['--literal-pathspecs', 'restore', `--source=${hash}`, '--worktree', '--', rel])
   }
 
   // 读任意版本的 blob（如 `HEAD:a.md`），不存在时为 null；复用常驻的 cat-file --batch 进程

@@ -5,6 +5,7 @@ import { Annotation, Compartment, EditorSelection, EditorState, StateEffect, Sta
 import { EditorView, keymap } from '@codemirror/view'
 import { vscodeKeymap } from '@replit/codemirror-vscode-keymap'
 import { minimalSetup } from 'codemirror'
+import type { LogEntry } from '../../shared/api'
 import { i18next } from '../../shared/i18n'
 import type { Rewritten } from '../../shared/api'
 import { applyEdits } from '../../shared/mdLinks'
@@ -42,8 +43,10 @@ let target: { path: string; line: number; col: number; len: number } | null = nu
 // 工作区对比（S14）：diff.ts（含 Monaco）第一次进入时才加载。CM6 视图在 diff 期间只是隐藏，仍是 shown 的唯一正文：
 // Monaco 里的输入同步写回视图（带 fromDiff），视图的其它改动推给 Monaco，所以缓存不变式、保存路径都不变
 let diff: typeof import('./diff') | null = null
-const diffMode = new Set<string>() // 处于 diff 形态的已打开文件（按标签页记住）
-let diffWant: string | null = null // 应该显示 diff 的文件（加载中或已显示）
+// 历史对比（S15）同用这一套，只是左侧换成某个提交里的版本
+type Source = { rev: string; path: string } // 左侧：HEAD 或提交 oid，path 是文件在那个版本里的路径
+const diffMode = new Map<string, Source>() // 处于 diff 形态的已打开文件（按标签页记住）
+let diffWant: string | null = null // 应该显示的 diff：`文件\0版本`（加载中或已显示）
 let diffShown: string | null = null // Monaco 里实际是哪个文件
 let diffSeq = 0
 const fromDiff = Annotation.define<boolean>()
@@ -278,10 +281,18 @@ export function mount(parent: HTMLElement) {
 
 const decode = (b: Uint8Array | null) => (b ? new TextDecoder().decode(b) : '')
 
+// 改 diffMode 都走这里，同时更新 store 里的镜像（历史栏据此高亮选中的提交）
+function setMode(path: string, src: Source | null) {
+  if (src) diffMode.set(path, src)
+  else diffMode.delete(path)
+  useEditor.getState().setCompare(path, src?.rev ?? null)
+}
+
 // 让 Monaco 跟上「shown 是否处于 diff 形态」。setView 之后、切换形态时调用；加载期间 CM6 照常可用，
-// 加载完才取视图里的最新正文放进 Monaco。读 HEAD 失败（没有 git、不是仓库）就退回正文并报错
+// 加载完才取视图里的最新正文放进 Monaco。读左侧版本失败（没有 git、不是仓库）就退回正文并报错
 function syncDiff() {
-  const want = shown && diffMode.has(shown) ? shown : null
+  const src = shown ? diffMode.get(shown) : undefined
+  const want = src ? `${shown}\0${src.rev}` : null
   if (want === diffWant) return
   diffWant = want
   const my = ++diffSeq
@@ -292,21 +303,22 @@ function syncDiff() {
     diffBox!.hidden = true
     view!.requestMeasure()
   }
-  if (!want) return
+  if (!src) return
+  const p = shown!
   const v = vault!
   ;(async () => {
-    const [mod, head] = await Promise.all([diff ?? import('./diff'), window.synote.readHead(v, want)])
+    const [mod, head] = await Promise.all([diff ?? import('./diff'), window.synote.readRev(v, src.rev, src.path)])
     diff = mod
     if (my !== diffSeq || !view) return // 期间又切了文件 / 形态，或换了库
     if (!diffBox!.childElementCount) mod.create(diffBox!, applyFromDiff, () => view!.state.doc.toString())
     diffBox!.hidden = false
     cmBox!.hidden = true
-    mod.show(v, want, decode(head), view.state.doc.toString(), locked)
-    diffShown = want
+    mod.show(v, p, src.rev, decode(head), view.state.doc.toString(), locked)
+    diffShown = p
     mod.focus()
   })().catch((e) => {
     if (my !== diffSeq) return
-    diffMode.delete(want)
+    setMode(p, null)
     diffWant = null
     useUi.getState().setError(String(e))
   })
@@ -320,18 +332,26 @@ function applyFromDiff(changes: ChangeSpec[]) {
 export function toggleDiff() {
   if (!shown || locked) return
   const on = !diffMode.has(shown)
-  if (on) diffMode.add(shown)
-  else diffMode.delete(shown)
+  setMode(shown, on ? { rev: 'HEAD', path: shown } : null)
   syncDiff()
   if (!on) view!.focus()
 }
 
-// HEAD 变了（提交、切分支等）：刷新 diff 左侧
+// 历史栏选中提交（S15）：当前笔记 ↔ 该提交里的版本，再点同一个提交回到正文。左侧只读，块级拣回和输入一样写回 CM6
+export function compareWith(path: string, e: LogEntry) {
+  if (path !== shown || locked) return
+  const off = diffMode.get(path)?.rev === e.hash
+  setMode(path, off ? null : { rev: e.hash, path: e.path })
+  syncDiff()
+  if (off) view!.focus()
+}
+
+// HEAD 变了（提交、切分支等）：刷新工作区对比的左侧；历史提交的内容不会变
 window.synote.onGitChanged((e) => {
   const p = diffShown
-  if (!p || !vault || e.root !== vault) return
+  if (!p || !vault || e.root !== vault || diffMode.get(p)?.rev !== 'HEAD') return
   const my = diffSeq
-  window.synote.readHead(vault, p).then(
+  window.synote.readRev(vault, 'HEAD', p).then(
     (b) => my === diffSeq && diff!.setHead(decode(b)),
     () => {},
   )
@@ -414,7 +434,7 @@ export function setLocked(on: boolean) {
 export function forget(path: string) {
   if (timers.has(path)) flush(path) // flush 同步取走内容，之后才能清掉缓存
   states.delete(path)
-  diffMode.delete(path)
+  setMode(path, null)
   if (target?.path === path) target = null
   if (path === current) {
     current = null
@@ -498,7 +518,7 @@ function followRename(from: string, to: string, rewritten: Rewritten[]) {
       states.set(np, states.get(p)!)
       states.delete(p)
     }
-    diffMode.delete(p) // diff 左侧是按旧路径读的 HEAD：退回正文
+    setMode(p, null) // diff 左侧是按旧路径读的版本（HEAD 或历史提交）：退回正文
     writes.delete(p)
   }
   if (current) current = move(current)

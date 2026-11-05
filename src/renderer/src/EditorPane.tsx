@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { Backlinks } from './Backlinks'
 import s from './EditorPane.module.css'
 import { forget, mount, show } from './editor'
+import { History } from './History'
 import { useEditor, useUi } from './store'
 import { baseName } from './tree'
 
@@ -12,6 +13,7 @@ export function EditorPane() {
   const tabs = useEditor((st) => st.tabs)
   const active = useEditor((st) => st.active)
   const dirty = useEditor((st) => st.dirty)
+  const history = useUi((st) => st.history)
 
   useEffect(() => mount(host.current!), [])
   useEffect(() => {
@@ -51,7 +53,10 @@ export function EditorPane() {
           </div>
         ))}
       </div>
-      <div ref={host} className={s.host} hidden={!active} />
+      <div className={s.body}>
+        <div ref={host} className={s.host} hidden={!active} />
+        {history && active && <History path={active} />}
+      </div>
       {active?.endsWith('.md') && <Backlinks path={active} />}
       {!active && <div className={s.empty}>{t('emptyEditor')}</div>}
     </div>

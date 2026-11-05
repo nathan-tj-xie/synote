@@ -1,9 +1,9 @@
 import { execFileSync, type ChildProcess } from 'node:child_process'
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { classifyGitError, findGit, Git, GitError, parseStatus, parseVersion, versionOk, type Exec } from './git'
+import { classifyGitError, findGit, Git, GitError, parseLog, parseStatus, parseVersion, versionOk, type Exec } from './git'
 
 describe('parseStatus', () => {
   it('解析普通改动、重命名、未跟踪、冲突、忽略，路径含空格和中文', () => {
@@ -26,6 +26,34 @@ describe('parseStatus', () => {
   })
 
   it('空输出', () => expect(parseStatus('')).toEqual([]))
+})
+
+describe('parseLog', () => {
+  const h = (c: string) => c.repeat(40)
+  it('跨重命名：R 取新路径，更旧的提交用旧路径；没有状态段的提交（merge）用更旧一侧的路径', () => {
+    const out = [
+      h('a'), '30', '张 三', '改 名后',
+      '\nM', '新/名 字.md',
+      h('b'), '20', 't', 'rename',
+      '\nR100', '旧 名.md', '新/名 字.md',
+      h('c'), '15', 't', 'merge',
+      h('d'), '10', 't', 'first',
+      '\nA', '旧 名.md',
+      '',
+    ].join('\0')
+    expect(parseLog(out)).toEqual([
+      { hash: h('a'), time: 30, author: '张 三', subject: '改 名后', path: '新/名 字.md', status: 'M' },
+      { hash: h('b'), time: 20, author: 't', subject: 'rename', path: '新/名 字.md', status: 'R' },
+      { hash: h('c'), time: 15, author: 't', subject: 'merge', path: '旧 名.md', status: '' },
+      { hash: h('d'), time: 10, author: 't', subject: 'first', path: '旧 名.md', status: 'A' },
+    ])
+  })
+
+  it('复制、删除；空输出', () => {
+    const out = [h('a'), '2', 't', 'del', '\nD', 'b.md', h('b'), '1', 't', 'copy', '\nC075', 'a.md', 'b.md', ''].join('\0')
+    expect(parseLog(out).map((e) => [e.status, e.path])).toEqual([['D', 'b.md'], ['C', 'b.md']])
+    expect(parseLog('')).toEqual([])
+  })
 })
 
 describe('version', () => {
@@ -380,5 +408,80 @@ describe('Git（系统 git）', () => {
     expect(changed).toHaveBeenCalledTimes(1)
     expect(await git.status()).toEqual([{ kind: 'untracked', path: '.gitattributes' }])
     expect(await git.lfsPaths(['attachments/图.png', 'a.md'])).toEqual(['attachments/图.png'])
+  })
+
+  it('fileLog：--follow 跨重命名（含从库外改名进来），路径按字面匹配，可按提交读旧版本', async () => {
+    const { repo, env, sh } = setup()
+    sh('init', '-q')
+    mkdirSync(path.join(repo, 'vault', '笔记'), { recursive: true })
+    writeFileSync(path.join(repo, 'x y.md'), '1\n')
+    sh('add', '.')
+    sh('commit', '-qm', 'first')
+    writeFileSync(path.join(repo, 'x y.md'), '1\n2\n')
+    sh('commit', '-qam', 'second\n\nbody')
+    sh('mv', 'x y.md', 'vault/笔记/新 名[x].md')
+    sh('commit', '-qm', 'rename')
+    writeFileSync(path.join(repo, 'vault/笔记/新 名x.md'), 'other') // [x] 若被当通配符会匹配到它
+    sh('add', '.')
+    sh('commit', '-qm', 'sibling')
+    writeFileSync(path.join(repo, 'vault/笔记/新 名[x].md'), '1\n2\n3\n')
+    sh('commit', '-qam', 'fourth')
+
+    const git = new Git('git', process.env.PATH!, path.join(repo, 'vault'), undefined, env)
+    const log = await git.fileLog('笔记/新 名[x].md')
+    expect(log.map((e) => [e.subject, e.path, e.status])).toEqual([
+      ['fourth', '笔记/新 名[x].md', 'M'],
+      ['rename', '笔记/新 名[x].md', 'R'],
+      ['second', '../x y.md', 'M'],
+      ['first', '../x y.md', 'A'],
+    ])
+    expect(log[0].author).toBe('t')
+    expect((await git.readBlob(`${log[2].hash}:./${log[2].path}`))?.toString()).toBe('1\n2\n')
+    expect((await git.readBlob(`${log[1].hash}:./${log[1].path}`))?.toString()).toBe('1\n2\n')
+    expect(await git.fileLog('没有.md')).toEqual([])
+    git.close()
+  })
+
+  it('fileLog：还没有提交时为空', async () => {
+    const { repo, env, sh } = setup()
+    sh('init', '-q')
+    writeFileSync(path.join(repo, 'a.md'), '')
+    expect(await new Git('git', process.env.PATH!, repo, undefined, env).fileLog('a.md')).toEqual([])
+  })
+
+  it('restoreSource / restore：取删除前最后一版，只写工作区；历史里没有、不是普通文件时不恢复', async () => {
+    const { repo, env, sh } = setup()
+    sh('init', '-q')
+    mkdirSync(path.join(repo, 'attachments'))
+    writeFileSync(path.join(repo, 'attachments/图 [1].png'), 'v1')
+    sh('add', '.')
+    sh('commit', '-qm', 'add')
+    writeFileSync(path.join(repo, 'attachments/图 [1].png'), 'v2')
+    sh('commit', '-qam', 'edit')
+    sh('rm', '-q', '--', 'attachments/图 [1].png')
+    sh('commit', '-qm', 'delete')
+
+    const changed = vi.fn()
+    const git = new Git('git', process.env.PATH!, repo, changed, env)
+    const src = await git.restoreSource('attachments/图 [1].png')
+    expect(src?.subject).toBe('edit')
+    await git.restore(src!.hash, 'attachments/图 [1].png')
+    expect(readFileSync(path.join(repo, 'attachments/图 [1].png'), 'utf8')).toBe('v2')
+    expect(changed).toHaveBeenCalled() // 恢复后通知索引对账
+    expect(await git.status()).toEqual([{ kind: 'untracked', path: 'attachments/图 [1].png' }])
+    expect(await git.restoreSource('attachments/没有.png')).toBeNull()
+    expect(await git.isFileAt(src!.hash, 'attachments')).toBe(false) // 目录
+    rmSync(path.join(repo, 'attachments/图 [1].png'))
+  })
+
+  it.skipIf(process.platform === 'win32')('restoreSource：历史里是符号链接的不恢复', async () => {
+    const { repo, env, sh } = setup()
+    sh('init', '-q')
+    mkdirSync(path.join(repo, 'attachments'))
+    symlinkSync('/etc/hosts', path.join(repo, 'attachments/l.png'))
+    sh('add', '.')
+    sh('commit', '-qm', 'link')
+    rmSync(path.join(repo, 'attachments/l.png'))
+    expect(await new Git('git', process.env.PATH!, repo, undefined, env).restoreSource('attachments/l.png')).toBeNull()
   })
 })

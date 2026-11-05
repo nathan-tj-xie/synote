@@ -1094,7 +1094,7 @@ test('a missing attachment shows a placeholder and the reference is kept', async
   const src = '首行\n\n![缺](attachments/gone.png)\n'
   const { app, win, vault } = await launch({ 'a.md': src })
   await win.getByRole('treeitem', { name: 'a.md' }).click()
-  await expect(win.locator('.cm-lp-image-missing')).toHaveText('附件缺失：attachments/gone.png')
+  await expect(win.locator('.cm-lp-image-missing')).toHaveText('附件缺失：attachments/gone.png从历史恢复')
   await win.keyboard.press(process.platform === 'darwin' ? 'Meta+s' : 'Control+s')
   await win.waitForTimeout(300)
   expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe(src)
@@ -1129,7 +1129,7 @@ test('a link to a missing non-image attachment shows a placeholder until it is b
   // 增删靠索引服务推送：等索引收录了这个附件再删（开库瞬间删掉的话索引从没见过它，不会推送）
   await expect.poll(() => win.evaluate((v) => window.synote.attachmentRefs(v, 'attachments/doc.pdf').catch(() => 0), vault), { timeout: 5000 }).toBe(1)
   rmSync(path.join(vault, 'attachments/doc.pdf'))
-  await expect(missing).toHaveText('附件缺失：attachments/doc.pdf', { timeout: 5000 })
+  await expect(missing).toHaveText('附件缺失：attachments/doc.pdf从历史恢复', { timeout: 5000 })
   writeFileSync(path.join(vault, 'attachments/doc.pdf'), 'pdf')
   await expect(missing).toHaveCount(0, { timeout: 5000 })
   await expect(win.locator('.cm-lp-link')).toHaveText('文档')
@@ -1407,5 +1407,102 @@ test('moving a folder rewrites open notes through the editor and uses git mv', a
   // 撤销只撤掉输入，不把链接改回旧路径
   await win.keyboard.press('ControlOrMeta+z')
   await expect.poll(() => readFileSync(path.join(vault, 'y.md'), 'utf8'), { timeout: 5000 }).toBe('[x](archive/notes/x.md) [[x]]\n')
+  await app.close()
+})
+
+// 测试用的 git：独立的全局配置，提交身份写在命令行上
+function gitIn(vault: string) {
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(vault, '..', 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' }
+  writeFileSync(env.GIT_CONFIG_GLOBAL, '')
+  return (...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: vault, env }).toString()
+}
+
+// 历史栏（S15）：git log --follow 跨重命名列出提交；选中提交看「该版本 ↔ 当前」，块级拣回走同一条保存路径
+test('history panel follows renames, compares with a commit, picks a block back and saves', async () => {
+  const { app, win, vault } = await launch({ 'old name.md': 'A\nB\nC\n' })
+  const git = gitIn(vault)
+  git('init', '-q')
+  git('add', '.')
+  git('commit', '-qm', 'v1')
+  writeFileSync(path.join(vault, 'old name.md'), 'A\nB2\nC\n')
+  git('commit', '-qam', 'v2')
+  git('mv', 'old name.md', 'new.md')
+  git('commit', '-qm', 'rename')
+  writeFileSync(path.join(vault, 'new.md'), 'A\nB3\nC\nD\n')
+  git('commit', '-qam', 'v3')
+
+  await win.getByRole('treeitem', { name: 'new.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('B3')
+  await win.keyboard.press('ControlOrMeta+Shift+p')
+  await win.keyboard.type('历史栏')
+  await win.keyboard.press('Enter')
+  const history = win.getByRole('complementary', { name: '历史' })
+  const items = history.getByRole('button')
+  await expect(items).toHaveCount(4, { timeout: 10_000 })
+  await expect(items.locator('span:first-child')).toHaveText(['v3', 'rename', 'v2', 'v1'])
+  await expect(items.nth(2)).toContainText('old name.md') // 改名前的提交显示当时的路径
+  await expect(items.nth(1)).not.toContainText('old name.md')
+
+  // 选中 v1：左侧是 v1 里 old name.md 的内容，右侧是当前文件
+  await items.nth(3).click()
+  await expect(items.nth(3)).toHaveAttribute('aria-pressed', 'true')
+  const diff = win.locator('.monaco-diff-editor')
+  const original = diff.locator('.editor.original .view-lines')
+  const modified = diff.locator('.editor.modified .view-lines')
+  await expect(original).toContainText('B', { timeout: 10_000 })
+  await expect(original).not.toContainText('B3')
+  await expect(modified).toContainText('B3')
+
+  // 拣回第一个改动块（B3 → B），D 那块不动；⌘S 落盘
+  const revert = diff.locator('.editor.modified .revertButton')
+  await expect(revert).toHaveCount(2)
+  await revert.first().click({ force: true }) // 箭头悬停才显示
+  await expect(modified).not.toContainText('B3')
+  await win.keyboard.press('ControlOrMeta+s')
+  await expect.poll(() => readFileSync(path.join(vault, 'new.md'), 'utf8')).toBe('A\nB\nC\nD\n')
+  await expect(win.locator('[role=tab] [title="未保存"]')).toHaveCount(0)
+
+  // 换一个提交对比：v2 的左侧
+  await items.nth(2).click()
+  await expect(original).toContainText('B2')
+  await expect(items.nth(3)).toHaveAttribute('aria-pressed', 'false')
+  // 再点同一个提交回到正文，内容与磁盘一致
+  await items.nth(2).click()
+  await expect(diff).toBeHidden()
+  await expect(win.locator('.cm-content')).toHaveText('ABCD')
+  await expect(win.getByRole('alert').filter({ hasText: /./ })).toHaveCount(0) // Monaco 自带空的 aria 播报区域
+  await app.close()
+})
+
+// 附件缺失占位上"从历史恢复"（#9 决定 7）：恢复删除前最后一版，写回工作区（未提交），占位随即消失
+test('a missing attachment is restored from history and the placeholder goes away', async () => {
+  const src = '首行\n\n![图](attachments/p.png)\n\n看 [文档](attachments/d.pdf)\n\n![没有](attachments/never.png)\n'
+  const { app, win, vault } = await launch({ 'a.md': src, 'attachments/d.pdf': 'pdf' })
+  writeFileSync(path.join(vault, 'attachments/p.png'), PNG)
+  const git = gitIn(vault)
+  git('init', '-q')
+  git('add', '.')
+  git('commit', '-qm', 'add')
+  git('rm', '-q', 'attachments/p.png', 'attachments/d.pdf')
+  git('commit', '-qm', 'delete')
+  win.on('dialog', (d) => d.accept())
+
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  const missing = win.locator('.cm-lp-image-missing')
+  await expect(missing).toHaveCount(3)
+  await missing.filter({ hasText: 'p.png' }).getByRole('button', { name: '从历史恢复' }).click()
+  await expect(win.locator('.cm-lp-image img')).toBeVisible()
+  expect(readFileSync(path.join(vault, 'attachments/p.png'))).toEqual(PNG)
+  await missing.filter({ hasText: 'd.pdf' }).getByRole('button', { name: '从历史恢复' }).click()
+  await expect(win.locator('.cm-lp-link')).toHaveText('文档')
+  expect(readFileSync(path.join(vault, 'attachments/d.pdf'), 'utf8')).toBe('pdf')
+  await expect(missing).toHaveCount(1)
+  expect(git('status', '--porcelain', '-uall')).toBe('?? attachments/d.pdf\n?? attachments/p.png\n')
+
+  // 历史里从没有过：报错，什么都不写
+  await missing.getByRole('button', { name: '从历史恢复' }).click()
+  await expect(win.getByRole('alert')).toContainText('历史里没有 attachments/never.png')
+  expect(existsSync(path.join(vault, 'attachments/never.png'))).toBe(false)
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe(src)
   await app.close()
 })
