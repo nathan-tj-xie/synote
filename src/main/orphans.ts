@@ -13,16 +13,30 @@ function chunks<T>(xs: T[]): T[][] {
   return out
 }
 
-// 只留下仍是孤儿（orphans 取自删除时刻的索引）、字面上在 attachments/ 下、真实父目录也在库的真实 attachments/ 内的文件。
+// 字面上是 attachments/ 下的规范相对路径：每段非空、不是 . 或 ..，不含反斜杠、冒号（盘符）和 NUL
+export const isAttachmentPath = (rel: unknown): rel is string =>
+  typeof rel === 'string' && rel.startsWith('attachments/') && !/[\\:\0]/.test(rel) && rel.split('/').every((s) => s && s !== '.' && s !== '..')
+
+// 删除 / 恢复附件前的路径校验（S11、S15 共用）：字面合格，且真实父目录在库的真实 attachments/ 内。
+// 返回「真实父目录 + 末级名」（末级是链接时就是链接本身），不合格为 null；att 是已取好的真实 attachments/
+export async function attachmentTarget(root: string, rel: unknown, att?: string | null): Promise<string | null> {
+  if (!isAttachmentPath(rel)) return null
+  const real = att ?? (await realInVault(root, 'attachments').catch(() => null))
+  if (!real) return null
+  const abs = await realParentInVault(root, rel).catch(() => null)
+  return abs && within(real, path.dirname(abs)) ? abs : null
+}
+
+// 只留下仍是孤儿（orphans 取自删除时刻的索引）且通过 attachmentTarget 校验的现存文件。
 // 不合格的跳过，不报错；返回 [相对路径, 回收用的路径]，末级是链接时回收链接本身
 export async function checkOrphans(root: string, paths: string[], orphans: Set<string>): Promise<[string, string][]> {
   const att = await realInVault(root, 'attachments').catch(() => null)
   if (!att) return []
   const out: [string, string][] = []
   for (const rel of new Set(paths)) {
-    if (!orphans.has(rel) || !rel.startsWith('attachments/') || rel.split('/').includes('..')) continue
-    const abs = await realParentInVault(root, rel).catch(() => null)
-    const st = abs && within(att, path.dirname(abs)) ? await fs.lstat(abs).catch(() => null) : null
+    if (!orphans.has(rel)) continue
+    const abs = await attachmentTarget(root, rel, att)
+    const st = abs ? await fs.lstat(abs).catch(() => null) : null
     if (st && !st.isDirectory()) out.push([rel, abs!])
     else console.warn(`[orphans] skip ${rel}`)
   }

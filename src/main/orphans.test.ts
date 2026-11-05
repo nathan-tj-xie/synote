@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { Git } from './git'
-import { checkOrphans, removeOrphans } from './orphans'
+import { attachmentTarget, checkOrphans, isAttachmentPath, removeOrphans } from './orphans'
 
 function vault(files: Record<string, string>) {
   const base = mkdtempSync(path.join(tmpdir(), 'synote-orphans-'))
@@ -19,6 +19,49 @@ function vault(files: Record<string, string>) {
 }
 
 const rels = (t: [string, string][]) => t.map(([r]) => r)
+
+describe('isAttachmentPath / attachmentTarget', () => {
+  it('只认 attachments/ 下的规范相对路径', () => {
+    for (const ok of ['attachments/a b.png', 'attachments/sub/图 [1].png']) expect(isAttachmentPath(ok)).toBe(true)
+    const bad = [
+      'attachments/../package.json',
+      'attachments/./../x',
+      'attachments/./a.png',
+      'attachments/sub/../../x',
+      'attachments\\..\\x',
+      'attachments/a\\b.png',
+      'attachments/C:x',
+      'C:/attachments/x',
+      '/attachments/x',
+      '/abs/attachments/x',
+      'attachments/',
+      'attachments//x',
+      'attachments/x\0',
+      'other/x.png',
+      'attachments',
+      undefined,
+      42,
+    ]
+    for (const b of bad) expect(isAttachmentPath(b), String(b)).toBe(false)
+  })
+
+  it('真实父目录必须在真实 attachments/ 内；越界、没有 attachments/ 时为 null', async () => {
+    const { root } = vault({ 'attachments/x.png': '', 'package.json': '{}' })
+    expect(await attachmentTarget(root, 'attachments/x.png')).toBe(path.join(await realpath(root), 'attachments', 'x.png'))
+    expect(await attachmentTarget(root, 'attachments/没有.png')).toBe(path.join(await realpath(root), 'attachments', '没有.png')) // 目标可以不存在（恢复用）
+    expect(await attachmentTarget(root, 'attachments/../package.json')).toBeNull()
+    expect(await attachmentTarget(root, 'attachments/./../package.json')).toBeNull()
+    expect(await attachmentTarget(root, 'attachments\\..\\package.json')).toBeNull()
+    expect(await attachmentTarget(root, path.join(root, 'package.json'))).toBeNull()
+    expect(await attachmentTarget(vault({ 'a.md': '' }).root, 'attachments/x.png')).toBeNull()
+  })
+
+  it.skipIf(process.platform === 'win32')('attachments/ 的子目录是指向库内别处的链接时也拒绝', async () => {
+    const { root } = vault({ 'attachments/a.png': '', 'notes/n.md': '' })
+    symlinkSync(path.join(root, 'notes'), path.join(root, 'attachments', 'notes'))
+    expect(await attachmentTarget(root, 'attachments/notes/n.md')).toBeNull()
+  })
+})
 
 describe('checkOrphans', () => {
   it('只留下仍是孤儿、在 attachments/ 内的现存文件', async () => {

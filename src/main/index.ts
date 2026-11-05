@@ -7,7 +7,7 @@ import { commands } from '../shared/commands'
 import { indexMethods, type GitState, type OrphanAttachment, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
 import { tokens } from '../shared/tokens'
 import { exec, findGit, Git, GitError, type GitDetectionResult } from './git'
-import { checkOrphans, removeOrphans, trackedOf } from './orphans'
+import { attachmentTarget, checkOrphans, isAttachmentPath, removeOrphans, trackedOf } from './orphans'
 import { commitRename, planRename } from './rename'
 import { attachmentName, isHidden, realInVault, realParentInVault, resolveInVault, saveAttachment, scanEntries, toPosix, uniqueNoteName, writeTarget } from './vault'
 
@@ -287,27 +287,28 @@ ipcMain.handle('git:log', (_e, vault: string, rel: string) => {
   resolveInVault(r, rel)
   return diffGit(r, (g) => g.fileLog(rel))
 })
-// 从历史恢复缺失的附件（S15，#9 决定 7）：只管 attachments/ 下的
-const checkAttachment = (r: string, rel: unknown): string => {
-  if (typeof rel !== 'string' || !rel.startsWith('attachments/')) throw new Error(`not an attachment: ${rel}`)
-  resolveInVault(r, rel)
+// 从历史恢复缺失的附件（S15，#9 决定 7）：只管 attachments/ 下的，路径必须是规范写法（不含 . / ..、反斜杠、盘符）
+const checkAttachment = (rel: unknown): string => {
+  if (!isAttachmentPath(rel)) throw new Error(`not an attachment: ${rel}`)
   return rel
 }
 ipcMain.handle('git:restoreSource', (_e, vault: string, rel: string) => {
   const r = checkVault(vault)
-  checkAttachment(r, rel)
+  checkAttachment(rel)
   return diffGit(r, (g) => g.restoreSource(rel))
 })
-// 写回前再校验：真实父目录在库内、目标仍不存在（不覆盖任何东西，含悬空链接）、该提交里确实是普通文件。
-// 和附件写入、孤儿删除串在同一条链上
+// 写回前再校验：真实父目录在库的真实 attachments/ 内（与孤儿删除同一个 attachmentTarget）、目标仍不存在
+// （不覆盖任何东西，含悬空链接）、该提交里确实是普通文件。和附件写入、孤儿删除串在同一条链上
 ipcMain.handle('git:restore', (_e, vault: string, rel: string, hash: string) => {
   const r = checkVault(vault)
-  checkAttachment(r, rel)
+  checkAttachment(rel)
   checkRev(hash)
   const job = attaching.then(() =>
     diffGit(r, async (g) => {
       await fs.mkdir(await realParentInVault(r, 'attachments'), { recursive: true })
-      if (await fs.lstat(await realParentInVault(r, rel)).then(() => true, () => false)) throw new Error(t('restoreExists', { path: rel }))
+      const abs = await attachmentTarget(r, rel)
+      if (!abs) throw new Error(`not an attachment: ${rel}`)
+      if (await fs.lstat(abs).then(() => true, () => false)) throw new Error(t('restoreExists', { path: rel }))
       if (!(await g.isFileAt(hash, rel))) throw new Error(t('restoreNotFound', { path: rel }))
       await g.restore(hash, rel)
     }),
@@ -343,9 +344,16 @@ async function pruneFresh(dir: string): Promise<void> {
   for (const [p, until] of s) if (until <= Date.now()) s.delete(p)
   for (const p of (await callIndex('referenced', [...s.keys()])) as string[]) s.delete(p)
 }
+// 解除保护也排进 attaching 链：不会插进一次孤儿删除的检查中间；解除前先等一次对账，
+// 之后的删除查 referenced / mentioned 时一定能看到刚落盘的正文。对账失败就不解除（到期兜底）
 ipcMain.handle('file:attachmentSettled', (_e, vault: string, paths: string[]) => {
   if (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string')) throw new Error('invalid paths')
-  for (const p of paths) fresh.get(vault)?.delete(p) // 只动内存里的保护表，期间切了库也无妨
+  const job = attaching.then(async () => {
+    await callIndex('reconcile')
+    for (const p of paths) fresh.get(vault)?.delete(p) // 只动内存里的保护表，期间切了库也无妨
+  })
+  attaching = job.catch(() => {})
+  return job
 })
 ipcMain.handle('file:saveAttachment', (_e, vault: string, name: string | null, bytes: Uint8Array) => {
   const r = checkVault(vault)
@@ -390,14 +398,16 @@ ipcMain.handle('orphans:delete', (_e, vault: string, paths: string[]) => {
   const r = checkVault(vault)
   if (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string')) throw new Error('invalid paths')
   const job = attaching.then(async () => {
-    // 开始时还在途的一律不删：渲染进程插链接、落盘、解除保护可能在下面对账期间完成，而这次对账没看到那次落盘
-    const inflight = new Set([...(fresh.get(r)?.keys() ?? [])].filter((p) => isFresh(r, p)))
     const checked = await checkOrphans(r, paths, new Set(await currentOrphans()))
     await pruneFresh(r)
-    const pending = checked.map(([p]) => p).filter((p) => inflight.has(p) || isFresh(r, p))
+    const pending = checked.map(([p]) => p).filter((p) => isFresh(r, p))
     const mentioned = (await callIndex('mentioned', checked.map(([p]) => p).filter((p) => !pending.includes(p)))) as string[]
     const kept = [...pending.map((path) => ({ path, reason: 'pending' as const })), ...mentioned.map((path) => ({ path, reason: 'mentioned' as const }))]
-    const targets = checked.filter(([p]) => !kept.some((k) => k.path === p))
+    const candidates = checked.filter(([p]) => !kept.some((k) => k.path === p))
+    // 删之前最后一刻再复核：检查期间保存的正文（file:write 不在这条链上）先对账进索引，被引用或又成了在途的静默跳过
+    await callIndex('reconcile')
+    const late = new Set((await callIndex('referenced', candidates.map(([p]) => p))) as string[])
+    const targets = candidates.filter(([p]) => !late.has(p) && !isFresh(r, p))
     try {
       return { deleted: await removeOrphans(targets, await vaultRepo(r), (p) => shell.trashItem(p)), kept }
     } finally {

@@ -313,7 +313,7 @@ function syncDiff() {
     if (!diffBox!.childElementCount) mod.create(diffBox!, applyFromDiff, () => view!.state.doc.toString())
     diffBox!.hidden = false
     cmBox!.hidden = true
-    mod.show(v, p, src.rev, decode(head), view.state.doc.toString(), locked)
+    mod.show(v, p, src.rev, src.path, decode(head), view.state.doc.toString(), locked)
     diffShown = p
     mod.focus()
   })().catch((e) => {
