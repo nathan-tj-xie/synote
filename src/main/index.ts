@@ -240,6 +240,11 @@ ipcMain.handle('vault:writeConfig', async (_e, vault: string, config: VaultConfi
 })
 // 读取跟随符号链接，所以按真实路径校验（实时预览会自动读图片，不能让一个指向库外的链接读出库外文件）
 ipcMain.handle('file:read', async (_e, vault: string, rel: string) => fs.readFile(await realInVault(checkVault(vault), rel), 'utf8'))
+// 实时预览查附件链接是否存在（S10）：一批路径一次查，同样按真实路径校验，越出笔记库的按不存在
+ipcMain.handle('file:exists', async (_e, vault: string, rels: string[]) => {
+  const r = checkVault(vault)
+  return Promise.all(rels.map((p) => realInVault(r, p).then(() => true, () => false)))
+})
 ipcMain.handle('file:readBytes', async (_e, vault: string, rel: string) => fs.readFile(await realInVault(checkVault(vault), rel)))
 // 工作区对比的 HEAD 一侧（S14）：经常驻 cat-file 读，HEAD 里没有这个文件时为 null。
 // `HEAD:./` 按 git 的工作目录（即笔记库）解析，笔记库是仓库子目录时也对

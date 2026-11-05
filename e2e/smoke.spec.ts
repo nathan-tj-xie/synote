@@ -54,21 +54,22 @@ async function launchWelcome(dirs: string[]) {
   return { app, win }
 }
 
-// 主进程下一次写 recent.json（切库 commit 的第一步）时停 ms 毫秒，把“commit 进行中”的窗口拉长；返回是否已停住
-async function holdRecentWrite(app: ElectronApplication, ms: number) {
-  await app.evaluate((_m, ms) => {
+// 主进程下一次写 recent.json（切库 commit 的第一步）时停 ms 毫秒，把“commit 进行中”的窗口拉长；返回是否已停住。
+// match 换成别的路径片段可以拖慢别的写入（如附件）
+async function holdRecentWrite(app: ElectronApplication, ms: number, match = 'recent.json') {
+  await app.evaluate((_m, { ms, match }) => {
     const fs = process.getBuiltinModule('node:fs').promises
     const orig = fs.writeFile
     const g = globalThis as { held?: boolean }
     g.held = false
     fs.writeFile = (async (file: string, ...rest: unknown[]) => {
-      if (String(file).endsWith('recent.json') && !g.held) {
+      if (String(file).includes(match) && !g.held) {
         g.held = true
         await new Promise((r) => setTimeout(r, ms))
       }
       return (orig as (...a: unknown[]) => Promise<void>)(file, ...rest)
     }) as typeof fs.writeFile
-  }, ms)
+  }, { ms, match })
   return () => app.evaluate(() => (globalThis as { held?: boolean }).held)
 }
 
@@ -1098,5 +1099,40 @@ test('a missing attachment shows a placeholder and the reference is kept', async
   await win.waitForTimeout(300)
   expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe(src)
   expect(existsSync(path.join(vault, 'attachments'))).toBe(false)
+  await app.close()
+})
+
+// 写盘期间用户改了选区并输入：链接插在发起粘贴时的位置（随编辑映射），新选中的正文不被替换
+test('a slow attachment write inserts at the original spot, not the new selection', async () => {
+  const { app, win, vault } = await launch({ 'a.md': '开头 中间 结尾' })
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  const editor = win.locator('.cm-content')
+  await editor.click()
+  await win.keyboard.press('End')
+  const held = await holdRecentWrite(app, 1500, `attachments${path.sep}`)
+  await fire(win, 'paste', 'image.png', [...PNG], 'image/png')
+  await expect.poll(held).toBe(true) // 附件写盘进行中
+  await win.keyboard.press('Home')
+  for (let i = 0; i < 3; i++) await win.keyboard.press('ArrowRight')
+  for (let i = 0; i < 2; i++) await win.keyboard.press('Shift+ArrowRight')
+  await win.keyboard.type('X')
+  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8'), { timeout: 5000 }).toMatch(/^开头 X 结尾!\[image-\d{8}-\d{6}\]\(attachments\/image-\d{8}-\d{6}\.png\)$/)
+  await app.close()
+})
+
+test('a link to a missing non-image attachment shows a placeholder until it is back', async () => {
+  const { app, win, vault } = await launch({ 'n.md': '首行\n\n看 [文档](attachments/doc.pdf) 吧\n', 'attachments/doc.pdf': 'pdf' })
+  await win.getByRole('treeitem', { name: 'n.md' }).click()
+  const missing = win.locator('.cm-lp-image-missing')
+  await expect(win.locator('.cm-lp-link')).toHaveText('文档')
+  await expect(missing).toHaveCount(0)
+  // 增删靠索引服务推送：等索引收录了这个附件再删（开库瞬间删掉的话索引从没见过它，不会推送）
+  await expect.poll(() => win.evaluate((v) => window.synote.attachmentRefs(v, 'attachments/doc.pdf').catch(() => 0), vault), { timeout: 5000 }).toBe(1)
+  rmSync(path.join(vault, 'attachments/doc.pdf'))
+  await expect(missing).toHaveText('附件缺失：attachments/doc.pdf', { timeout: 5000 })
+  writeFileSync(path.join(vault, 'attachments/doc.pdf'), 'pdf')
+  await expect(missing).toHaveCount(0, { timeout: 5000 })
+  await expect(win.locator('.cm-lp-link')).toHaveText('文档')
+  expect(readFileSync(path.join(vault, 'n.md'), 'utf8')).toBe('首行\n\n看 [文档](attachments/doc.pdf) 吧\n')
   await app.close()
 })

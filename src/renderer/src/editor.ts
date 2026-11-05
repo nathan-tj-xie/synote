@@ -1,7 +1,7 @@
 // CM6 薄封装：一个 EditorView，按标签页缓存 EditorState，不放进 React state（ADR 0005）
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { languages } from '@codemirror/language-data'
-import { Annotation, Compartment, EditorSelection, EditorState, StateEffect, StateField, Transaction, type ChangeSpec } from '@codemirror/state'
+import { Annotation, Compartment, EditorSelection, EditorState, StateEffect, StateField, Transaction, type ChangeSpec, type TransactionSpec } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { vscodeKeymap } from '@replit/codemirror-vscode-keymap'
 import { minimalSetup } from 'codemirror'
@@ -9,7 +9,7 @@ import { i18next } from '../../shared/i18n'
 import { relativeLink } from '../../shared/url'
 import { imageMime } from './diffUtil'
 import { tableTrailingSpace } from './gfmTable'
-import { forgetImages, livePreview } from './livePreview'
+import { forgetFiles, livePreview } from './livePreview'
 import { useEditor, useUi, useVault } from './store'
 
 // 缓存不变式：视图里那份（shown）永远是该文件最新的正文，states 只缓存不在视图里的已打开文件。
@@ -66,11 +66,36 @@ const eol = StateField.define<string>({
   update: (v, tr) => tr.effects.reduce((v, e) => (e.is(setEol) ? e.value : v), v),
 })
 
+// 等附件写完再插链接的位置（S10）：发起时记下（粘贴为当时的选区，拖入为落点），随之后的编辑映射，
+// 不用完成时的新选区；原选区被删光就退化成插入点。每次粘贴 / 拖入按 id 各自映射
+type Span = { from: number; to: number }
+const addPending = StateEffect.define<{ id: number } & Span>()
+const dropPending = StateEffect.define<number>()
+const pending = StateField.define<Map<number, Span>>({
+  create: () => new Map(),
+  update(m, tr) {
+    if (tr.docChanged && m.size)
+      m = new Map(
+        [...m].map(([id, r]) => {
+          const from = tr.changes.mapPos(r.from, 1)
+          return [id, { from, to: Math.max(from, tr.changes.mapPos(r.to, -1)) }]
+        }),
+      )
+    for (const e of tr.effects) {
+      if (e.is(addPending)) m = new Map(m).set(e.value.id, { from: e.value.from, to: e.value.to })
+      if (e.is(dropPending)) (m = new Map(m)).delete(e.value)
+    }
+    return m
+  },
+})
+let pendingSeq = 0
+
 function makeState(doc: string, path: string): EditorState {
   return EditorState.create({
     doc,
     extensions: [
       eol.init(() => detectEol(doc)),
+      pending,
       keymap.of(vscodeKeymap), // 键位贴近 Monaco（ADR 0003），放在前面优先于 minimalSetup 的默认键位
       minimalSetup,
       editable(),
@@ -132,7 +157,9 @@ function attach(e: Event, files: FileList | undefined, paste: boolean, at?: numb
   if (!files?.length) return false
   e.preventDefault()
   if (locked || !vault || !shown || !view) return true
-  if (at != null) view.dispatch({ selection: { anchor: at } }) // 拖入：链接落在松手处
+  const id = ++pendingSeq
+  const sel = view.state.selection.main
+  view.dispatch({ effects: addPending.of(at != null ? { id, from: at, to: at } : { id, from: sel.from, to: sel.to }) }) // 拖入：链接落在松手处
   const v = vault
   const g = vaultGen
   const note = shown
@@ -143,21 +170,30 @@ function attach(e: Event, files: FileList | undefined, paste: boolean, at?: numb
         // Chromium 里截图等剪贴板位图的文件名固定是 image.png，按剪贴板图片命名
         const r = await window.synote.saveAttachment(v, paste && f.name === 'image.png' ? null : f.name, new Uint8Array(await f.arrayBuffer()))
         if (r.warn) useUi.getState().setError(i18next.t(r.warn === 'huge' ? 'attachmentHuge' : 'attachmentLarge', { path: r.path }))
-        forgetImages(v, [r.path]) // 之前按缺失缓存过的同名附件
+        forgetFiles(v, [r.path]) // 之前按缺失缓存过的同名附件
         const alt = r.path.split('/').pop()!.replace(/\.[^.]*$/, '').replace(/[\\[\]]/g, '\\$&')
         links.push(`${imageMime(r.path) ? '!' : ''}[${alt}](${relativeLink(note, r.path)})`)
       }
     } catch (err) {
       useUi.getState().setError(String(err))
     }
-    if (!links.length || g !== vaultGen || locked) return
+    if (g !== vaultGen) return
     const s = note === shown ? view?.state : states.get(note)
-    if (!s) return // 标签页已关
-    const spec = s.replaceSelection(links.join('\n'))
-    if (note === shown) view!.dispatch(spec, { scrollIntoView: true, userEvent: 'input.paste' })
+    const r = s?.field(pending, false)?.get(id)
+    if (!s || !r) return // 标签页已关，或外部改动重新加载过（位置已作废）
+    const spec: TransactionSpec = { effects: dropPending.of(id) }
+    if (links.length && !locked) {
+      const insert = links.join('\n')
+      const cur = s.selection.main
+      spec.changes = { from: r.from, to: r.to, insert }
+      // 光标还停在发起时那段上才把它放到链接后面，否则只随改动映射
+      if (cur.from === r.from && cur.to === r.to) spec.selection = { anchor: r.from + insert.length }
+      spec.userEvent = 'input.paste'
+    }
+    if (note === shown) view!.dispatch(spec)
     else {
       states.set(note, s.update(spec).state)
-      scheduleSave(note)
+      if (spec.changes) scheduleSave(note)
     }
   })()
   return true

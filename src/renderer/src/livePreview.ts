@@ -7,7 +7,7 @@ import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, typ
 import type { SyntaxNode } from '@lezer/common'
 import { tags as t } from '@lezer/highlight'
 import { i18next } from '../../shared/i18n'
-import { dataUrl, decodeEntities, destination, imageMime, MAX_IMAGE, normalizeLabel, resolveImage, unescapeMd } from './diffUtil'
+import { dataUrl, decodeEntities, destination, imageMime, MAX_IMAGE, normalizeLabel, resolveImage, resolveLink, unescapeMd } from './diffUtil'
 
 // 当前正文属于哪个库的哪篇笔记：图片按笔记目录解析、经现有 readBytes（带库标识校验）读取
 type Note = { vault: string; path: string }
@@ -124,17 +124,75 @@ function loadImage(vault: string, path: string): Promise<string | null> {
   return p
 }
 
-// 这些文件变了（外部改动、新写入的附件）：丢掉缓存，正在显示它们的视图重建
-export function forgetImages(root: string, changed: string[]) {
-  let hit = false
-  for (const p of changed) hit = images.delete(`${root}\0${p}`) || hit
-  if (!hit) return
+// 非图片附件链接的目标是否存在（缺失时显示占位）：按库 + 路径缓存，没有的项一次重建里攒成一批，经 exists 查一次，
+// 不是每次渲染都查。查到缺失才需要重建（默认按存在渲染）；查询失败按存在处理，免得反复查
+const present = new Map<string, boolean>()
+const asking = new Map<string, Set<string>>() // 库 → 待查路径
+function isPresent(vault: string, path: string): boolean | undefined {
+  const key = `${vault}\0${path}`
+  if (present.has(key)) return present.get(key)
+  if (!asking.size) queueMicrotask(askPresent)
+  asking.set(vault, (asking.get(vault) ?? new Set()).add(path))
+  return undefined
+}
+function askPresent() {
+  for (const [vault, set] of asking) {
+    const paths = [...set]
+    window.synote.exists(vault, paths).then(
+      (r) => {
+        if (present.size >= 5000) present.clear() // shortcut: 满了整个清空而不是 LRU，附件链接极多时再换
+        paths.forEach((p, i) => present.set(`${vault}\0${p}`, r[i]))
+        if (r.includes(false)) rebuildViews()
+      },
+      () => paths.forEach((p) => present.set(`${vault}\0${p}`, true)),
+    )
+  }
+  asking.clear()
+}
+
+function rebuildViews() {
   imageGen++
   for (const v of views) v.dispatch({ effects: refresh.of(null) })
 }
 
-// 单测（node）里没有 window
-if (typeof window !== 'undefined') window.synote.onVaultChanged(({ root, changed }) => forgetImages(root, changed))
+// 这些文件变了（外部改动、新写入的附件、索引发现的增删）：丢掉缓存，正在显示的视图重建
+export function forgetFiles(root: string, changed: string[]) {
+  let hit = false
+  for (const p of changed) {
+    const key = `${root}\0${p}`
+    hit = images.delete(key) || hit
+    hit = present.delete(key) || hit
+  }
+  if (hit) rebuildViews()
+}
+
+// 单测（node）里没有 window。库的 watcher 跳过 attachments/，附件的增删靠索引服务的变化推送
+if (typeof window !== 'undefined') {
+  window.synote.onVaultChanged(({ root, changed }) => forgetFiles(root, changed))
+  window.synote.onIndexChanged(({ root, paths }) => forgetFiles(root, paths))
+}
+
+// 指向库内附件（attachments/ 下）的普通链接，目标已知不存在时的占位
+class MissingWidget extends WidgetType {
+  constructor(readonly path: string) {
+    super()
+  }
+  eq(o: MissingWidget) {
+    return o.path === this.path
+  }
+  toDOM() {
+    const el = document.createElement('span')
+    el.className = 'cm-lp-image-missing'
+    el.textContent = i18next.t('attachmentMissing', { path: this.path })
+    return el
+  }
+}
+
+function missingWidget(state: EditorState, target: string): MissingWidget | null {
+  const info = state.facet(note)
+  const path = info && target ? resolveLink(target, info.path) : null
+  return path?.startsWith('attachments/') && isPresent(info!.vault, path) === false ? new MissingWidget(path) : null
+}
 
 class ImageWidget extends WidgetType {
   constructor(
@@ -437,7 +495,7 @@ export function buildBlocks(state: EditorState, refs: Map<string, string> = link
       if (name === 'Link' || name === 'Image') {
         const parts = touches(state, n.from, n.to) ? null : linkParts(state, n.node, () => refs)
         if (parts && parts.target !== null) {
-          const widget = name === 'Image' ? imageWidget(state, parts.text, parts.target) : new LinkText(parts.text)
+          const widget = name === 'Image' ? imageWidget(state, parts.text, parts.target) : (missingWidget(state, parts.target) ?? new LinkText(parts.text))
           out.push(Decoration.replace({ widget }).range(n.from, n.to))
         }
         return false
@@ -596,6 +654,11 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
           if (!oneLine(n.from, n.to)) return false // 跨行的由 blocks 整段处理
           const parts = active() ? null : linkParts(state, n.node, getRefs)
           if (!parts || parts.target === null) return // 光标在这行，或是没有定义的 `[文]`（不是链接）
+          const missing = missingWidget(state, parts.target)
+          if (missing) {
+            replace(n.from, n.to, Decoration.replace({ widget: missing }))
+            return
+          }
           // [名字](路径)、[名字][ref] → 只显示名字
           const marks = n.node.getChildren('LinkMark')
           hide(marks[0].from, marks[0].to)

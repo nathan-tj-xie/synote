@@ -71,9 +71,9 @@ export function destination(raw: string): string {
 // 传入的是标签内容，不含外层方括号（由调用方按语法树的 LinkLabel 边界取），所以末尾的转义 `\]` 不会被误删
 export const normalizeLabel = (s: string) => s.trim().replace(/\s+/g, ' ').toLowerCase().toUpperCase()
 
-// 图片引用的 src 解析成相对笔记库根的路径（ADR 0001 的相对链接）：按笔记所在目录解析，以 / 开头的按库根；
-// 外链、越出笔记库、不是图片时为 null。diff 悬停和实时预览共用
-export function resolveImage(src: string, note: string): string | null {
+// 链接 / 图片引用的 src 解析成相对笔记库根的路径（ADR 0001 的相对链接）：按笔记所在目录解析，以 / 开头的按库根；
+// 外链、越出笔记库时为 null。diff 悬停和实时预览共用
+export function resolveLink(src: string, note: string): string | null {
   src = src.replace(/[?#].*$/, '') // 尖括号、转义、实体已由 destination 处理
   if (/^[a-z][a-z0-9+.-]*:/i.test(src)) return null
   const parts = src.startsWith('/') ? [] : note.split('/').slice(0, -1)
@@ -87,7 +87,12 @@ export function resolveImage(src: string, note: string): string | null {
       parts.pop()
     } else if (seg && seg !== '.') parts.push(seg)
   }
-  const path = parts.join('/')
+  return parts.join('/') || null
+}
+
+// 同上，不是图片时也为 null
+export function resolveImage(src: string, note: string): string | null {
+  const path = resolveLink(src, note)
   return path && imageMime(path) ? path : null
 }
 
