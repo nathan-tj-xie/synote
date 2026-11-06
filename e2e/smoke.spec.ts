@@ -1078,6 +1078,7 @@ test('pasting the same image twice writes one file; dropped files keep their nam
   const file = path.join(vault, '我的 笔记', 'n.md')
   const link = /!\[image-\d{8}-\d{6}\]\(\.\.\/attachments\/(image-\d{8}-\d{6}\.png)\)/g
   await expect.poll(() => [...readFileSync(file, 'utf8').matchAll(link)].length).toBe(1)
+  await expect(win.locator('.cm-lp-image img')).toHaveCount(1) // 光标换到下一行，不点别处图片也直接渲染
   await fire(win, 'paste', 'image.png', png, 'image/png')
   await expect.poll(() => [...readFileSync(file, 'utf8').matchAll(link)].length).toBe(2)
   const names = [...readFileSync(file, 'utf8').matchAll(link)].map((m) => m[1])
@@ -1087,6 +1088,18 @@ test('pasting the same image twice writes one file; dropped files keep their nam
   await fire(win, 'drop', 'my doc.pdf', [1, 2, 3], 'application/pdf')
   await expect.poll(() => readFileSync(file, 'utf8')).toContain('[my-doc](../attachments/my-doc.pdf)')
   expect(readdirSync(path.join(vault, 'attachments')).sort()).toEqual([names[0], 'my-doc.pdf'].sort())
+  await app.close()
+})
+
+// 光标在行首、图片拖到同一行行末：光标跟到落点后换行，图片直接渲染
+test('an image dropped on the cursor line renders right away', async () => {
+  const { app, win, vault } = await launch({ 'n.md': '开头' })
+  await win.getByRole('treeitem', { name: 'n.md' }).click()
+  await win.locator('.cm-content').click()
+  await win.keyboard.press('Home')
+  await fire(win, 'drop', 'pic.png', [...PNG], 'image/png')
+  await expect.poll(() => readFileSync(path.join(vault, 'n.md'), 'utf8')).toBe('开头![pic](attachments/pic.png)\n')
+  await expect(win.locator('.cm-lp-image img')).toHaveCount(1)
   await app.close()
 })
 
@@ -1301,7 +1314,7 @@ test('an attachment pasted and then undone can be cleaned', async () => {
   await win.keyboard.press('End')
   await fire(win, 'drop', 'oops.pdf', [9, 9], 'application/pdf')
   const file = path.join(vault, 'n.md')
-  await expect.poll(() => readFileSync(file, 'utf8')).toBe('开头[oops](attachments/oops.pdf)')
+  await expect.poll(() => readFileSync(file, 'utf8')).toBe('开头[oops](attachments/oops.pdf)\n')
   await win.keyboard.press('ControlOrMeta+z')
   await expect.poll(() => readFileSync(file, 'utf8')).toBe('开头')
   const dialog = await cleanOrphans(win)
