@@ -1,0 +1,9 @@
+/* 左侧状态色竖条标出"合并中"：不是错误（不用 danger），也不是普通提示（不用 accent） */
+.banner { flex: none; display: flex; align-items: center; gap: 8px; padding: 5px 12px 5px 10px; border-left: 3px solid var(--merging); border-bottom: 1px solid var(--border); background: var(--bg-raised); font-size: 13px; }
+.text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.primary { background: var(--accent); border: 1px solid var(--accent); color: var(--on-accent); padding: 2px 12px; border-radius: 4px; cursor: pointer; }
+.ghost { background: none; border: 1px solid var(--border); color: var(--fg); padding: 2px 12px; border-radius: 4px; cursor: pointer; }
+.primary:disabled, .ghost:disabled { opacity: .5; cursor: default; }
+.primary:focus-visible, .ghost:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* 叠一次类名：盖过对话框 .actions button 的通用样式 */
+.danger.danger { background: var(--danger); border-color: var(--danger); color: var(--on-accent); }

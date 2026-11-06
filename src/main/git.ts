@@ -3,6 +3,7 @@ import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { GitBranch, GitErrorKind, GitFile, LogEntry } from '../shared/api'
+import { hasConflictMarkers } from '../shared/conflicts'
 import { parseLfsPointer, type LfsPointer } from '../shared/lfs'
 import { encodeSegment } from '../shared/url'
 
@@ -196,6 +197,13 @@ export class StagedOutsideError extends GitError {
   }
 }
 
+// 完成合并前还有没解决的文件（冲突中或暂存内容带标记，S16），带上要列给用户的路径
+export class UnresolvedError extends GitError {
+  constructor(readonly paths: string[]) {
+    super('unresolved', -1, paths.join('\n'))
+  }
+}
+
 // `config --get`、`rev-parse --verify --quiet` 查不到时退出码为 1，记为 fallback；其它失败（配置损坏、权限等）照常抛出
 const onExit1 =
   <T>(fallback: T) =>
@@ -275,19 +283,45 @@ export class Git {
   }
 
   // git 面板（S13）的数据：只列笔记库（cwd）内的改动，路径换成相对 cwd（porcelain 输出相对仓库根）；
-  // x / y 是暂存区 / 工作区一侧的状态，未跟踪记为 ??
-  async status(): Promise<GitBranch & { files: GitFile[] }> {
+  // x / y 是暂存区 / 工作区一侧的状态，未跟踪记为 ??；merging：有 MERGE_HEAD（S16），冲突（unmerged）的文件带 conflict
+  async status(): Promise<GitBranch & { files: GitFile[]; merging: boolean }> {
     // --no-optional-locks：不顺手刷新 .git/index，否则会触发 watcher 再推一次状态
-    const [out, prefix] = await Promise.all([
+    const [out, prefix, merging] = await Promise.all([
       this.run(['--no-optional-locks', '--literal-pathspecs', 'status', '--porcelain=v2', '-z', '--branch', '--untracked-files=all', '--', '.']),
       this.prefix(),
+      this.run(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']).then(() => true, onExit1(false)),
     ])
     const rel = (p: string) => path.posix.relative(prefix, p)
     const files = parseStatus(out).flatMap((e): GitFile[] => {
       if (!('xy' in e)) return e.kind === 'untracked' ? [{ path: rel(e.path), x: '?', y: '?' }] : []
-      return [{ path: rel(e.path), x: e.xy[0], y: e.xy[1], ...(e.kind === 'renamed' && { orig: rel(e.orig) }) }]
+      return [{ path: rel(e.path), x: e.xy[0], y: e.xy[1], ...(e.kind === 'renamed' && { orig: rel(e.orig) }), ...(e.kind === 'unmerged' && { conflict: true as const }) }]
     })
-    return { ...parseBranch(out), files }
+    return { ...parseBranch(out), files, merging }
+  }
+
+  // 完成合并前的复查（#9 决定 3）：暂存区里相对 HEAD 改动过的笔记库文件，哪些仍有冲突标记（查暂存区版本，合并提交提交的就是它）。
+  // HEAD 里本来就有的（如讲冲突标记的笔记）不算；二进制文件跳过
+  async markersLeft(): Promise<string[]> {
+    // --raw 直接给出暂存区一侧的 oid：常驻 cat-file 进程只读一次 .git/index，按 `:路径` 读会拿到旧的暂存内容
+    const [out, prefix] = await Promise.all([this.run(['--literal-pathspecs', 'diff', '--cached', '--raw', '-z', '--no-renames', '--no-abbrev', 'HEAD', '--', '.']), this.prefix()])
+    const t = out.split('\0')
+    const res: string[] = []
+    for (let i = 0; i + 1 < t.length; i += 2) {
+      const oid = t[i].split(' ')[3]
+      // 冲突中的（全零 oid）由调用方按冲突文件拦下；删除的也是全零
+      const b = oid && !/^0+$/.test(oid) ? await this.readBlob(oid) : null
+      if (b && !b.includes(0) && hasConflictMarkers(b.toString('utf8'))) res.push(path.posix.relative(prefix, t[i + 1]))
+    }
+    return res
+  }
+
+  // 用 git 生成的合并信息（MERGE_MSG）提交暂存区；工作区里没暂存的改动不进合并提交
+  mergeContinue(): Promise<string> {
+    return this.mutate(['-c', 'user.useConfigOnly=true', 'commit', '-q', '--no-edit'])
+  }
+
+  mergeAbort(): Promise<string> {
+    return this.mutate(['merge', '--abort'])
   }
 
   // 笔记库在仓库里的前缀（如 `笔记/`，库就是仓库根时为空）

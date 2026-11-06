@@ -6,3 +6,6 @@ body {
   overflow: hidden;
 }
 button { font: inherit; color: inherit; }
+/* 冲突视图（S16）的两侧底色，由 diff.ts 的 Monaco 装饰引用 */
+.synote-ours { background: var(--conflict-ours); }
+.synote-theirs { background: var(--conflict-theirs); }

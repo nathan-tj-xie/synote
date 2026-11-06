@@ -65,8 +65,10 @@ function Panel({ root, state }: { root: string; state: Ready }) {
   const [orphans, setOrphans] = useState<OrphanAttachment[]>([])
   const [unchecked, setUnchecked] = useState<ReadonlySet<string>>(new Set())
   const [deleted, setDeleted] = useState<{ path: string; head: string; mod: typeof import('./diff') } | null>(null)
-  const staged = useMemo(() => state.files.filter((f) => f.x !== '.' && f.x !== '?'), [state.files])
-  const unstaged = useMemo(() => state.files.filter((f) => f.y !== '.'), [state.files])
+  // 冲突文件（S16）单独成组，不进已暂存 / 更改
+  const conflicts = useMemo(() => state.files.filter((f) => f.conflict), [state.files])
+  const staged = useMemo(() => state.files.filter((f) => !f.conflict && f.x !== '.' && f.x !== '?'), [state.files])
+  const unstaged = useMemo(() => state.files.filter((f) => !f.conflict && f.y !== '.'), [state.files])
   const checked = orphans.filter((o) => !unchecked.has(o.path)).map((o) => o.path)
   const noIdentity = !state.name || !state.email
 
@@ -87,7 +89,8 @@ function Panel({ root, state }: { root: string; state: Ready }) {
     try {
       const res = await f()
       if (useVault.getState().vault?.root !== root) return
-      if (!res.ok) setCard({ ...res, op })
+      // pull 冲突后进入合并中，由顶部横幅接管，不再弹错误卡片
+      if (!res.ok && !(op === 'pull' && res.kind === 'conflict')) setCard({ ...res, op })
       if (res.done.kept?.length) reportKept(res.done.kept)
     } catch (e) {
       fail(e)
@@ -118,13 +121,14 @@ function Panel({ root, state }: { root: string; state: Ready }) {
       ([mod, b]) => useVault.getState().vault?.root === root && setDeleted({ path, head: b ? new TextDecoder().decode(b) : '', mod }),
       fail,
     )
-  const canCommit = !busy && !noIdentity && !!message.trim() && (state.files.length > 0 || checked.length > 0)
+  // 合并中只能经横幅"完成合并"提交
+  const canCommit = !busy && !noIdentity && !state.merging && !!message.trim() && (state.files.length > 0 || checked.length > 0)
 
   return (
     <>
       <div className={s.head}>
         <span className={s.title}>{t('git')}</span>
-        <button className={s.small} aria-label={t('gitPull')} title={t('gitPull')} disabled={!!busy || !state.upstream} onClick={pull}>
+        <button className={s.small} aria-label={t('gitPull')} title={t('gitPull')} disabled={!!busy || !state.upstream || state.merging} onClick={pull}>
           ↓ {state.behind || ''}
         </button>
         <button className={s.small} aria-label={t('gitPush')} title={t('gitPush')} disabled={!!busy || !state.branch} onClick={push}>
@@ -159,7 +163,7 @@ function Panel({ root, state }: { root: string; state: Ready }) {
               card.op === 'commit' ? t('gitNotCommitted') : '',
             ].filter(Boolean)}
             raw={card.outside ? undefined : card.raw}
-            paths={card.outside?.paths}
+            paths={card.outside?.paths ?? card.paths}
             commands={card.kind === 'noIdentity' ? identityCommands({ name: null, email: null }) : commandsFor(card)}
             onPull={card.kind === 'nonFastForward' ? pull : undefined}
             onRetry={card.op === 'push' ? push : card.op === 'pull' ? pull : undefined}
@@ -182,8 +186,10 @@ function Panel({ root, state }: { root: string; state: Ready }) {
         <button className={`${s.primary} ${s.block}`} disabled={!canCommit} onClick={commit}>
           {staged.length ? t('gitCommitStaged', { n: staged.length }) : t('gitCommitAll')}
         </button>
+        {state.merging && <div className={s.muted}>{t('gitMergingNoCommit')}</div>}
       </div>
       <Changes
+        conflicts={conflicts}
         staged={staged}
         unstaged={unstaged}
         orphans={orphans}
@@ -276,12 +282,14 @@ function ErrorCard(p: {
   )
 }
 
-type Group = 'staged' | 'unstaged' | 'orphans'
+type Group = 'conflicts' | 'staged' | 'unstaged' | 'orphans'
 type Row = { group: Group; n: number } | { file: GitFile; staged: boolean } | { orphan: OrphanAttachment }
+const groupLabel = { conflicts: 'gitConflicts', staged: 'gitStaged', unstaged: 'gitUnstaged', orphans: 'gitOrphans' } as const
 const ROW = 22
 
 // 三个分组拍平成一个虚拟列表（1k 改动时只渲染可见的几十行，ADR 0005）
 function Changes(p: {
+  conflicts: GitFile[]
   staged: GitFile[]
   unstaged: GitFile[]
   orphans: OrphanAttachment[]
@@ -296,11 +304,12 @@ function Changes(p: {
   const scroll = useRef<HTMLDivElement>(null)
   const rows = useMemo(() => {
     const out: Row[] = []
+    if (p.conflicts.length) out.push({ group: 'conflicts', n: p.conflicts.length }, ...p.conflicts.map((file) => ({ file, staged: false })))
     if (p.staged.length) out.push({ group: 'staged', n: p.staged.length }, ...p.staged.map((file) => ({ file, staged: true })))
     if (p.unstaged.length) out.push({ group: 'unstaged', n: p.unstaged.length }, ...p.unstaged.map((file) => ({ file, staged: false })))
     if (p.orphans.length) out.push({ group: 'orphans', n: p.orphans.filter((o) => !p.unchecked.has(o.path)).length }, ...p.orphans.map((orphan) => ({ orphan })))
     return out
-  }, [p.staged, p.unstaged, p.orphans, p.unchecked])
+  }, [p.conflicts, p.staged, p.unstaged, p.orphans, p.unchecked])
   const v = useVirtualizer({ count: rows.length, getScrollElement: () => scroll.current, estimateSize: () => ROW, overscan: 10 })
 
   return (
@@ -314,7 +323,7 @@ function Changes(p: {
             return (
               <div key={r.group} className={`${s.row} ${s.groupRow}`} style={style}>
                 <span className={s.grow}>
-                  {t(r.group === 'staged' ? 'gitStaged' : r.group === 'unstaged' ? 'gitUnstaged' : 'gitOrphans')} <span className={s.count}>{r.n}</span>
+                  {t(groupLabel[r.group])} <span className={`${s.count} ${r.group === 'conflicts' ? s.countMerging : ''}`}>{r.n}</span>
                 </span>
                 {r.group === 'unstaged' && (
                   <button className={s.small} disabled={p.busy} onClick={() => p.onStage(null)}>
@@ -332,6 +341,21 @@ function Changes(p: {
               </label>
             )
           const f = r.file
+          if (f.conflict)
+            return (
+              <div
+                key={`c:${f.path}`}
+                className={`${s.row} ${f.path.endsWith('.md') ? s.openable : ''}`}
+                style={style}
+                title={f.path}
+                // 冲突文件打开时直接进冲突视图（editor.ts 按 git 状态判断）；不给暂存按钮，暂存要等标记清空后保存时自动做
+                onClick={() => f.path.endsWith('.md') && useEditor.getState().open(f.path)}
+              >
+                <span className={`${s.st} ${s.stC}`}>!</span>
+                <span className={s.name}>{baseName(f.path)}</span>
+                <span className={s.dir}>{f.path.slice(0, -baseName(f.path).length)}</span>
+              </div>
+            )
           const st = r.staged ? f.x : f.y === '?' ? 'U' : f.y
           // 只有笔记能打开对比；删除的笔记工作区里没有，单独只读展示
           const openable = f.path.endsWith('.md')

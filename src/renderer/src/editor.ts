@@ -16,7 +16,7 @@ import { noteCompletion, resolveHref, type Href } from './links'
 import { mathSyntax } from './embed'
 import { forgetFiles, insertMath, linkAt, livePreview } from './livePreview'
 import { isMac } from './match'
-import { useEditor, useUi, useVault } from './store'
+import { useEditor, useGit, useUi, useVault } from './store'
 
 // 缓存不变式：视图里那份（shown）永远是该文件最新的正文，states 只缓存不在视图里的已打开文件。
 // setView 是唯一换视图的入口：换之前把 shown 写回 states，放进视图的那份同时移出 states
@@ -50,6 +50,8 @@ const diffMode = new Map<string, Source>() // 处于 diff 形态的已打开文�
 let diffWant: string | null = null // 应该显示的 diff：`文件\0版本`（加载中或已显示）
 let diffShown: string | null = null // Monaco 里实际是哪个文件
 let diffSeq = 0
+// 合并中还没解决的冲突文件（S16）：打开时直接进冲突视图，优先于 diff 形态；解决（自动 git add）后回到正文
+let conflicted = new Set<string>()
 const fromDiff = Annotation.define<boolean>()
 let cmBox: HTMLElement | null = null
 let diffBox: HTMLElement | null = null
@@ -298,8 +300,9 @@ function setMode(path: string, src: Source | null) {
 // 让 Monaco 跟上「shown 是否处于 diff 形态」。setView 之后、切换形态时调用；加载期间 CM6 照常可用，
 // 加载完才取视图里的最新正文放进 Monaco。读左侧版本失败（没有 git、不是仓库）就退回正文并报错
 function syncDiff() {
-  const src = shown ? diffMode.get(shown) : undefined
-  const want = src ? `${shown}\0${src.rev}` : null
+  const conflict = !!shown && conflicted.has(shown)
+  const src = shown && !conflict ? diffMode.get(shown) : undefined
+  const want = conflict ? `${shown}\0conflict` : src ? `${shown}\0${src.rev}` : null
   if (want === diffWant) return
   diffWant = want
   const my = ++diffSeq
@@ -310,22 +313,22 @@ function syncDiff() {
     diffBox!.hidden = true
     view!.requestMeasure()
   }
-  if (!src) return
+  if (!src && !conflict) return
   const p = shown!
   const v = vault!
   ;(async () => {
-    const [mod, head] = await Promise.all([diff ?? import('./diff'), window.synote.readRev(v, src.rev, src.path)])
+    const [mod, head] = await Promise.all([diff ?? import('./diff'), src ? window.synote.readRev(v, src.rev, src.path) : null])
     diff = mod
     if (my !== diffSeq || !view) return // 期间又切了文件 / 形态，或换了库
     if (!diffBox!.childElementCount) mod.create(diffBox!, applyFromDiff, () => view!.state.doc.toString())
     diffBox!.hidden = false
     cmBox!.hidden = true
-    mod.show(v, p, src.rev, src.path, decode(head), view.state.doc.toString(), locked)
+    mod.show(v, p, src?.rev ?? '', src?.path ?? p, decode(head), view.state.doc.toString(), locked, conflict)
     diffShown = p
     mod.focus()
   })().catch((e) => {
     if (my !== diffSeq) return
-    setMode(p, null)
+    if (src) setMode(p, null)
     diffWant = null
     useUi.getState().setError(String(e))
   })
@@ -360,6 +363,12 @@ export function compareWith(path: string, e: LogEntry) {
   syncDiff()
   if (off) view!.focus()
 }
+
+useGit.subscribe((s) => {
+  const st = s.state
+  conflicted = new Set(st?.status === 'ready' && st.merging ? st.files.filter((f) => f.conflict).map((f) => f.path) : [])
+  if (view) syncDiff()
+})
 
 // HEAD 变了（提交、切分支等）：刷新工作区对比的左侧；历史提交的内容不会变
 window.synote.onGitChanged((e) => {

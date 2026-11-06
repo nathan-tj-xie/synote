@@ -25,6 +25,7 @@ export const monacoColors = (): Record<string, string> => ({
   'diffEditor.removedLineBackground': tokens.diffRemoved,
   'diffEditor.removedTextBackground': tokens.diffRemoved,
   'diffEditor.border': tokens.border,
+  'editorCodeLens.foreground': tokens.accent,
 })
 
 // 语法高亮色同样取这份 token（与 CM6 实时预览的代码块一致）；Monaco 规则的颜色不带 #

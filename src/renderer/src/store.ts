@@ -53,7 +53,10 @@ export const useVault = create<VaultState>((set, get) => ({
   setVault: (vault) => {
     const same = get().vault?.root === vault?.root
     set({ vault })
-    if (!same) useEditor.getState().reset()
+    if (!same) {
+      useEditor.getState().reset()
+      useGit.setState({ state: null }) // 旧库的 git 状态（含冲突文件）不能套到新库的同名文件上
+    }
     // 同一个库的外部改动：已不存在的文件对应的标签页自动关闭
     else useEditor.getState().keep(new Set(vault?.entries.map((e) => e.path)))
   },

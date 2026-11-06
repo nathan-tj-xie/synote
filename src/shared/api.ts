@@ -33,6 +33,8 @@ export type GitErrorKind =
   | 'notRepo'
   // 提交前发现暂存区里有笔记库之外的文件（S13）：面板看不到它们，不替用户提交
   | 'stagedOutside'
+  // 完成合并前还有冲突文件、或暂存的内容里仍有冲突标记（S16）
+  | 'unresolved'
   | 'unknown'
 
 // 当前笔记库的 git 状态；missing / tooOld / notRepo 时按非 git 目录模式运行
@@ -42,7 +44,8 @@ export type GitState =
   | { status: 'notRepo'; version: string }
   // name / email 有一个为 null 就禁用提交；files：笔记库内的改动（S13）。
   // lfs：本机是否装了 git-lfs；lfsUsed：笔记库里有路径按 .gitattributes 走 LFS（只在 lfs 为 false 时检测，否则为 false）；
-  // lfsError：git status 因 LFS filter 失败（如配置了 filter.lfs.required 却找不到 git-lfs），此时 files 为空、分支信息缺省（S17）
+  // lfsError：git status 因 LFS filter 失败（如配置了 filter.lfs.required 却找不到 git-lfs），此时 files 为空、分支信息缺省（S17）；
+  // merging：合并中（有 MERGE_HEAD，S16），冲突文件在 files 里带 conflict
   | ({
       status: 'ready'
       version: string
@@ -52,23 +55,24 @@ export type GitState =
       lfs: boolean
       lfsUsed: boolean
       lfsError: { kind: 'lfsMissing' | 'lfsFilter'; raw: string } | null
+      merging: boolean
     } & GitBranch)
 
 // 分支与上游（S13）：branch 为 null 表示 detached；没有上游时 upstream 为 null，ahead / behind 为 0
 export type GitBranch = { branch: string | null; upstream: string | null; ahead: number; behind: number }
 
 // 一处改动（S13）：path 相对笔记库；x / y 为 porcelain 的暂存区 / 工作区状态（. 表示没改，未跟踪为 ? ?）；
-// orig 是重命名前的路径（在库外时以 ../ 开头）
-export type GitFile = { path: string; x: string; y: string; orig?: string }
+// orig 是重命名前的路径（在库外时以 ../ 开头）；conflict：合并冲突、还没解决（S16）
+export type GitFile = { path: string; x: string; y: string; orig?: string; conflict?: true }
 
 // git 面板写操作（S13）的结果。done 是失败前已完成的步骤：deleted 为删掉的孤儿附件数（kept 为没删的），
 // staged 为已"全部暂存"；raw 是 git 的原始输出
 // kept 的 staged：暂存区版本的笔记仍引用它（"提交已暂存"时）
 export type GitDone = { deleted?: number; kept?: { path: string; reason: 'mentioned' | 'pending' | 'staged' }[]; staged?: boolean }
-// outside：kind 为 stagedOutside 时，仓库根（top）和那些库外的已暂存路径（相对仓库根）
+// outside：kind 为 stagedOutside 时，仓库根（top）和那些库外的已暂存路径（相对仓库根）；paths：kind 为 unresolved 时没解决的文件
 export type GitOpResult =
   | { ok: true; done: GitDone }
-  | { ok: false; kind: GitErrorKind; raw: string; done: GitDone; outside?: { top: string; paths: string[] } }
+  | { ok: false; kind: GitErrorKind; raw: string; done: GitDone; outside?: { top: string; paths: string[] }; paths?: string[] }
 
 // 孤儿附件（S11）：tracked 为 git 已跟踪，删除时执行 git rm；否则（含非 git 目录）移到回收站
 export type OrphanAttachment = { path: string; tracked: boolean }
@@ -152,6 +156,9 @@ export interface SynoteApi {
   gitCommit(vault: string, message: string, all: boolean, orphans: string[]): Promise<GitOpResult>
   gitPush(vault: string): Promise<GitOpResult>
   gitPull(vault: string): Promise<GitOpResult>
+  // 合并中（S16）：完成合并（先复查冲突文件和残留标记，再用 git 生成的信息提交暂存区）；放弃合并（git merge --abort）
+  gitMergeContinue(vault: string): Promise<GitOpResult>
+  gitMergeAbort(vault: string): Promise<GitOpResult>
   // 笔记库的提交历史（git 面板底部），新的在前；LogEntry.path 为空
   repoLog(vault: string): Promise<LogEntry[]>
   // 工作区或 .git 有变化后推送最新状态

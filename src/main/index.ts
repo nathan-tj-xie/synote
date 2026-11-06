@@ -7,7 +7,8 @@ import { commands } from '../shared/commands'
 import { indexMethods, type GitDone, type GitOpResult, type GitState, type OrphanAttachment, type ItemMenuAction, type Presence, type VaultConfig, type VaultInfo } from '../shared/api'
 import { parseLfsPointer } from '../shared/lfs'
 import { tokens } from '../shared/tokens'
-import { exec, findGit, Git, GitError, StagedOutsideError, type GitDetectionResult } from './git'
+import { hasConflictMarkers } from '../shared/conflicts'
+import { exec, findGit, Git, GitError, StagedOutsideError, UnresolvedError, type GitDetectionResult } from './git'
 import { attachmentTarget, checkOrphans, isAttachmentPath, removeOrphans, trackedOf } from './orphans'
 import { commitRename, planRename } from './rename'
 import { attachmentName, isHidden, realInVault, realParentInVault, resolveInVault, saveAttachment, scanEntries, toPosix, uniqueNoteName, writeTarget } from './vault'
@@ -218,6 +219,7 @@ async function gitState(): Promise<GitState> {
 async function queryGit(g: Git, version: string): Promise<GitState> {
   if (!(await g.isRepo())) return { status: 'notRepo', version }
   const [identity, st, lfs] = await Promise.all([g.identity(), lfsStatus(g), g.lfsInstalled()])
+  merging = st.merging
   return { status: 'ready', version, ...identity, ...st, lfs, lfsUsed: !lfs && (await lfsUsedOf(g)) }
 }
 
@@ -241,7 +243,7 @@ const lfsStatus = (g: Git) =>
     (st) => ({ ...st, lfsError: null }),
     (e) => {
       if (!(e instanceof GitError) || (e.kind !== 'lfsMissing' && e.kind !== 'lfsFilter')) throw e
-      return { branch: null, upstream: null, ahead: 0, behind: 0, files: [], lfsError: { kind: e.kind, raw: e.message } }
+      return { branch: null, upstream: null, ahead: 0, behind: 0, files: [], merging: false, lfsError: { kind: e.kind, raw: e.message } }
     },
   )
 
@@ -404,7 +406,17 @@ ipcMain.handle('file:write', async (_e, vault: string, rel: string, content: str
   await noteWrite(async () => fs.writeFile(await writeTarget(r, rel), content))
   // 不等 watcher 防抖，写完立即对账：删掉或撤销最后一处引用后，孤儿状态 1 s 内更新（S11）
   callIndex('reconcile').catch((e) => console.error('[index] reconcile failed', e))
+  if (merging && !hasConflictMarkers(content)) await autoResolve(r, rel).catch((e) => console.error('[git] auto add failed', e))
 })
+// 合并中（S16）：最近一次查到的 git 状态是否有 MERGE_HEAD。只用来决定保存后要不要查冲突，避免每次保存都起 git 子进程
+let merging = false
+// 冲突文件保存后已没有冲突标记：自动 git add，移出冲突组（#9 决定 3）。失败只记日志，保存本身已成功
+async function autoResolve(r: string, rel: string) {
+  const g = await vaultRepo(r)
+  if (!g || !(await g.run(['--literal-pathspecs', 'ls-files', '-u', '-z', '--', rel]))) return
+  await g.stage([rel])
+  pushGitState()
+}
 ipcMain.handle('file:createNote', async (_e, vault: string, dir: string) => {
   const r = checkVault(vault)
   const entries = await scanEntries(r)
@@ -524,7 +536,7 @@ async function gitOp(r: string, f: (g: Git, done: GitDone) => Promise<unknown>):
   } catch (e) {
     const raw = e instanceof GitError ? [e.stderr, e.stdout].map((x) => x.trim()).filter(Boolean).join('\n') : String(e)
     const outside = e instanceof StagedOutsideError ? { top: e.top, paths: e.paths } : undefined
-    return { ok: false, kind: e instanceof GitError ? e.kind : 'unknown', raw, done, ...(outside && { outside }) }
+    return { ok: false, kind: e instanceof GitError ? e.kind : 'unknown', raw, done, ...(outside && { outside }), ...(e instanceof UnresolvedError && { paths: e.paths }) }
   } finally {
     pushGitState()
   }
@@ -571,6 +583,18 @@ ipcMain.handle('git:commit', (_e, vault: string, message: string, all: boolean, 
 })
 ipcMain.handle('git:push', (_e, vault: string) => gitOp(checkVault(vault), async (g) => g.push(!!(await g.status()).upstream)))
 ipcMain.handle('git:pull', (_e, vault: string) => gitOp(checkVault(vault), (g) => g.pull()))
+// 完成合并（S16）：先查身份，再复查（冲突文件、暂存内容里的残留标记），都通过才提交。未保存的正文由渲染进程在调用前落盘。
+// 不查库外的已暂存文件：库是仓库子目录时，合并带进来的库外文件本来就该进合并提交
+ipcMain.handle('git:mergeContinue', (_e, vault: string) =>
+  gitOp(checkVault(vault), async (g) => {
+    const id = await g.identity()
+    if (!id.name || !id.email) throw new GitError('noIdentity', -1, '')
+    const left = [...(await g.status()).files.filter((f) => f.conflict).map((f) => f.path), ...(await g.markersLeft())]
+    if (left.length) throw new UnresolvedError(left)
+    await g.mergeContinue()
+  }),
+)
+ipcMain.handle('git:mergeAbort', (_e, vault: string) => gitOp(checkVault(vault), (g) => g.mergeAbort()))
 ipcMain.handle('git:repoLog', (_e, vault: string) => {
   const r = checkVault(vault)
   return diffGit(r, (g) => g.log())
