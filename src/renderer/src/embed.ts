@@ -1,28 +1,34 @@
-// 嵌入块（GLOSSARY）：Mermaid 图、块级公式、行内公式的识别与渲染。正文里怎么显示、怎么编辑见 livePreview.ts / Embed.tsx
+// 嵌入块（GLOSSARY）：Mermaid 图、块级公式、行内公式的识别与渲染。正文里怎么显示、怎么编辑见 livePreview.ts / EmbedEditor.tsx
 import type { EditorState } from '@codemirror/state'
 import type { SyntaxNode } from '@lezer/common'
-import type { MarkdownConfig } from '@lezer/markdown'
+import type { BlockContext, Line, MarkdownConfig } from '@lezer/markdown'
 import { tags as t } from '@lezer/highlight'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
 import { tokens } from '../../shared/tokens'
 
-// 一个嵌入块：[from, to] 是它在正文里的整段源码 text；改写时整段换成 open + sep + 新源码 + sep + close
+// 一个嵌入块：[from, to] 是它在正文里的整段源码 text。块级（block）的占整行，在引用 / 列表里时连同行首的 `> `、缩进；
+// 改写时按 open、各行加 prefix 的源码、prefix + close 重新拼出整段（单行写法 sep 为空时拼回一行）。
+// kind：mermaid / math 在弹窗里编辑（包括写在行内的 `$$x$$`），inline（`$x$`）在浮层里编辑
 export type Embed = {
   kind: 'mermaid' | 'math' | 'inline'
+  block: boolean
   from: number
   to: number
   text: string
   src: string
   open: string
   close: string
+  prefix: string // 块级源码各行的续行前缀（`> `、列表缩进）
   sep: '\n' | ''
   display: boolean // 公式按块级（display mode）排版
 }
 
 export function embedText(e: Embed, src: string): string {
-  if (e.kind === 'inline') return src ? `${e.open}${src}${e.close}` : '' // 行内公式清空即删除
-  return src ? `${e.open}${e.sep}${src}${e.sep}${e.close}` : `${e.open}\n${e.close}`
+  if (!e.block) return src ? `${e.open}${src.replace(/\n/g, ' ')}${e.close}` : '' // 行内的不能换行；清空即删除
+  if (!e.sep && !src.includes('\n')) return `${e.open}${src}${e.close}`
+  const lines = src ? src.split('\n').map((l) => (l ? e.prefix + l : e.prefix.trimEnd())) : []
+  return [e.open, ...lines, e.prefix + e.close].join('\n')
 }
 
 const space = (c: string | undefined) => c === undefined || /\s/.test(c)
@@ -44,12 +50,83 @@ export function mathEnd(text: string, i: number): number {
   return -1
 }
 
-// lezer 扩展：行内公式 InlineMath（含定界符 InlineMathMark）
-export const inlineMath: MarkdownConfig = {
+// 块级公式 BlockMath：从以 `$$` 开头的行到以 `$$` 结尾的行（可以是同一行），先于列表、标题等块结构识别（`$$\n- x\n$$` 是公式）。
+// Pandoc 里 `$$` 不跨空行：没有闭合（遇到空行、文末）就不是公式，未闭合的 `$$` 不会吞掉后面的正文
+const isOpen = (line: Line) => line.indent - line.baseIndent < 4 && line.text.startsWith('$$', line.pos)
+const endsMath = (text: string) => text.trimEnd().endsWith('$$')
+
+// 开头这行之后能否闭合。shortcut: 用 BlockContext 的私有 scanLine 读后面的原始行（公开的 peekLine 只能看一行），
+// 续行前缀按 `>`、空白粗略去掉；依赖 @lezer/markdown 1.8.1 的内部实现，升级时核对
+function closes(cx: BlockContext, line: Line): boolean {
+  const rest = line.text.slice(line.pos + 2)
+  if (rest.trim().length >= 2 && endsMath(rest)) return !rest.trimEnd().slice(0, -2).includes('$$')
+  if (rest.includes('$$')) return false
+  const scan = (cx as unknown as { scanLine(pos: number): { text: string; end: number } }).scanLine.bind(cx)
+  for (let pos = cx.lineStart + line.text.length + 1; ; ) {
+    const r = scan(pos)
+    const text = r.text.replace(/^[\s>]*/, '')
+    if (!text.trim()) return false
+    if (endsMath(text)) return !text.trimEnd().slice(0, -2).includes('$$')
+    if (text.includes('$$') || r.end <= pos) return false
+    pos = r.end + 1
+  }
+}
+
+const blockMath = {
+  name: 'BlockMath',
+  parse(cx: BlockContext, line: Line) {
+    if (!isOpen(line) || !closes(cx, line)) return false
+    const from = cx.lineStart + line.pos
+    const marks = [cx.elt('BlockMathMark', from, from + 2)]
+    // 一行里的源码（去掉结尾的 `$$`）记成 BlockMathText，各行之间的前缀不在里面
+    const text = (start: number, end: number) => {
+      const s = cx.lineStart + start
+      const t = cx.lineStart + end
+      if (t > s) marks.push(cx.elt('BlockMathText', s, t))
+    }
+    const rest = line.text.slice(line.pos + 2)
+    if (rest.trim().length >= 2 && endsMath(rest)) {
+      const end = line.text.trimEnd().length
+      text(line.pos + 2, end - 2)
+      marks.push(cx.elt('BlockMathMark', cx.lineStart + end - 2, cx.lineStart + end))
+      cx.addElement(cx.elt('BlockMath', from, cx.lineStart + end, marks))
+      cx.nextLine()
+      return true
+    }
+    text(line.pos + 2, line.text.length)
+    let to = cx.lineStart + line.text.length
+    // 同 lezer 的 FencedCode：所在容器结束就停（line.depth 运行时有、类型里没有，同 closes 的 shortcut）
+    while (cx.nextLine() && (line as Line & { depth: number }).depth >= cx.depth) {
+      for (const m of line.markers) marks.push(m)
+      if (endsMath(line.text.slice(line.basePos))) {
+        const end = line.text.trimEnd().length
+        text(line.basePos, end - 2)
+        marks.push(cx.elt('BlockMathMark', cx.lineStart + end - 2, cx.lineStart + end))
+        to = cx.lineStart + end
+        cx.nextLine()
+        break
+      }
+      text(line.basePos, line.text.length)
+      to = cx.lineStart + line.text.length
+    }
+    cx.addElement(cx.elt('BlockMath', from, to, marks))
+    return true
+  },
+  // 打断前面的段落（`正文\n$$\nx\n$$`）
+  endLeaf: (cx: BlockContext, line: Line) => isOpen(line) && closes(cx, line),
+  before: 'FencedCode',
+}
+
+// lezer 扩展：行内公式 InlineMath（含定界符 InlineMathMark）和块级公式 BlockMath
+export const mathSyntax: MarkdownConfig = {
   defineNodes: [
     { name: 'InlineMath', style: t.special(t.string) },
     { name: 'InlineMathMark', style: t.processingInstruction },
+    { name: 'BlockMath', block: true, style: t.special(t.string) },
+    { name: 'BlockMathMark', style: t.processingInstruction },
+    { name: 'BlockMathText' },
   ],
+  parseBlock: [blockMath],
   parseInline: [
     {
       name: 'InlineMath',
@@ -64,55 +141,45 @@ export const inlineMath: MarkdownConfig = {
   ],
 }
 
-// 段落里的块级公式：从以 `$$` 开头的行到以 `$$` 结尾的行（可以是同一行），中间没有别的 `$$`。
-// Pandoc 里 `$$` 是段落内的元素，不跨空行；所以只在段落内找，没闭合的 `$$` 也不会吞掉后面的正文
-export function blockMath(lines: string[]): { first: number; last: number; src: string }[] {
-  const out: { first: number; last: number; src: string }[] = []
-  for (let i = 0; i < lines.length; i++) {
-    if (!lines[i].trimStart().startsWith('$$')) continue
-    for (let j = i; j < lines.length; j++) {
-      const text = lines.slice(i, j + 1).join('\n').trim()
-      if (text.length < 4 || !text.endsWith('$$')) continue
-      const src = text.slice(2, -2)
-      if (src.includes('$$')) break
-      out.push({ first: i, last: j, src: src.replace(/^[ \t]*\n|\n[ \t]*$/g, '') })
-      i = j
-      break
-    }
-  }
-  return out
-}
-
-// 顶层块 n 里的嵌入块：```mermaid / ```math 围栏（须闭合，否则未闭合的围栏会吞掉后面全文）和段落里的块级公式。
-// shortcut: 引用、列表里的嵌入块按普通代码块 / 正文显示（续行前缀的读写还没做），用户需要时再支持
-export function blockEmbeds(state: EditorState, n: SyntaxNode): Embed[] {
+// 块级的嵌入块范围占整行；续行前缀：开头那行在定界符前的部分里，除 `>` 外都换成空格（`> - ` → `>   `）
+function blockEmbed(state: EditorState, kind: Embed['kind'], openEnd: number, contentFrom: SyntaxNode, closeMark: SyntaxNode, src: string, sep: '\n' | ''): Embed {
   const doc = state.doc
-  if (n.parent?.name !== 'Document') return []
-  if (n.name === 'FencedCode') {
-    const info = n.getChild('CodeInfo')
-    const lang = info && state.sliceDoc(info.from, info.to).toLowerCase()
-    const close = n.lastChild
-    const open = doc.lineAt(n.from)
-    if ((lang !== 'mermaid' && lang !== 'math') || close?.name !== 'CodeMark' || doc.lineAt(close.from).number === open.number) return []
-    const last = doc.lineAt(close.from)
-    const src = open.number + 1 < last.number ? state.sliceDoc(open.to + 1, last.from - 1) : ''
-    return [{ kind: lang === 'mermaid' ? 'mermaid' : 'math', from: open.from, to: last.to, text: state.sliceDoc(open.from, last.to), src, open: open.text, close: last.text, sep: '\n', display: true }]
-  }
-  if (n.name !== 'Paragraph' || !state.sliceDoc(n.from, n.to).includes('$$')) return []
-  const first = doc.lineAt(n.from).number
-  const lines: string[] = []
-  for (let i = first; i <= doc.lineAt(n.to).number; i++) lines.push(doc.line(i).text)
-  return blockMath(lines).map((m) => {
-    const from = doc.line(first + m.first).from
-    const to = doc.line(first + m.last).to
-    return { kind: 'math', from, to, text: state.sliceDoc(from, to), src: m.src, open: '$$', close: '$$', sep: m.first === m.last ? '' : '\n', display: true }
-  })
+  const first = doc.lineAt(contentFrom.from)
+  const last = doc.lineAt(closeMark.from)
+  const prefix = state.sliceDoc(first.from, contentFrom.from).replace(/[^>\s]/g, ' ')
+  return { kind, block: true, from: first.from, to: last.to, text: state.sliceDoc(first.from, last.to), src, open: state.sliceDoc(first.from, openEnd), close: state.sliceDoc(closeMark.from, last.to), prefix, sep, display: true }
 }
 
-export function inlineEmbed(state: EditorState, n: SyntaxNode): Embed {
-  const d = state.sliceDoc(n.from, n.from + 2) === '$$' ? 2 : 1
-  const open = '$'.repeat(d)
-  return { kind: 'inline', from: n.from, to: n.to, text: state.sliceDoc(n.from, n.to), src: state.sliceDoc(n.from + d, n.to - d), open, close: open, sep: '', display: d === 2 }
+// 节点 n 本身是不是一个嵌入块：```mermaid / ```math 围栏（须闭合，否则未闭合的围栏会吞掉后面全文）、块级公式、行内公式
+export function embedOf(state: EditorState, n: SyntaxNode): Embed | null {
+  const doc = state.doc
+  if (n.name === 'InlineMath') {
+    const d = state.sliceDoc(n.from, n.from + 2) === '$$' ? 2 : 1
+    const open = '$'.repeat(d)
+    const src = state.sliceDoc(n.from + d, n.to - d)
+    return { kind: d === 2 ? 'math' : 'inline', block: false, from: n.from, to: n.to, text: state.sliceDoc(n.from, n.to), src, open, close: open, prefix: '', sep: '', display: d === 2 }
+  }
+  if (n.name === 'BlockMath') {
+    const marks = n.getChildren('BlockMathMark')
+    if (marks.length < 2) return null
+    const src = n
+      .getChildren('BlockMathText')
+      .map((c) => state.sliceDoc(c.from, c.to))
+      .join('\n')
+      .trim()
+    const single = doc.lineAt(marks[0].from).number === doc.lineAt(marks[1].from).number
+    return blockEmbed(state, 'math', marks[0].to, n, marks[1], src, single ? '' : '\n')
+  }
+  if (n.name !== 'FencedCode') return null
+  const info = n.getChild('CodeInfo')
+  const lang = info && state.sliceDoc(info.from, info.to).toLowerCase()
+  const close = n.lastChild
+  if ((lang !== 'mermaid' && lang !== 'math') || close?.name !== 'CodeMark' || doc.lineAt(close.from).number === doc.lineAt(n.from).number) return null
+  const src = n
+    .getChildren('CodeText')
+    .map((c) => state.sliceDoc(c.from, c.to))
+    .join('') // CodeText 不含续行前缀，行间的换行也是 CodeText
+  return blockEmbed(state, lang === 'mermaid' ? 'mermaid' : 'math', doc.lineAt(n.from).to, n, close, src, '\n')
 }
 
 // 渲染失败：原位显示红色源码，悬停显示报错

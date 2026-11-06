@@ -390,7 +390,7 @@ describe('容器嵌套的生成式测试', () => {
       // 列表项首行就是表格：生成的所有容器都从这一行开始，首行上的列表标记都要由表格 widget 画出来（不被整行替换吞掉）
       if (kind === '表格') {
         const widgets: string[][] = []
-        buildBlocks(s).between(0, s.doc.length, (_a, _b, d) => void widgets.push((d.spec.widget as { markers: string[] }).markers))
+        buildBlocks(s).between(0, s.doc.length, (_a, _b, d) => void widgets.push((d.spec.widget as { box: { markers: string[] } }).box.markers))
         expect(widgets).toEqual([stack.filter((c) => c.first !== '> ').map((c) => (c.first === '- ' ? '•' : '1.'))])
         const rows: string[][][] = []
         buildBlocks(s).between(0, s.doc.length, (_a, _b, d) => void rows.push((d.spec.widget as { rows: string[][] }).rows))
@@ -411,7 +411,7 @@ describe('列表项以表格开头', () => {
   const markers = (text: string) => {
     const s = state(1, `首行\n\n${text}`)
     const out: string[][] = []
-    buildBlocks(s).between(0, s.doc.length, (_a, _b, d) => void out.push((d.spec.widget as { markers: string[] }).markers))
+    buildBlocks(s).between(0, s.doc.length, (_a, _b, d) => void out.push((d.spec.widget as { box: { markers: string[] } }).box.markers))
     return out
   }
   it('有序 / 无序 / 嵌套', () => {

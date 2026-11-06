@@ -11,7 +11,7 @@ import type { Presence } from '../../shared/api'
 import { parseLfsPointer, sizeLabel, type LfsPointer } from '../../shared/lfs'
 import { linkHref, linkRefs as treeRefs, RAW, wikiLinks } from '../../shared/mdLinks'
 import { parseWiki } from '../../shared/url'
-import { blockEmbeds, embedText, inlineEmbed, renderEmbed, type Embed } from './embed'
+import { embedOf, embedText, renderEmbed, type Embed } from './embed'
 import { dataUrl, decodeEntities, imageMime, MAX_IMAGE, resolveImage, resolveLink, unescapeMd } from './diffUtil'
 import { resolveHref, type Href } from './links'
 import { useUi, useVault } from './store'
@@ -415,50 +415,84 @@ function imageWidget(state: EditorState, text: string, target: string): ImageWid
   return new ImageWidget(info?.vault ?? null, path, target, text, imageGen)
 }
 
-// 嵌入块（GLOSSARY）：不论光标在哪都显示渲染结果，点击或选中后按 Enter 打开编辑（Embed.tsx）
+// 引用、列表里的块（表格、嵌入块）整行替换：`> ` 由块自己画左边线，缩进和本行开始的列表标记（`•`、`7.`）也由它画
+type Box = { quoted: boolean; indent: number; markers: string[] }
+function boxOf(state: EditorState, n: SyntaxNode): Box {
+  let quoted = false
+  const start = state.doc.lineAt(n.from).from
+  const marks: SyntaxNode[] = []
+  for (let p = n.parent; p; p = p.parent) {
+    quoted ||= p.name === 'Blockquote'
+    const mark = p.name === 'ListItem' && p.from >= start ? p.getChild('ListMark') : null
+    if (mark) marks.unshift(mark)
+  }
+  const markers = marks.map((m) => (m.parent?.parent?.name === 'BulletList' ? '•' : state.sliceDoc(m.from, m.to)))
+  return { quoted, indent: quoted ? 0 : (marks[0]?.from ?? n.from) - start, markers }
+}
+
+function boxed(box: Box, cls: string, inner?: HTMLElement): HTMLElement {
+  const wrap = document.createElement('div')
+  wrap.className = box.quoted ? `${cls} cm-lp-quote` : cls
+  wrap.style.marginLeft = `${box.indent}ch`
+  if (box.markers.length) wrap.style.display = 'flex'
+  for (const m of box.markers) {
+    const el = wrap.appendChild(document.createElement('span'))
+    el.className = m === '•' ? 'cm-lp-bullet cm-lp-table-mark' : 'cm-lp-table-mark'
+    el.textContent = m
+  }
+  if (inner) wrap.appendChild(inner)
+  return wrap
+}
+
+// 嵌入块（GLOSSARY）：不论光标在哪都显示渲染结果，点击或选中后按 Enter 打开编辑（EmbedEditor.tsx）
 class EmbedWidget extends WidgetType {
   constructor(
     readonly e: Embed,
     readonly selected: boolean,
+    readonly box: Box | null, // 块级的：所在的引用 / 列表
   ) {
     super()
   }
   eq(o: EmbedWidget) {
-    return o.e.kind === this.e.kind && o.e.text === this.e.text && o.selected === this.selected
+    return o.e.kind === this.e.kind && o.e.text === this.e.text && o.selected === this.selected // text 含行首前缀，相同即容器相同
   }
   get estimatedHeight() {
-    return this.e.kind === 'inline' ? -1 : this.e.kind === 'mermaid' ? 200 : 60
+    return !this.e.block ? -1 : this.e.kind === 'mermaid' ? 200 : 60
   }
   toDOM(view: EditorView) {
-    const { kind, src, display, text } = this.e
-    const el: HTMLElement = document.createElement(kind === 'inline' ? 'span' : 'div')
-    el.className = `cm-embed cm-embed-${kind}${kind === 'inline' && display ? ' cm-embed-display' : ''}${this.selected ? ' cm-embed-selected' : ''}`
+    const { kind, src, display, text, block } = this.e
+    const el: HTMLElement = document.createElement(block ? 'div' : 'span')
+    el.className = `cm-embed cm-embed-${kind}${this.selected ? ' cm-embed-selected' : ''}`
     renderEmbed(el, kind, src, display, text, i18next.t(kind === 'mermaid' ? 'mermaidEmpty' : 'mathEmpty'), () => view.requestMeasure())
     el.addEventListener('mousedown', (ev) => {
       ev.preventDefault() // 不让光标移进来
       const e = ev.button === 0 && embedAround(view.state, view.posAtDOM(el), 1)
       if (e) openEmbed(view, e)
     })
-    return el
+    const box = this.box
+    if (!box || (!box.quoted && !box.indent && !box.markers.length)) return el
+    el.style.flex = '1'
+    return boxed(box, 'cm-embed-box', el)
   }
   ignoreEvent() {
     return true
   }
 }
 
-// pos 一侧紧挨着的嵌入块（side 1：从 pos 开始的，-1：到 pos 结束的）。块级的按所在顶层块现算，不依赖装饰
+// pos 一侧紧挨着的嵌入块（side 1：从 pos 开始的，-1：到 pos 结束的），按语法树现算，不依赖装饰。
+// 块级的从行首到行尾：引用 / 列表里节点不从行首开始，再从这一行行尾往上找
 export function embedAround(state: EditorState, pos: number, side: 1 | -1): Embed | null {
-  let inline: Embed | null = null
-  for (let n: SyntaxNode | null = syntaxTree(state).resolveInner(pos, side); n; n = n.parent) {
-    if (n.name === 'InlineMath' && (side > 0 ? n.from : n.to) === pos) inline = inlineEmbed(state, n)
-    if (n.parent?.name !== 'Document') continue
-    const blocks = blockEmbeds(state, n)
-    const hit = blocks.find((e) => (side > 0 ? e.from : e.to) === pos)
-    if (hit) return hit
-    if (blocks.some((e) => e.from <= pos && pos <= e.to)) return null // 块级公式里的 `$$x$$` 不算行内
-    break
+  const up = (p: number, s: 1 | -1) => {
+    for (let n: SyntaxNode | null = syntaxTree(state).resolveInner(p, s); n; n = n.parent) {
+      const e = embedOf(state, n)
+      if (e) return e
+    }
+    return null
   }
-  return inline
+  const line = state.doc.lineAt(pos)
+  let e = up(pos, side)
+  if (!e && line.length && pos === (side > 0 ? line.from : line.to)) e = up(line.to, -1)
+  return e && (side > 0 ? e.from : e.to) === pos ? e : null
 }
 
 // 选区正好是一个嵌入块
@@ -469,18 +503,24 @@ export function selectedEmbed(state: EditorState): Embed | null {
   return e?.to === r.to ? e : null
 }
 
-// 打开编辑：块级在弹窗里，行内在公式旁的浮层里。请求里带着视图，写回时直接派发到它（writeEmbed）
+// 打开编辑：$$ 公式和 Mermaid 在弹窗里，`$x$` 在公式旁的浮层里。请求里带着视图和发起时的笔记，写回时核对（writeEmbed）
+let embedSeq = 0
 export function openEmbed(view: EditorView, e: Embed) {
   if (view.state.readOnly) return
   view.dispatch({ selection: { anchor: e.from, head: e.to } })
-  // 浮层放在公式下方：选中后公式画成选中态，按它的框定位（`$$x$$` 会占整行）；还没写进正文的按光标位置
-  const box = view.contentDOM.querySelector('.cm-embed-selected')?.getBoundingClientRect() ?? view.coordsAtPos(e.from)
-  useUi.getState().setEmbed({ view, embed: e, at: e.kind === 'inline' && box ? { left: box.left, top: box.top, bottom: box.bottom } : null })
+  // 浮层贴着公式：选中后公式画成选中态，按它的框定位；还没写进正文的按光标位置
+  const r = view.contentDOM.querySelector('.cm-embed-selected')?.getBoundingClientRect() ?? view.coordsAtPos(e.from)
+  const at = e.kind === 'inline' && r ? { left: r.left, top: r.top, width: r.right - r.left, height: r.bottom - r.top } : null
+  useUi.getState().setEmbed({ id: ++embedSeq, view, note: view.state.facet(note), embed: e, at })
 }
 
-// 把嵌入块的源码改成 src，返回改后的嵌入块；正文里那段已经变了（外部重载等）或只读时不写，返回 null
-export function writeEmbed(view: EditorView, e: Embed, src: string): Embed | null {
-  if (view.state.readOnly || view.state.sliceDoc(e.from, e.to) !== e.text) return null
+// 视图里还是发起编辑时那篇笔记（共用一个 EditorView，切笔记会换掉整个 state）
+export const sameNote = (view: EditorView, owner: Note | null) => view.state.facet(note) === owner
+
+// 把嵌入块的源码改成 src，返回改后的嵌入块。视图已换成别的笔记、正文里那段已经变了（外部重载等）或只读时不写，返回 null
+export function writeEmbed(view: EditorView, owner: Note | null, e: Embed, src: string): Embed | null {
+  const s = view.state
+  if (s.readOnly || !sameNote(view, owner) || s.sliceDoc(e.from, e.to) !== e.text) return null
   const text = embedText(e, src)
   view.dispatch({ changes: { from: e.from, to: e.to, insert: text }, userEvent: 'input' })
   return { ...e, src, text, to: e.from + text.length }
@@ -492,7 +532,8 @@ export function insertMath(view: EditorView, display: boolean) {
   const line = view.state.doc.lineAt(head)
   const at = display ? line.to : head
   const open = display ? (line.text.trim() ? '\n\n$$' : '$$') : '$'
-  openEmbed(view, { kind: display ? 'math' : 'inline', from: at, to: at, text: '', src: '', open, close: display ? '$$' : '$', sep: display ? '\n' : '', display })
+  const close = display ? '$$' : '$'
+  openEmbed(view, { kind: display ? 'math' : 'inline', block: display, from: at, to: at, text: '', src: '', open, close, prefix: '', sep: display ? '\n' : '', display })
 }
 
 // 空行输入 `$$` 或 ```mermaid 后按 Enter：补上结尾并打开编辑窗口。行不在代码块等里面（属于顶层段落或从这行开始的围栏）
@@ -504,8 +545,8 @@ function createOnEnter(view: EditorView): boolean {
   if (!r.empty || r.head !== line.to || (text !== '$$' && text !== '```mermaid') || line.text !== text) return false
   let n: SyntaxNode | null = syntaxTree(state).resolveInner(line.from, 1)
   while (n && n.parent && n.parent.name !== 'Document') n = n.parent
+  // 已有公式的结尾 `$$` 属于 BlockMath，不会进来
   if (!n || !(n.name === 'Paragraph' || (n.name === 'FencedCode' && n.from === line.from))) return false
-  if (n.name === 'Paragraph' && blockEmbeds(state, n).some((e) => e.from <= line.from && line.to <= e.to)) return false // 已有公式的结尾 `$$`
   view.dispatch({ changes: { from: line.to, insert: text === '$$' ? '\n$$' : '\n```' }, userEvent: 'input' })
   const e = embedAround(view.state, line.from, 1)
   if (e) openEmbed(view, e)
@@ -521,7 +562,7 @@ function arrow(dir: 'left' | 'right' | 'up' | 'down') {
     const set = (anchor: number, head = anchor) => (view.dispatch({ selection: { anchor, head }, scrollIntoView: true }), true)
     if (sel) {
       if (dir === 'left' || dir === 'right') return set(fwd ? sel.to : sel.from)
-      if (sel.kind === 'inline') return false
+      if (!sel.block) return false
       return set(fwd ? Math.min(sel.to + 1, state.doc.length) : Math.max(sel.from - 1, 0))
     }
     const r = state.selection.main
@@ -537,7 +578,7 @@ function arrow(dir: 'left' | 'right' | 'up' | 'down') {
       // 光标就在块级嵌入块的边界上，或它在相邻行
       e = embedAround(state, r.head, fwd ? 1 : -1)
       if (!e && (fwd ? line.to < state.doc.length : line.from > 0)) e = fwd ? embedAround(state, line.to + 1, 1) : embedAround(state, line.from - 1, -1)
-      if (e?.kind === 'inline') e = null // 行内公式交给默认的上下移动（原子范围保证不进到里面）
+      if (e && !e.block) e = null // 行内公式交给默认的上下移动（原子范围保证不进到里面）
     }
     return e ? set(e.from, e.to) : false
   }
@@ -568,9 +609,7 @@ class TableWidget extends WidgetType {
   constructor(
     readonly source: string,
     private readonly parse: () => { rows: string[][]; align: (string | null)[] }, // 单元格用到时才切分：按源码判等，没变的表格不再算
-    readonly quoted: boolean, // 在引用里：整行（含 `> `）都被替换，引用的左边线由表格自己画
-    readonly indent: number, // 在列表里：表格前的缩进列数
-    readonly markers: string[], // 表格就在列表项首行时，被一起替换掉的列表标记（`•`、`7.`），由表格自己画出来
+    readonly box: Box,
   ) {
     super()
   }
@@ -587,15 +626,7 @@ class TableWidget extends WidgetType {
     return this.rows.length * 30 + 8
   }
   toDOM(view: EditorView) {
-    const wrap = document.createElement('div')
-    wrap.className = this.quoted ? 'cm-lp-table cm-lp-quote' : 'cm-lp-table'
-    wrap.style.marginLeft = `${this.indent}ch`
-    if (this.markers.length) wrap.style.display = 'flex'
-    for (const m of this.markers) {
-      const el = wrap.appendChild(document.createElement('span'))
-      el.className = m === '•' ? 'cm-lp-bullet cm-lp-table-mark' : 'cm-lp-table-mark'
-      el.textContent = m
-    }
+    const wrap = boxed(this.box, 'cm-lp-table')
     const table = wrap.appendChild(document.createElement('table'))
     this.rows.forEach((cells, i) => {
       const tr = (i === 0 ? table.createTHead() : (table.tBodies[0] ?? table.createTBody())).insertRow()
@@ -657,20 +688,13 @@ function tableCellsOf(state: EditorState, n: SyntaxNode): { rows: string[][]; al
   return { rows, align }
 }
 
+// 在这一行开始的列表项（`- | a |`、`7. | a |`、`- 1. | a |`）：标记在表格替换的整行范围里，交给 widget 画
 function tableWidget(state: EditorState, n: SyntaxNode): TableWidget {
-  let quoted = false
   const start = state.doc.lineAt(n.from).from
-  // 在这一行开始的列表项（`- | a |`、`7. | a |`、`- 1. | a |`）：标记在表格替换的整行范围里，交给 widget 画
-  const marks: SyntaxNode[] = []
-  for (let p = n.parent; p; p = p.parent) {
-    quoted ||= p.name === 'Blockquote'
-    const mark = p.name === 'ListItem' && p.from >= start ? p.getChild('ListMark') : null
-    if (mark) marks.unshift(mark)
-  }
-  const markers = marks.map((m) => (m.parent?.parent?.name === 'BulletList' ? '•' : state.sliceDoc(m.from, m.to)))
-  const indent = quoted ? 0 : (marks[0]?.from ?? n.from) - start
-  return new TableWidget(state.sliceDoc(start, n.to), () => tableCellsOf(state, n), quoted, indent, markers)
+  return new TableWidget(state.sliceDoc(start, n.to), () => tableCellsOf(state, n), boxOf(state, n))
 }
+
+const CONTAINER = new Set(['Blockquote', 'BulletList', 'OrderedList', 'ListItem'])
 
 // 跨行替换必须由 StateField 提供，ViewPlugin 不能替换换行。这里出两类：
 // - 表格：块级替换按整行，引用、列表里的表格连同行首的 `> ` / 缩进一起替换
@@ -682,16 +706,15 @@ export function buildBlocks(state: EditorState, refs: Map<string, string> = link
   syntaxTree(state).iterate({
     enter(n) {
       const name = n.name
-      // 顶层的 ```mermaid / ```math 和段落里的块级公式：整段换成嵌入块，不论光标在哪
-      if (n.node.parent?.name === 'Document' && (name === 'FencedCode' || name === 'Paragraph')) {
-        const embeds = blockEmbeds(state, n.node)
-        const sel = embeds.length ? selectedEmbed(state) : null
-        for (const e of embeds) out.push(Decoration.replace({ widget: new EmbedWidget(e, sel?.from === e.from), block: true }).range(e.from, e.to))
-        if (embeds.length) return false
+      // ```mermaid / ```math 和块级公式（含引用、列表里的）：整行换成嵌入块，不论光标在哪
+      const e = (name === 'FencedCode' || name === 'BlockMath') && embedOf(state, n.node)
+      if (e) {
+        out.push(Decoration.replace({ widget: new EmbedWidget(e, selectedEmbed(state)?.from === e.from, boxOf(state, n.node)), block: true }).range(e.from, e.to))
+        return false
       }
       // 不按节点类型列白名单：除代码等原样节点外，凡是跨行的节点都往里走（任务项、Setext 标题、以后的新容器都覆盖到）；
-      // 单行节点里不可能有跨行的链接 / 图片，整个跳过，所以每次重建只付跨行结构的代价
-      if (RAW.has(name) || !multiLine(n.from, n.to)) return false
+      // 单行节点里不可能有跨行的链接 / 图片，整个跳过，所以每次重建只付跨行结构的代价。单行的容器（`> $$x$$`）里可能有块级公式
+      if (RAW.has(name) || (!multiLine(n.from, n.to) && !CONTAINER.has(name))) return false
       if (name === 'Table') {
         if (!touches(state, n.from, n.to)) out.push(Decoration.replace({ widget: tableWidget(state, n.node), block: true }).range(doc.lineAt(n.from).from, n.to))
         return false
@@ -801,9 +824,9 @@ export function buildInline(state: EditorState, from: number, to: number): Decor
           return false // 由 blocks 字段整块处理
         case 'InlineMath': {
           // 行内公式是嵌入块：光标所在行也显示渲染结果
-          const e = inlineEmbed(state, n.node)
+          const e = embedOf(state, n.node)!
           const sel = state.selection.main
-          replace(n.from, n.to, Decoration.replace({ widget: new EmbedWidget(e, sel.from === e.from && sel.to === e.to) }))
+          replace(n.from, n.to, Decoration.replace({ widget: new EmbedWidget(e, sel.from === e.from && sel.to === e.to, null) }))
           return false
         }
         case 'FencedCode': {
@@ -1017,7 +1040,6 @@ const theme = EditorView.theme({
   '.cm-embed-mermaid > svg': { maxWidth: '100%', height: 'auto' },
   '.cm-embed-math .katex-display': { margin: '0' },
   '.cm-embed-inline': { padding: '0 1px' },
-  '.cm-embed-display': { display: 'block', textAlign: 'center' }, // 段落里的 `$$x$$`：独占一行，选中框画成一整块
   '.cm-embed-error': { color: 'var(--danger)', fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', textAlign: 'left' },
   '.cm-embed-empty': { color: 'var(--fg-muted)', fontStyle: 'italic' },
 })

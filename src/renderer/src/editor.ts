@@ -13,7 +13,7 @@ import { anchorLine, movePath, relativeLink } from '../../shared/url'
 import { imageMime } from './diffUtil'
 import { tableTrailingSpace } from './gfmTable'
 import { noteCompletion, resolveHref, type Href } from './links'
-import { inlineMath } from './embed'
+import { mathSyntax } from './embed'
 import { forgetFiles, insertMath, linkAt, livePreview } from './livePreview'
 import { isMac } from './match'
 import { useEditor, useUi, useVault } from './store'
@@ -130,7 +130,7 @@ function makeState(doc: string, path: string): EditorState {
       minimalSetup,
       editable(),
       EditorState.allowMultipleSelections.of(true), // ⌘D、⌥ 点击等多光标键位需要
-      markdown({ base: markdownLanguage, codeLanguages: languages, extensions: [tableTrailingSpace, inlineMath] }), // GFM（表格、任务列表、删除线）；代码块按语言懒加载高亮
+      markdown({ base: markdownLanguage, codeLanguages: languages, extensions: [tableTrailingSpace, mathSyntax] }), // GFM（表格、任务列表、删除线）；代码块按语言懒加载高亮
       where.of(atPath(path)),
       EditorView.lineWrapping,
       theme,
@@ -258,6 +258,7 @@ function setView(path: string | null, s: EditorState) {
   if (shown) states.set(shown, view!.state)
   if (path) states.delete(path)
   view!.setState(s)
+  useUi.getState().setEmbed(null) // 嵌入块的编辑属于换下去的那篇（写回时也会核对）
   view!.dispatch({ effects: lock.reconfigure(lockExt()) }) // 缓存里的状态可能建于加锁或解锁之前：总按当前 locked 重配
   shown = path
   syncDiff()

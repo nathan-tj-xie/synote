@@ -4,19 +4,20 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 // 嵌入块（S4）：Mermaid、块级 / 行内公式
-async function launch(text: string) {
+async function launch(text: string, more: Record<string, string> = {}) {
   const base = mkdtempSync(path.join(tmpdir(), 'synote-e2e-'))
   const vault = path.join(base, 'vault')
   const userData = path.join(base, 'user-data')
   mkdirSync(vault)
   mkdirSync(userData)
   writeFileSync(path.join(vault, 'a.md'), text)
+  for (const [p, c] of Object.entries(more)) writeFileSync(path.join(vault, p), c)
   writeFileSync(path.join(userData, 'recent.json'), JSON.stringify([vault]))
   const app = await electron.launch({ args: ['.'], env: { ...process.env, SYNOTE_USER_DATA: userData } })
   const win = await app.firstWindow()
   await win.getByRole('treeitem', { name: 'a.md' }).click()
   await expect(win.locator('.cm-content')).toBeVisible()
-  const disk = () => readFileSync(path.join(vault, 'a.md'), 'utf8')
+  const disk = (p = 'a.md') => readFileSync(path.join(vault, p), 'utf8')
   return { app, win, disk }
 }
 
@@ -188,6 +189,61 @@ test('$$ or ```mermaid on an empty line plus Enter creates an embed; commands in
   await math.getByRole('textbox', { name: '源码' }).fill('m')
   await math.getByRole('button', { name: '保存' }).click()
   await expect.poll(disk).toMatch(/\n\n设 \$k\$\n\n\$\$\nm\n\$\$$/)
+  await expect(win.getByRole('alert')).toHaveCount(0)
+  await app.close()
+})
+
+test('embeds inside quotes and lists render and keep their prefixes when edited; $$ content may look like a list', async () => {
+  const text = '# 标题\n\n> $$\n> a\n> $$\n\n- 项\n\n  ```mermaid\n  flowchart LR\n    甲 --> 乙\n  ```\n\n$$\n- x + y\n$$\n'
+  const { app, win, disk } = await launch(text)
+  await expect(win.locator('.cm-embed-box.cm-lp-quote .cm-embed-math .katex')).toBeVisible()
+  await expect(win.locator('.cm-embed-box .cm-embed-mermaid svg')).toContainText('乙', { timeout: 15_000 })
+  await expect(win.locator('.cm-embed-math .katex')).toHaveCount(2)
+  await win.locator('.cm-embed-math').first().click()
+  const dialog = win.getByRole('dialog', { name: '编辑公式' })
+  await dialog.getByRole('textbox', { name: '源码' }).fill('b\nc')
+  await dialog.getByRole('button', { name: '保存' }).click()
+  await expect.poll(disk).toBe(text.replace('> $$\n> a\n> $$', () => '> $$\n> b\n> c\n> $$'))
+  await app.close()
+})
+
+test('$$x$$ written inline opens the dialog, not the popover', async () => {
+  const { app, win } = await launch('前 $$x$$ 后\n')
+  await win.locator('.cm-embed-math .katex').click()
+  const dialog = win.getByRole('dialog', { name: '编辑公式' })
+  await expect(dialog.getByRole('button', { name: '保存' })).toBeVisible()
+  await expect(dialog.getByRole('textbox', { name: '源码' })).toHaveValue('x')
+  await app.close()
+})
+
+test('an edit request never writes into another note or another formula', async () => {
+  const same = '# 标题\n\n$$\na\n$$\n'
+  const { app, win, disk } = await launch(same, { 'b.md': same })
+  // 弹窗开着时用快速切换换到内容相同的 b.md：请求作废，两篇都不被写
+  await win.locator('.cm-embed-math').click()
+  await win.getByRole('dialog', { name: '编辑公式' }).getByRole('textbox', { name: '源码' }).fill('zzz')
+  await win.keyboard.press('ControlOrMeta+p')
+  await win.getByRole('combobox', { name: '快速切换' }).fill('b.md')
+  await win.keyboard.press('Enter')
+  await expect(win.getByRole('tab', { name: 'b', selected: true })).toBeVisible()
+  await expect(win.getByRole('dialog', { name: '编辑公式' })).toHaveCount(0)
+  await win.waitForTimeout(800)
+  expect(disk()).toBe(same)
+  expect(disk('b.md')).toBe(same)
+
+  // 从公式 A 的浮层直接点公式 B：之后的输入改的是 B
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await win.locator('.cm-content').click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('\n甲 $p$ 乙 $q$ 丙')
+  await expect(win.locator('.cm-embed-inline')).toHaveCount(2)
+  await clickAt(win.locator('.cm-embed-inline').first())
+  const input = win.getByRole('dialog', { name: '编辑公式' }).getByRole('textbox', { name: '源码' })
+  await expect(input).toHaveValue('p')
+  await clickAt(win.locator('.cm-embed-inline').nth(1))
+  await expect(input).toHaveValue('q')
+  await input.fill('r')
+  await expect.poll(disk).toBe(same + '\n甲 $p$ 乙 $r$ 丙')
   await expect(win.getByRole('alert')).toHaveCount(0)
   await app.close()
 })

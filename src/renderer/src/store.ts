@@ -36,8 +36,9 @@ type UiState = {
   orphans: { root: string; list: OrphanAttachment[] } | null
   // "重命名 / 移动"对话框：要移动的路径和它所在的库
   rename: { root: string; from: string } | null
-  // 正在编辑的嵌入块：块级在弹窗里，行内（at 是浮层位置）在浮层里。带着视图是为了写回时直接派发，不经 React state 持有正文
-  embed: { view: EditorView; embed: Embed; at: { left: number; top: number; bottom: number } | null } | null
+  // 正在编辑的嵌入块：`$x$`（at 是公式的框）在浮层里，其余在弹窗里。带着视图是为了写回时直接派发，不经 React state 持有正文；
+  // note 是发起时视图里的笔记，写回时核对；id 每次打开都不同，编辑界面按它重置
+  embed: { id: number; view: EditorView; note: { vault: string; path: string } | null; embed: Embed; at: { left: number; top: number; width: number; height: number } | null } | null
   setError: (e: string | null) => void
   setPalette: (p: UiState['palette']) => void
   setSidebar: (v: UiState['sidebar']) => void
