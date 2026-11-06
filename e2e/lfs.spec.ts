@@ -117,20 +117,22 @@ test('LFS installed: pointer placeholder downloads in place, dedupe by oid, hist
   // 长行在窄窗口里会折行：只认以 `![alt` 开头的那一段
   const imgLine = (alt: string) => win.locator('.monaco-diff-editor .editor.original .view-line', { hasText: new RegExp(`^!\\[${alt}`) })
   const placeholder = win.locator('.monaco-hover').filter({ hasText: 'LFS 内容未下载' })
-  // diff 刚算完时行还在重排，第一次悬停可能落空：移开再悬停，直到弹出占位
-  const hoverUntilPlaceholder = (alt: string) =>
+  const thumb = win.locator('.monaco-hover img')
+  // diff 刚算完时行还在重排，悬停可能落空；下载后的自动重弹也不保证（CI 上慢）：移开再悬停，直到弹出期望的内容
+  const hoverUntil = (alt: string, shown: typeof placeholder) =>
     expect(async () => {
       await win.mouse.move(0, 0)
       await imgLine(alt).hover({ position: { x: 12, y: 8 } })
-      await expect(placeholder).toBeVisible({ timeout: 2000 })
+      await expect(shown).toBeVisible({ timeout: 2000 })
     }).toPass({ timeout: 15_000 })
+  const hoverUntilPlaceholder = (alt: string) => hoverUntil(alt, placeholder)
   // 恶意文件名：悬停里原样显示文字，只有我们自己的那一个链接；点它也只是下载，正文不变
   await hoverUntilPlaceholder('坏')
   const evil = placeholder
   await expect(evil).toContainText(EVIL)
   await expect(evil.getByRole('link')).toHaveCount(1)
   await evil.getByRole('link', { name: '下载' }).click()
-  await expect(win.locator('.monaco-hover img')).toBeVisible({ timeout: 10_000 })
+  await hoverUntil('坏', thumb)
   await expect(win.locator('.cm-content')).toHaveText(/首行[\s\S]*看 文档/) // 编辑器正文（CM6，diff 右侧以它为准）没被删行
   expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('首行\n\n![图](attachments/p.png)\n\n看 [文档](attachments/d.pdf)\n')
   await win.mouse.move(0, 0)
@@ -142,7 +144,7 @@ test('LFS installed: pointer placeholder downloads in place, dedupe by oid, hist
   await hover.getByRole('link', { name: '下载' }).click()
   // 对象存进了本地 LFS 存储，之后读历史直接命中
   await expect.poll(() => existsSync(obj) && readFileSync(obj).equals(OLD), { timeout: 10_000 }).toBe(true)
-  await expect(win.locator('.monaco-hover img')).toBeVisible({ timeout: 10_000 })
+  await hoverUntil('旧', thumb)
   await app.close()
 })
 

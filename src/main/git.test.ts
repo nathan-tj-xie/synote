@@ -614,6 +614,8 @@ describe('Git（系统 git）', () => {
       return false
     }
   })()
+  // 每条用例要跑十几条 git / git-lfs 命令，Windows CI 上远超默认的 5 s
+  const LFS_TIMEOUT = 60_000
   // 带 --include 特殊字符的附件名：[ ] * , 和空格；Windows 文件名不能含 *，那里去掉 *
   const SPECIAL = process.platform === 'win32' ? 'a b[1],c.png' : 'a b[1]*,c.png'
   // 源仓库提交两版附件（第二版删掉 old.png）推到 bare 远端，再按 GIT_LFS_SKIP_SMUDGE=1 克隆：工作区全是指针、本地没有 LFS 对象。
@@ -684,7 +686,7 @@ describe('Git（系统 git）', () => {
     expect(readFileSync(att(SPECIAL))).toEqual(files[SPECIAL])
     expect((await git.status()).files).toEqual([])
     git.close()
-  })
+  }, LFS_TIMEOUT)
 
   // 下载命令退出码 0 却没换出内容（比如被别的配置跳过）：用一个包装过的 git 模拟，smudge 原样吐回指针、pull 什么都不做
   it.skipIf(!hasLfs || process.platform === 'win32')('下载"成功"后仍是指针：smudge / pull 都报 lfsFilter', async () => {
@@ -695,7 +697,7 @@ describe('Git（系统 git）', () => {
     await expect(git.lfsSmudge('HEAD~1:./attachments/old.png', 'attachments/old.png')).rejects.toMatchObject({ kind: 'lfsFilter', stderr: expect.stringContaining('still an LFS pointer') })
     await expect(git.lfsPull('attachments/x.png')).rejects.toMatchObject({ kind: 'lfsFilter', stderr: expect.stringContaining('still an LFS pointer') })
     git.close()
-  })
+  }, LFS_TIMEOUT)
 
   // 没装 git-lfs：同上「PATH 里只放 git」的做法。读历史只靠 cat-file，照常给出指针；按属性仍能看出库用了 LFS
   it.skipIf(!hasLfs || process.platform === 'win32')('LFS 未安装：指针照常读出，lfs pull / smudge 分类为 lfsMissing', async () => {
@@ -718,7 +720,7 @@ describe('Git（系统 git）', () => {
     await expect(required.status()).rejects.toMatchObject({ kind: 'lfsMissing' })
     git.close()
     required.close()
-  })
+  }, LFS_TIMEOUT)
 
   // 按扩展名配置 LFS、还没有任何已跟踪的 PNG：第一张粘贴进来的未跟踪图片就要让 lfsUsed 为 true（codex #37 第三轮）
   it('lfsUsed 看 attachments/ 下的未跟踪文件，忽略的不算', async () => {
