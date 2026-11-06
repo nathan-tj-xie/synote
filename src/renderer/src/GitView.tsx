@@ -331,7 +331,8 @@ function Changes(p: {
                   {t(groupLabel[r.group])} <span className={`${s.count} ${r.group === 'conflicts' ? s.countMerging : ''}`}>{r.n}</span>
                 </span>
                 {r.group === 'unstaged' && (
-                  <button className={s.small} disabled={p.busy} onClick={() => p.onStage(null)}>
+                  // 有冲突时只暂存"更改"组里的：整库 git add 会把还带标记的冲突文件当作已解决
+                  <button className={s.small} disabled={p.busy} onClick={() => p.onStage(p.conflicts.length ? p.unstaged.map((f) => f.path) : null)}>
                     {t('gitStageAll')}
                   </button>
                 )}

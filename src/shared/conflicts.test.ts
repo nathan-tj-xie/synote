@@ -56,5 +56,7 @@ describe('hasConflictMarkers', () => {
     expect(parseConflicts(t)).toMatchObject([{ start: 1, mid: 3, end: 5, ours: 'a\n', theirs: 'b\n' }])
     // 块内长度不一致的不是同一块的标记（如正文里 7 个 = 的 setext 标题）
     expect(parseConflicts('<<<<<<<<< HEAD\n标题\n=======\na\n=========\nb\n>>>>>>>>> x\n')).toMatchObject([{ mid: 5, ours: '标题\n=======\na\n' }])
+    // 正文里另一种长度的起始标记（如讲冲突的笔记）不打断外层的块
+    expect(parseConflicts('<<<<<<<<< HEAD\n<<<<<<< example\n=========\nb\n>>>>>>>>> x\n')).toMatchObject([{ start: 1, mid: 3, ours: '<<<<<<< example\n' }])
   })
 })

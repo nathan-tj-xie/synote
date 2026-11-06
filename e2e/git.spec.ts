@@ -427,8 +427,18 @@ test('merge: restored after restart, abort with confirmation, follows merges sta
   await w.getByRole('treeitem', { name: 'a.md' }).click()
   await expect(w.locator('[data-conflict-view] .monaco-editor .view-lines')).toContainText('<<<<<<< HEAD', { timeout: 10_000 })
 
-  // 整份取一侧（附件、删除 / 修改冲突的解决入口，笔记也能用）
+  // "+ 全部"只暂存普通改动，冲突文件留在冲突组
+  writeFileSync(path.join(vault, 'c.md'), 'c 改\n')
   const changes = await openGit(w)
+  await expect(row(changes, 'c.md')).toBeVisible({ timeout: 10_000 })
+  await w.getByRole('button', { name: '+ 全部' }).click()
+  await expect.poll(() => git('diff', '--cached', '--name-only', '--', 'c.md')).toBe('c.md\n')
+  await expect(banner(w)).toContainText('2 个冲突文件')
+  expect(git('ls-files', '-u', '--', 'a.md', 'b.md')).not.toBe('')
+  git('reset', '-q', '--', 'c.md')
+  git('checkout', '--', 'c.md')
+
+  // 整份取一侧（附件、删除 / 修改冲突的解决入口，笔记也能用）
   await row(changes, 'b.md').hover()
   await row(changes, 'b.md').getByRole('button', { name: '整份用传入（远端）版本' }).click()
   await expect(banner(w)).toContainText('1 个冲突文件')

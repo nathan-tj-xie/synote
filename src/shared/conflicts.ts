@@ -20,7 +20,8 @@ export function parseConflicts(text: string): Conflict[] {
   let mid = 0
   for (let i = 1; i <= lines.length; i++) {
     const l = lines[i - 1]
-    if (startLen(l)) [n, start, base, mid] = [startLen(l), i, null, 0]
+    // 块外任意长度的起始标记都开新块；块内只有同样长度的才算（前一块不完整，重新开始），别的长度是正文
+    if (startLen(l) && (!n || startLen(l) === n)) [n, start, base, mid] = [startLen(l), i, null, 0]
     else if (!n) continue
     else if (!mid && base === null && marker(l, '|', n)) base = i
     else if (!mid && new RegExp(`^={${n}}\\r?\\n?$`).test(l)) mid = i
