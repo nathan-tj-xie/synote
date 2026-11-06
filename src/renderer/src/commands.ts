@@ -1,7 +1,7 @@
 // 命令注册表的运行时部分：可用条件和执行逻辑；id、标题、快捷键见 shared/commands.ts
 import { commands, type CommandId } from '../../shared/commands'
 import { i18next } from '../../shared/i18n'
-import { attachmentsSettled, flushAll, forget, saveCurrent, toggleDiff } from './editor'
+import { attachmentsSettled, flushAll, forget, insertEmbed, saveCurrent, toggleDiff } from './editor'
 import { matchKey } from './match'
 import { useEditor, useUi, useVault } from './store'
 
@@ -71,6 +71,8 @@ export const handlers: Record<CommandId, Handler> = {
       }
     },
   },
+  insertMath: { when: () => !!ed().active, run: () => insertEmbed(true) },
+  insertInlineMath: { when: () => !!ed().active, run: () => insertEmbed(false) },
 }
 
 export const ids = Object.keys(commands) as CommandId[]
