@@ -7,7 +7,8 @@ import { commands } from '../shared/commands'
 import { indexMethods, type GitDone, type GitOpResult, type GitState, type OrphanAttachment, type ItemMenuAction, type Presence, type VaultConfig, type VaultInfo } from '../shared/api'
 import { parseLfsPointer } from '../shared/lfs'
 import { tokens } from '../shared/tokens'
-import { exec, findGit, Git, GitError, StagedOutsideError, type GitDetectionResult } from './git'
+import { hasConflictMarkers } from '../shared/conflicts'
+import { exec, findGit, Git, GitError, StagedOutsideError, UnresolvedError, type GitDetectionResult } from './git'
 import { attachmentTarget, checkOrphans, isAttachmentPath, removeOrphans, trackedOf } from './orphans'
 import { commitRename, planRename } from './rename'
 import { attachmentName, isHidden, realInVault, realParentInVault, resolveInVault, saveAttachment, scanEntries, toPosix, uniqueNoteName, writeTarget } from './vault'
@@ -56,6 +57,8 @@ async function commitVault(dir: string): Promise<void> {
   // 以下同步完成：释放旧库的服务、换上新库的、切 root
   watcher?.close()
   watcher = w
+  gitDirWatcher?.w?.close()
+  gitDirWatcher = null
   useIndexer(proc, dir)
   root = dir
   gitGen++ // 进行中的 git 状态查询作废
@@ -217,8 +220,32 @@ async function gitState(): Promise<GitState> {
 // 只用传入的实例，期间全局的 git 被替换或置空也不受影响
 async function queryGit(g: Git, version: string): Promise<GitState> {
   if (!(await g.isRepo())) return { status: 'notRepo', version }
+  await watchGitDir(g)
   const [identity, st, lfs] = await Promise.all([g.identity(), lfsStatus(g), g.lfsInstalled()])
+  merging = st.merging
   return { status: 'ready', version, ...identity, ...st, lfs, lfsUsed: !lfs && (await lfsUsedOf(g)) }
+}
+
+// 笔记库是仓库子目录或 git worktree 时，git 目录（MERGE_HEAD、index、HEAD 所在）不在笔记库的 watcher 里：单独监听它的顶层，
+// 外部在终端里完成 / 放弃合并、提交等只动 .git 的操作也能推送状态（S16）。按 git 实例只查一次
+// shortcut: 只看 git 目录顶层，不看 common dir 的 refs；外部 fetch / push 只改 refs 的情况要等下一次状态查询，有人反馈再监视 refs
+let gitDirWatcher: { g: Git; w: FSWatcher | null } | null = null
+async function watchGitDir(g: Git) {
+  if (gitDirWatcher?.g === g) return
+  const dir = (await g.run(['rev-parse', '--absolute-git-dir'])).trim()
+  if (gitDirWatcher?.g === g || g.cwd !== root) return // 期间另一次查询已经建好，或已换库
+  gitDirWatcher?.w?.close()
+  const rel = path.relative(g.cwd, dir)
+  let w: FSWatcher | null = null
+  // 监听失败（目录被删等）只记日志：状态查询照常，退回只靠笔记库的 watcher
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    try {
+      w = watch(dir, () => pushGitState()).on('error', (e) => console.error('[git] git dir watch failed', e))
+    } catch (e) {
+      console.error('[git] cannot watch git dir', e)
+    }
+  }
+  gitDirWatcher = { g, w }
 }
 
 // lfsUsed 要扫 attachments/ 下所有文件的属性（只在没装 git-lfs 时查）：按 git 实例缓存，
@@ -241,7 +268,7 @@ const lfsStatus = (g: Git) =>
     (st) => ({ ...st, lfsError: null }),
     (e) => {
       if (!(e instanceof GitError) || (e.kind !== 'lfsMissing' && e.kind !== 'lfsFilter')) throw e
-      return { branch: null, upstream: null, ahead: 0, behind: 0, files: [], lfsError: { kind: e.kind, raw: e.message } }
+      return { branch: null, upstream: null, ahead: 0, behind: 0, files: [], merging: false, lfsError: { kind: e.kind, raw: e.message } }
     },
   )
 
@@ -404,7 +431,17 @@ ipcMain.handle('file:write', async (_e, vault: string, rel: string, content: str
   await noteWrite(async () => fs.writeFile(await writeTarget(r, rel), content))
   // 不等 watcher 防抖，写完立即对账：删掉或撤销最后一处引用后，孤儿状态 1 s 内更新（S11）
   callIndex('reconcile').catch((e) => console.error('[index] reconcile failed', e))
+  if (merging && !hasConflictMarkers(content)) await autoResolve(r, rel).catch((e) => console.error('[git] auto add failed', e))
 })
+// 合并中（S16）：最近一次查到的 git 状态是否有 MERGE_HEAD。只用来决定保存后要不要查冲突，避免每次保存都起 git 子进程
+let merging = false
+// 冲突文件保存后已没有冲突标记：自动 git add，移出冲突组（#9 决定 3）。失败只记日志，保存本身已成功
+async function autoResolve(r: string, rel: string) {
+  const g = await vaultRepo(r)
+  if (!g || !(await g.run(['--literal-pathspecs', 'ls-files', '-u', '-z', '--', rel]))) return
+  await g.stage([rel])
+  pushGitState()
+}
 ipcMain.handle('file:createNote', async (_e, vault: string, dir: string) => {
   const r = checkVault(vault)
   const entries = await scanEntries(r)
@@ -524,7 +561,7 @@ async function gitOp(r: string, f: (g: Git, done: GitDone) => Promise<unknown>):
   } catch (e) {
     const raw = e instanceof GitError ? [e.stderr, e.stdout].map((x) => x.trim()).filter(Boolean).join('\n') : String(e)
     const outside = e instanceof StagedOutsideError ? { top: e.top, paths: e.paths } : undefined
-    return { ok: false, kind: e instanceof GitError ? e.kind : 'unknown', raw, done, ...(outside && { outside }) }
+    return { ok: false, kind: e instanceof GitError ? e.kind : 'unknown', raw, done, ...(outside && { outside }), ...(e instanceof UnresolvedError && { paths: e.paths }) }
   } finally {
     pushGitState()
   }
@@ -571,6 +608,24 @@ ipcMain.handle('git:commit', (_e, vault: string, message: string, all: boolean, 
 })
 ipcMain.handle('git:push', (_e, vault: string) => gitOp(checkVault(vault), async (g) => g.push(!!(await g.status()).upstream)))
 ipcMain.handle('git:pull', (_e, vault: string) => gitOp(checkVault(vault), (g) => g.pull()))
+// 完成合并（S16）：先查身份，再复查（冲突文件、暂存内容里的残留标记），都通过才提交。未保存的正文由渲染进程在调用前落盘。
+// 不查库外的已暂存文件：库是仓库子目录时，合并带进来的库外文件本来就该进合并提交
+ipcMain.handle('git:mergeContinue', (_e, vault: string) =>
+  gitOp(checkVault(vault), async (g) => {
+    const id = await g.identity()
+    if (!id.name || !id.email) throw new GitError('noIdentity', -1, '')
+    const left = new Set([...(await g.status()).files.filter((f) => f.conflict).map((f) => f.path), ...(await g.markersLeft())])
+    if (left.size) throw new UnresolvedError([...left])
+    await g.mergeContinue()
+  }),
+)
+ipcMain.handle('git:takeSide', (_e, vault: string, rel: string, side: string) => {
+  const r = checkVault(vault)
+  const [p] = checkPaths([rel])
+  if (side !== 'ours' && side !== 'theirs') throw new Error(`invalid side: ${side}`)
+  return gitOp(r, (g) => g.takeSide(p, side))
+})
+ipcMain.handle('git:mergeAbort', (_e, vault: string) => gitOp(checkVault(vault), (g) => g.mergeAbort()))
 ipcMain.handle('git:repoLog', (_e, vault: string) => {
   const r = checkVault(vault)
   return diffGit(r, (g) => g.log())

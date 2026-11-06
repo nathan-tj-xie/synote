@@ -51,6 +51,9 @@ const api: SynoteApi = {
   gitCommit: (v, m, all, o) => ipcRenderer.invoke('git:commit', v, m, all, o),
   gitPush: (v) => ipcRenderer.invoke('git:push', v),
   gitPull: (v) => ipcRenderer.invoke('git:pull', v),
+  gitMergeContinue: (v) => ipcRenderer.invoke('git:mergeContinue', v),
+  gitMergeAbort: (v) => ipcRenderer.invoke('git:mergeAbort', v),
+  gitTakeSide: (v, p, side) => ipcRenderer.invoke('git:takeSide', v, p, side),
   repoLog: (v) => ipcRenderer.invoke('git:repoLog', v),
   onGitChanged: subscribe('git:changed'),
 }

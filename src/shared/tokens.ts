@@ -10,6 +10,10 @@ export const tokens = {
   accent: '#4f8cff',
   danger: '#ef5b5b',
   onAccent: '#ffffff',
+  // 合并中（S16）的状态色；冲突视图里本地 / 传入两侧的底色（带透明度）
+  merging: '#e3a04a',
+  conflictOurs: '#4f8cff24',
+  conflictTheirs: '#3fb95024',
   // diff 的增删底色（带透明度，叠在 bg 上）
   diffInserted: '#3fb95026',
   diffRemoved: '#ef5b5b26',

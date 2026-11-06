@@ -1,5 +1,5 @@
 import { execFileSync, type ChildProcess } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -243,6 +243,7 @@ describe('Git（系统 git）', () => {
     expect(await git.isRepo()).toBe(true)
     expect(await git.status()).toEqual({
       branch: expect.any(String),
+      merging: false,
       upstream: null,
       ahead: 0,
       behind: 0,
@@ -745,5 +746,111 @@ describe('Git（系统 git）', () => {
     writeFileSync(path.join(repo, 'a.md'), 'a\n')
     sh('add', '.')
     expect(await new Git('git', process.env.PATH!, repo, undefined, env).lfsUsed()).toBe(false)
+  })
+  // 合并中（S16）：笔记库是仓库子目录，pull 产生冲突
+  const conflicted = async () => {
+    const { dir, repo, env, sh, globalConfig } = setup()
+    writeFileSync(globalConfig, '[user]\n\tname = t\n\temail = t@t\n')
+    const remote = path.join(dir, 'r.git')
+    execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote], { env })
+    sh('init', '-q', '-b', 'main')
+    sh('remote', 'add', 'origin', remote)
+    mkdirSync(path.join(repo, '笔记'))
+    for (const f of ['冲突 a.md', 'b.md', '远端改.md', '不动.md']) writeFileSync(path.join(repo, '笔记', f), '1\n')
+    writeFileSync(path.join(repo, '笔记', '不动.md'), '讲冲突标记的笔记\n<<<<<<< HEAD\n例子\n=======\n>>>>>>> x\n')
+    sh('add', '.')
+    sh('commit', '-qm', 'init')
+    sh('push', '-qu', 'origin', 'main')
+    const other = path.join(dir, 'other')
+    execFileSync('git', ['clone', '-q', remote, other], { env })
+    for (const f of ['冲突 a.md', 'b.md', '远端改.md']) writeFileSync(path.join(other, '笔记', f), '远端\n')
+    execFileSync('git', ['commit', '-qam', '远端'], { cwd: other, env })
+    execFileSync('git', ['push', '-q'], { cwd: other, env })
+    for (const f of ['冲突 a.md', 'b.md']) writeFileSync(path.join(repo, '笔记', f), '本地\n')
+    sh('commit', '-qam', '本地')
+    const git = new Git('git', process.env.PATH!, path.join(repo, '笔记'), undefined, env)
+    await expect(git.pull()).rejects.toMatchObject({ kind: 'conflict' })
+    return { repo, sh, git, note: (f: string) => path.join(repo, '笔记', f) }
+  }
+
+  it('合并中：status 给出 merging，冲突文件单独标出；已解决的 git add 后移出冲突', async () => {
+    const { git, note } = await conflicted()
+    expect(await git.status()).toMatchObject({
+      merging: true,
+      files: [
+        { path: '远端改.md', x: 'M', y: '.' },
+        { path: 'b.md', x: 'U', y: 'U', conflict: true },
+        { path: '冲突 a.md', x: 'U', y: 'U', conflict: true },
+      ],
+    })
+    writeFileSync(note('b.md'), '本地\n远端\n')
+    await git.stage(['b.md'])
+    expect((await git.status()).files.filter((f) => f.conflict).map((f) => f.path)).toEqual(['冲突 a.md'])
+  })
+
+  it('完成合并：只看本次改动过的文件里有没有残留标记，没有才提交合并提交；工作区里别的改动不进合并提交', async () => {
+    const { git, note, sh } = await conflicted()
+    // 冲突文件按原样（带标记）暂存了，也要拦下
+    await git.stage(['冲突 a.md'])
+    writeFileSync(note('b.md'), '本地\n>>>>>>> 删了一半\n')
+    await git.stage(['b.md'])
+    expect(await git.markersLeft()).toEqual(['b.md', '冲突 a.md'])
+    writeFileSync(note('b.md'), '本地\n')
+    writeFileSync(note('冲突 a.md'), '远端\n')
+    await git.stage(['b.md', '冲突 a.md'])
+    expect(await git.markersLeft()).toEqual([]) // 不动.md 在 HEAD 里就有这段，不算
+    // 暂存之后工作区里又改出了标记，也拦下
+    writeFileSync(note('b.md'), '本地\n<<<<<<< 又来\n')
+    expect(await git.markersLeft()).toEqual(['b.md'])
+    writeFileSync(note('b.md'), '本地\n')
+    // 合并期间新建、还没跟踪的笔记里有标记，也拦下
+    writeFileSync(note('新 笔记.md'), '<<<<<<< 抄来的\n')
+    expect(await git.markersLeft()).toEqual(['新 笔记.md'])
+    rmSync(note('新 笔记.md'))
+    writeFileSync(note('远端改.md'), '合并期间顺手改的\n')
+    await git.mergeContinue()
+    expect(await git.status()).toMatchObject({ merging: false, files: [{ path: '远端改.md', x: '.', y: 'M' }] })
+    expect(sh('log', '-1', '--format=%P%n%s').toString()).toMatch(/^\w+ \w+\nMerge branch 'main' of /)
+  })
+
+  it('放弃合并：回到合并前，合并期间改的别的笔记保留', async () => {
+    const { git, note } = await conflicted()
+    writeFileSync(note('冲突 a.md'), '解了一半\n')
+    writeFileSync(note('不动.md'), '合并期间改的\n')
+    await git.mergeAbort()
+    expect(await git.status()).toMatchObject({ merging: false, files: [{ path: '不动.md', x: '.', y: 'M' }] })
+    expect(readFileSync(note('冲突 a.md'), 'utf8')).toBe('本地\n')
+  })
+
+  it('非 Markdown 的冲突（附件、删除 / 修改）：整份取一侧，取的一侧没有这个文件就删除', async () => {
+    const { dir, repo, env, sh, globalConfig } = setup()
+    writeFileSync(globalConfig, '[user]\n\tname = t\n\temail = t@t\n')
+    const remote = path.join(dir, 'r.git')
+    execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote], { env })
+    sh('init', '-q', '-b', 'main')
+    sh('remote', 'add', 'origin', remote)
+    writeFileSync(path.join(repo, '图.png'), Buffer.from([0]))
+    writeFileSync(path.join(repo, '删.md'), '1\n')
+    sh('add', '.')
+    sh('commit', '-qm', 'init')
+    sh('push', '-qu', 'origin', 'main')
+    const other = path.join(dir, 'other')
+    const o = (...a: string[]) => execFileSync('git', a, { cwd: other, env })
+    execFileSync('git', ['clone', '-q', remote, other], { env })
+    writeFileSync(path.join(other, '图.png'), Buffer.from([0, 9]))
+    writeFileSync(path.join(other, '删.md'), '远端改\n')
+    o('commit', '-qam', '远端')
+    o('push', '-q')
+    writeFileSync(path.join(repo, '图.png'), Buffer.from([0, 1, 2]))
+    sh('rm', '-q', '删.md')
+    sh('commit', '-qam', '本地')
+    const git = new Git('git', process.env.PATH!, repo, undefined, env)
+    await expect(git.pull()).rejects.toMatchObject({ kind: 'conflict' })
+    expect((await git.status()).files.filter((f) => f.conflict).map((f) => f.path)).toEqual(['删.md', '图.png'])
+    await git.takeSide('图.png', 'theirs')
+    expect(readFileSync(path.join(repo, '图.png'))).toEqual(Buffer.from([0, 9]))
+    await git.takeSide('删.md', 'ours') // 本地删了：按本地就是删除
+    expect(existsSync(path.join(repo, '删.md'))).toBe(false)
+    expect(await git.status()).toMatchObject({ merging: true, files: [{ path: '图.png', x: 'M' }] })
   })
 })
