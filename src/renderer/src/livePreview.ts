@@ -2,7 +2,7 @@
 // 只打开不编辑时源码字节不变，都依赖这一点。唯一会写正文的是任务列表勾选，它走普通的编辑事务和保存路径。
 // 光标 / 选区碰到的行显示源码，其余行渲染；按行而不是按元素切换，光标在行内移动时装饰不变，输入法组字更稳
 import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/language'
-import { Facet, Prec, StateEffect, StateField, type EditorState, type Extension, type Range, type Transaction } from '@codemirror/state'
+import { ChangeSet, EditorState, Facet, Prec, StateEffect, StateField, type Extension, type Range, type Transaction } from '@codemirror/state'
 import { Decoration, EditorView, keymap, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view'
 import type { SyntaxNode } from '@lezer/common'
 import { tags as t } from '@lezer/highlight'
@@ -527,13 +527,25 @@ export function writeEmbed(view: EditorView, owner: Note | null, e: Embed, src: 
 }
 
 // 新建：块级公式在光标所在行之后插入（空行就地），行内公式在光标处；先不写正文，保存（行内：输入）时才写
+// 光标在块级嵌入块的边界上时，新公式自带和它隔开的换行（keepOut 就不再补，写回的范围对得上）；
+// 块级的在块的第一行行首时插在块前，不插进块里
 export function insertMath(view: EditorView, display: boolean) {
-  const { head } = view.state.selection.main
-  const line = view.state.doc.lineAt(head)
-  const at = display ? line.to : head
-  const open = display ? (line.text.trim() ? '\n\n$$' : '$$') : '$'
-  const close = display ? '$$' : '$'
-  openEmbed(view, { kind: display ? 'math' : 'inline', block: display, from: at, to: at, text: '', src: '', open, close, prefix: '', sep: display ? '\n' : '', display })
+  const { state } = view
+  const { head } = state.selection.main
+  const line = state.doc.lineAt(head)
+  const after = embedAround(state, head, -1)?.block
+  const before = embedAround(state, head, 1)?.block
+  const d = display ? '$$' : '$'
+  let at = head
+  let open = (after ? '\n' : '') + d
+  let close = d + (before ? '\n' : '')
+  if (display && before) close = '$$\n\n'
+  else if (display) {
+    at = line.to
+    open = line.text.trim() ? '\n\n$$' : '$$'
+    close = '$$'
+  }
+  openEmbed(view, { kind: display ? 'math' : 'inline', block: display, from: at, to: at, text: '', src: '', open, close, prefix: '', tight: [false, false], display })
 }
 
 // 空行输入 `$$` 或 ```mermaid 后按 Enter：补上结尾并打开编辑窗口。行不在代码块等里面（属于顶层段落或从这行开始的围栏）
@@ -553,16 +565,22 @@ function createOnEnter(view: EditorView): boolean {
   return true
 }
 
-// 光标移到块级嵌入块旁边能接着输入的位置：下一行行首 / 上一行行尾，不贴在 `$$`、围栏上（贴着输入会破坏闭合）。
-// 块在文末 / 文首、没有相邻行时补一个换行
-export function besideBlock(view: EditorView, e: Embed, fwd: boolean) {
-  const len = view.state.doc.length
-  const edge = fwd ? e.to >= len : e.from <= 0
-  if (edge && !view.state.readOnly) {
-    const at = fwd ? len : 0
-    view.dispatch({ changes: { from: at, insert: '\n' }, selection: { anchor: fwd ? len + 1 : 0 }, scrollIntoView: true, userEvent: 'input' })
-  } else view.dispatch({ selection: { anchor: edge ? (fwd ? len : 0) : fwd ? e.to + 1 : e.from - 1 }, scrollIntoView: true })
-}
+// 用户输入贴着块级嵌入块的定界符（第一行行首、最后一行行尾）时，在中间补一个换行，把输入挤到块外的新行。
+// 光标停在这些位置（文末的块之后、两个相邻块之间、关闭编辑后）都不会把字写进 `$$` / 围栏，不必逐处安排光标。
+// shortcut: 输入法组字不处理（组字中改正文会打断输入法），贴着定界符组字的情况出现再说
+const keepOut = EditorState.transactionFilter.of((tr) => {
+  if (!tr.docChanged || !tr.isUserEvent('input') || tr.isUserEvent('input.type.compose')) return tr
+  const extra: { from: number; insert: string }[] = []
+  tr.changes.iterChanges((fromA, toA, fromB, toB, ins) => {
+    if (fromA !== toA || !ins.length) return
+    const text = ins.toString()
+    if (embedAround(tr.startState, fromA, -1)?.block && !text.startsWith('\n')) extra.push({ from: fromB, insert: '\n' })
+    if (embedAround(tr.startState, fromA, 1)?.block && !text.endsWith('\n')) extra.push({ from: toB, insert: '\n' })
+  })
+  if (!extra.length) return tr
+  const changes = ChangeSet.of(extra, tr.newDoc.length)
+  return [tr, { changes, selection: tr.newSelection.map(changes, -1), sequential: true }] // 光标留在输入之后、补的换行之前
+})
 
 // 方向键把嵌入块当成一个整体：先停在它上面（选中），再按一次越过；停在上面时 Enter 打开编辑
 function arrow(dir: 'left' | 'right' | 'up' | 'down') {
@@ -572,9 +590,9 @@ function arrow(dir: 'left' | 'right' | 'up' | 'down') {
     const sel = selectedEmbed(state)
     const set = (anchor: number, head = anchor) => (view.dispatch({ selection: { anchor, head }, scrollIntoView: true }), true)
     if (sel) {
-      if (!sel.block) return dir === 'left' || dir === 'right' ? set(fwd ? sel.to : sel.from) : false
-      besideBlock(view, sel, fwd)
-      return true
+      if (dir === 'left' || dir === 'right') return set(fwd ? sel.to : sel.from)
+      if (!sel.block) return false
+      return set(fwd ? Math.min(sel.to + 1, state.doc.length) : Math.max(sel.from - 1, 0))
     }
     const r = state.selection.main
     if (!r.empty) return false
@@ -595,8 +613,19 @@ function arrow(dir: 'left' | 'right' | 'up' | 'down') {
   }
 }
 
+// 光标正好在块级嵌入块的边界（如文末的块之后）时，DOM 里那个位置没有可编辑的文本，浏览器不产生输入、字会丢：
+// 可打印字符由这里派发成普通输入，再由 keepOut 挤到块外
+function typeAtBlock(view: EditorView, e: KeyboardEvent): boolean {
+  const r = view.state.selection.main
+  if (e.key.length !== 1 || e.ctrlKey || e.metaKey || !r.empty || view.state.readOnly) return false
+  if (!embedAround(view.state, r.head, -1)?.block && !embedAround(view.state, r.head, 1)?.block) return false
+  view.dispatch({ changes: { from: r.head, insert: e.key }, selection: { anchor: r.head + 1 }, scrollIntoView: true, userEvent: 'input.type' })
+  return true
+}
+
 const embedKeys = Prec.high(
   keymap.of([
+    { any: typeAtBlock },
     { key: 'ArrowLeft', run: arrow('left') },
     { key: 'ArrowRight', run: arrow('right') },
     { key: 'ArrowUp', run: arrow('up') },
@@ -1056,5 +1085,5 @@ const theme = EditorView.theme({
 })
 
 export function livePreview(n: Note | null): Extension {
-  return [n ? note.of(n) : [], syntaxHighlighting(highlight), blocks, inline, embedKeys, theme]
+  return [n ? note.of(n) : [], syntaxHighlighting(highlight), blocks, inline, embedKeys, keepOut, theme]
 }

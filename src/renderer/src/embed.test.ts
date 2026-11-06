@@ -4,6 +4,7 @@ import { EditorState } from '@codemirror/state'
 import { GFM, parser } from '@lezer/markdown'
 import { describe, expect, it } from 'vitest'
 import { canWrite, embedOf, embedText, mathSyntax, type Embed } from './embed'
+import { livePreview } from './livePreview'
 
 const md = parser.configure([GFM, mathSyntax])
 
@@ -65,7 +66,7 @@ const srcs = (text: string) => blocks(text).map((e) => e.src)
 describe('块级公式', () => {
   it('三行写法与单行写法', () => {
     expect(srcs('$$\nx^2\n$$')).toEqual(['x^2'])
-    expect(blocks('$$x$$')[0]).toMatchObject({ src: 'x', sep: '', text: '$$x$$' })
+    expect(blocks('$$x$$')[0]).toMatchObject({ src: 'x', tight: [true, true], text: '$$x$$' })
   })
   it('打断段落：前后是正文', () => {
     expect(srcs('正文\n$$\na\n$$\n后文')).toEqual(['a'])
@@ -93,8 +94,10 @@ describe('块级公式', () => {
     expect(m).toMatchObject({ kind: 'mermaid', src: 'graph TD\n  A --> B' })
     expect(embedText(m, 'graph LR')).toBe('> ```mermaid\n> graph LR\n> ```')
   })
-  it('单行写法改成多行源码时拆成三行', () => {
-    expect(embedText(blocks('$$x$$')[0], 'a\nb')).toBe('$$\na\nb\n$$')
+  it('单行写法改成多行源码时定界符仍和源码同行，照样是块级公式', () => {
+    const text = embedText(blocks('$$x$$')[0], 'a\nb')
+    expect(text).toBe('$$a\nb$$')
+    expect(srcs(text)).toEqual(['a\nb'])
   })
   it('结尾的 \$$ 是转义的美元符号，不是结束符', () => {
     expect(srcs('$$\nx\\$$\n后文')).toEqual([])
@@ -115,5 +118,37 @@ describe('块级公式', () => {
     expect(canWrite(e!, 'x% comment\n+y')).toBe(false)
     expect(canWrite(e!, 'x + y')).toBe(true)
     expect(canWrite(blocks('$$x$$')[0], 'a\nb')).toBe(true)
+  })
+  it('源码原样还原：首尾空白、定界符同行的写法、容器前缀都不变', () => {
+    expect(srcs('$$  x  $$')).toEqual(['  x  '])
+    for (const doc of ['$$  x  $$', '$$ a\nb $$', '$$\n  x\n$$', '$$\nx\n$$', '$$\n$$', '> $$\n> a\n> $$', '- 项\n\n  $$\n  a\n  $$', '```mermaid\nflowchart LR\n  A --> B\n```', '```math\n\na\n```']) {
+      const [e] = blocks(doc)
+      expect(embedText(e, e.src), doc).toBe(e.text)
+    }
+  })
+})
+
+describe('输入不会贴到块级嵌入块的定界符上', () => {
+  const type = (doc: string, at: number, insert: string) => {
+    const s = EditorState.create({ doc, extensions: [markdown({ base: markdownLanguage, extensions: [mathSyntax] }), livePreview(null)] })
+    ensureSyntaxTree(s, doc.length)
+    const t = s.update({ changes: { from: at, insert }, selection: { anchor: at + insert.length }, userEvent: 'input.type' })
+    return { doc: t.state.doc.toString(), head: t.state.selection.main.head }
+  }
+  it('文末的块之后：输入挤到下一行，光标在输入之后', () => {
+    expect(type('$$\nx\n$$', 7, 'Z')).toEqual({ doc: '$$\nx\n$$\nZ', head: 9 })
+    expect(type('```mermaid\nA\n```', 16, 'Z').doc).toBe('```mermaid\nA\n```\nZ')
+  })
+  it('两个相邻块之间：前一块之后、后一块之前都不会贴上', () => {
+    const doc = '$$\na\n$$\n$$\nb\n$$'
+    expect(type(doc, 7, 'Z')).toEqual({ doc: '$$\na\n$$\nZ\n$$\nb\n$$', head: 9 })
+    expect(type(doc, 8, 'Z')).toEqual({ doc: '$$\na\n$$\nZ\n$$\nb\n$$', head: 9 })
+  })
+  it('换行本身、不挨着块的输入、非用户输入都不改', () => {
+    expect(type('$$\nx\n$$', 7, '\n').doc).toBe('$$\nx\n$$\n')
+    expect(type('a\n$$\nx\n$$', 1, 'Z').doc).toBe('aZ\n$$\nx\n$$')
+    const s = EditorState.create({ doc: '$$\nx\n$$', extensions: [markdown({ base: markdownLanguage, extensions: [mathSyntax] }), livePreview(null)] })
+    ensureSyntaxTree(s, 7)
+    expect(s.update({ changes: { from: 7, insert: 'Z' } }).state.doc.toString()).toBe('$$\nx\n$$Z')
   })
 })

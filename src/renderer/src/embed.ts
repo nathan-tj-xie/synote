@@ -8,7 +8,8 @@ import 'katex/dist/katex.min.css'
 import { tokens } from '../../shared/tokens'
 
 // 一个嵌入块：[from, to] 是它在正文里的整段源码 text。块级（block）的占整行，在引用 / 列表里时连同行首的 `> `、缩进；
-// 改写时按 open、各行加 prefix 的源码、prefix + close 重新拼出整段（单行写法 sep 为空时拼回一行）。
+// 改写时按 open、各行加 prefix 的源码、prefix + close 重新拼出整段；tight 记着源码首行是否紧跟开头定界符、末行是否紧挨结尾定界符
+// （`$$x$$`、`$$ a\nb $$`），按原来的样子拼回，没改的源码拼出来和原文一字不差。
 // kind：mermaid / math 在弹窗里编辑（包括写在行内的 `$$x$$`），inline（`$x$`）在浮层里编辑
 export type Embed = {
   kind: 'mermaid' | 'math' | 'inline'
@@ -20,15 +21,16 @@ export type Embed = {
   open: string
   close: string
   prefix: string // 块级源码各行的续行前缀（`> `、列表缩进）
-  sep: '\n' | ''
+  tight: [boolean, boolean]
   display: boolean // 公式按块级（display mode）排版
 }
 
 export function embedText(e: Embed, src: string): string {
   if (!e.block) return src ? `${e.open}${src}${e.close}` : '' // 清空即删除；不能有换行（canWrite）
-  if (!e.sep && !src.includes('\n')) return `${e.open}${src}${e.close}`
-  const lines = src ? src.split('\n').map((l) => (l ? e.prefix + l : e.prefix.trimEnd())) : []
-  return [e.open, ...lines, e.prefix + e.close].join('\n')
+  const [a, b] = e.tight
+  if (!src && !a) return `${e.open}\n${e.prefix}${e.close}`
+  const lines = src.split('\n').map((l, i) => (i === 0 && a ? l : l ? e.prefix + l : e.prefix.trimEnd()))
+  return `${e.open}${a ? '' : '\n'}${lines.join('\n')}${b ? '' : '\n' + e.prefix}${e.close}`
 }
 
 // 行内公式不能跨行：换行换成空格会改变含义（`%` 注释会吞掉下一行），所以有换行就不写
@@ -157,12 +159,12 @@ export const mathSyntax: MarkdownConfig = {
 }
 
 // 块级的嵌入块范围占整行；续行前缀：开头那行在定界符前的部分里，除 `>` 外都换成空格（`> - ` → `>   `）
-function blockEmbed(state: EditorState, kind: Embed['kind'], openEnd: number, contentFrom: SyntaxNode, closeMark: SyntaxNode, src: string, sep: '\n' | ''): Embed {
+function blockEmbed(state: EditorState, kind: Embed['kind'], openEnd: number, contentFrom: SyntaxNode, closeMark: SyntaxNode, src: string, tight: [boolean, boolean]): Embed {
   const doc = state.doc
   const first = doc.lineAt(contentFrom.from)
   const last = doc.lineAt(closeMark.from)
   const prefix = state.sliceDoc(first.from, contentFrom.from).replace(/[^>\s]/g, ' ')
-  return { kind, block: true, from: first.from, to: last.to, text: state.sliceDoc(first.from, last.to), src, open: state.sliceDoc(first.from, openEnd), close: state.sliceDoc(closeMark.from, last.to), prefix, sep, display: true }
+  return { kind, block: true, from: first.from, to: last.to, text: state.sliceDoc(first.from, last.to), src, open: state.sliceDoc(first.from, openEnd), close: state.sliceDoc(closeMark.from, last.to), prefix, tight, display: true }
 }
 
 // 节点 n 本身是不是一个嵌入块：```mermaid / ```math 围栏（须闭合，否则未闭合的围栏会吞掉后面全文）、块级公式、行内公式
@@ -172,18 +174,17 @@ export function embedOf(state: EditorState, n: SyntaxNode): Embed | null {
     const d = state.sliceDoc(n.from, n.from + 2) === '$$' ? 2 : 1
     const open = '$'.repeat(d)
     const src = state.sliceDoc(n.from + d, n.to - d)
-    return { kind: d === 2 ? 'math' : 'inline', block: false, from: n.from, to: n.to, text: state.sliceDoc(n.from, n.to), src, open, close: open, prefix: '', sep: '', display: d === 2 }
+    return { kind: d === 2 ? 'math' : 'inline', block: false, from: n.from, to: n.to, text: state.sliceDoc(n.from, n.to), src, open, close: open, prefix: '', tight: [true, true], display: d === 2 }
   }
   if (n.name === 'BlockMath') {
     const marks = n.getChildren('BlockMathMark')
     if (marks.length < 2) return null
-    const src = n
-      .getChildren('BlockMathText')
-      .map((c) => state.sliceDoc(c.from, c.to))
-      .join('\n')
-      .trim()
-    const single = doc.lineAt(marks[0].from).number === doc.lineAt(marks[1].from).number
-    return blockEmbed(state, 'math', marks[0].to, n, marks[1], src, single ? '' : '\n')
+    // 各行的源码原样拼起来（不去首尾空白）：没改的公式写回时一字不差
+    const parts = n.getChildren('BlockMathText')
+    const src = parts.map((c) => state.sliceDoc(c.from, c.to)).join('\n')
+    const line = (p: number) => doc.lineAt(p).number
+    const tight: [boolean, boolean] = parts.length ? [line(parts[0].from) === line(marks[0].from), line(parts.at(-1)!.to) === line(marks[1].from)] : [false, false]
+    return blockEmbed(state, 'math', marks[0].to, n, marks[1], src, tight)
   }
   if (n.name !== 'FencedCode') return null
   const info = n.getChild('CodeInfo')
@@ -194,7 +195,7 @@ export function embedOf(state: EditorState, n: SyntaxNode): Embed | null {
     .getChildren('CodeText')
     .map((c) => state.sliceDoc(c.from, c.to))
     .join('') // CodeText 不含续行前缀，行间的换行也是 CodeText
-  return blockEmbed(state, lang === 'mermaid' ? 'mermaid' : 'math', doc.lineAt(n.from).to, n, close, src, '\n')
+  return blockEmbed(state, lang === 'mermaid' ? 'mermaid' : 'math', doc.lineAt(n.from).to, n, close, src, [false, false])
 }
 
 // 渲染失败：原位显示红色源码，悬停显示报错
