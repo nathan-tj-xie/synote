@@ -1,7 +1,8 @@
 // git 服务（ADR 0004）：只用系统 git CLI 子进程；查找、porcelain 解析、错误分类、常驻 cat-file
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import path from 'node:path'
-import type { GitErrorKind, LogEntry } from '../shared/api'
+import type { GitBranch, GitErrorKind, GitFile, LogEntry } from '../shared/api'
+import { encodeSegment } from '../shared/url'
 
 export type ExecResult = { code: number; stdout: string; stderr: string }
 export type Exec = (
@@ -107,6 +108,14 @@ export function parseStatus(out: string): StatusEntry[] {
   return res
 }
 
+// `status --porcelain=v2 --branch` 的头部：分支（detached 时为 null）、上游、↑ahead / ↓behind（没有上游时为 0）
+export function parseBranch(out: string): GitBranch {
+  const head = (k: string) => out.split('\0').find((l) => l.startsWith(`# branch.${k} `))?.slice(k.length + 10)
+  const branch = head('head')
+  const ab = /^\+(\d+) -(\d+)$/.exec(head('ab') ?? '')
+  return { branch: branch && branch !== '(detached)' ? branch : null, upstream: head('upstream') ?? null, ahead: ab ? Number(ab[1]) : 0, behind: ab ? Number(ab[2]) : 0 }
+}
+
 // 与 parseLog 配套的格式：每条提交 4 个字段，-z 下各以 NUL 结尾
 export const LOG_FORMAT = '--format=%H%x00%at%x00%an%x00%s'
 
@@ -170,6 +179,16 @@ export class GitError extends Error {
   }
 }
 
+// 提交前发现库外的已暂存文件：按 GitError 走同一条失败回传，带上要列给用户的路径
+export class StagedOutsideError extends GitError {
+  constructor(
+    readonly top: string,
+    readonly paths: string[],
+  ) {
+    super('stagedOutside', -1, paths.join('\n'))
+  }
+}
+
 // `config --get`、`rev-parse --verify --quiet` 查不到时退出码为 1，记为 fallback；其它失败（配置损坏、权限等）照常抛出
 const onExit1 =
   <T>(fallback: T) =>
@@ -177,6 +196,33 @@ const onExit1 =
     if (e instanceof GitError && e.code === 1) return fallback
     throw e
   }
+
+// 每条 git 命令都带上，压掉会改变输出格式的用户配置：解析靠的是固定格式，用户的 ~/.gitconfig 不能让它失效
+// - color.*：=always 时输出（含 stderr 的提示）带 ANSI 码，路径匹配和错误分类都会失败；color.ui 管不住单项配置，逐项关
+// - core.quotePath：非 -z 的输出里中文路径会被转成八进制转义
+// - diff.relative：diff / log --name-status 只列 cwd 以内、路径变成相对 cwd（库外暂存检查、跨库外改名的历史都依赖完整路径）
+// - grep.fullName：git grep 输出相对仓库根而不是 cwd
+// - status.relativePaths：porcelain 本来就不受影响，一并固定
+// - log.showSignature：log 里插入签名校验输出，打乱 parseLog
+// - core.pager：配合 GIT_PAGER=cat，不起分页器
+const CONFIG_OVERRIDES = [
+  'color.ui=false',
+  'color.diff=false',
+  'color.grep=false',
+  'color.status=false',
+  'color.branch=false',
+  'color.decorate=false',
+  'color.advice=false',
+  'color.push=false',
+  'color.remote=false',
+  'color.transport=false',
+  'core.quotePath=false',
+  'diff.relative=false',
+  'grep.fullName=false',
+  'status.relativePaths=false',
+  'log.showSignature=false',
+  'core.pager=cat',
+].flatMap((kv) => ['-c', kv])
 
 export class Git {
   private readonly env: NodeJS.ProcessEnv
@@ -192,12 +238,13 @@ export class Git {
     env: NodeJS.ProcessEnv = process.env,
     private readonly run_: Exec = exec,
   ) {
-    // GIT_TERMINAL_PROMPT=0：没有凭据时直接失败，不卡在等待终端输入
-    this.env = { ...env, PATH, LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0' }
+    // GIT_TERMINAL_PROMPT=0：没有凭据时直接失败，不卡在等待终端输入；GIT_PAGER / NO_COLOR 与 CONFIG_OVERRIDES 同理。
+    // LC_ALL=C 保留（S12 起就有）：错误分类按英文文本匹配；路径不受它影响（-z 输出原样字节，quotePath 已关）
+    this.env = { ...env, PATH, LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat', NO_COLOR: '1' }
   }
 
   async run(args: string[]): Promise<string> {
-    const r = await this.run_(this.bin, args, { cwd: this.cwd, env: this.env })
+    const r = await this.run_(this.bin, [...CONFIG_OVERRIDES, ...args], { cwd: this.cwd, env: this.env })
     if (r.code !== 0) throw new GitError(classifyGitError(r.stderr, r.stdout), r.code, r.stderr, r.stdout)
     return r.stdout
   }
@@ -220,9 +267,85 @@ export class Git {
     return out.trim() === 'true'
   }
 
-  async status(): Promise<StatusEntry[]> {
+  // git 面板（S13）的数据：只列笔记库（cwd）内的改动，路径换成相对 cwd（porcelain 输出相对仓库根）；
+  // x / y 是暂存区 / 工作区一侧的状态，未跟踪记为 ??
+  async status(): Promise<GitBranch & { files: GitFile[] }> {
     // --no-optional-locks：不顺手刷新 .git/index，否则会触发 watcher 再推一次状态
-    return parseStatus(await this.run(['--no-optional-locks', 'status', '--porcelain=v2', '-z', '--untracked-files=all']))
+    const [out, prefix] = await Promise.all([
+      this.run(['--no-optional-locks', '--literal-pathspecs', 'status', '--porcelain=v2', '-z', '--branch', '--untracked-files=all', '--', '.']),
+      this.prefix(),
+    ])
+    const rel = (p: string) => path.posix.relative(prefix, p)
+    const files = parseStatus(out).flatMap((e): GitFile[] => {
+      if (!('xy' in e)) return e.kind === 'untracked' ? [{ path: rel(e.path), x: '?', y: '?' }] : []
+      return [{ path: rel(e.path), x: e.xy[0], y: e.xy[1], ...(e.kind === 'renamed' && { orig: rel(e.orig) }) }]
+    })
+    return { ...parseBranch(out), files }
+  }
+
+  // 笔记库在仓库里的前缀（如 `笔记/`，库就是仓库根时为空）
+  private async prefix(): Promise<string> {
+    return (await this.run(['rev-parse', '--show-prefix'])).replace(/\n$/, '')
+  }
+
+  // 暂存区里笔记库之外的路径（相对仓库根，--no-renames 让改名的两侧都列出来）。笔记库就是仓库根时为空。
+  async stagedOutside(): Promise<string[]> {
+    const [out, prefix] = await Promise.all([
+      this.run(['diff', '--cached', '--name-only', '-z', '--no-renames']),
+      this.prefix(),
+    ])
+    return prefix ? out.split('\0').filter((p) => p && !p.startsWith(prefix)) : []
+  }
+
+  // 暂存区版本的笔记（库内 .md）里仍提到这些附件的（按文件名的几种编码形式、不区分大小写，同索引的 mentioned）。
+  // "提交已暂存"时用：工作区里删了引用、但那篇笔记的改动没暂存，提交里它仍引用附件，附件就不能随提交删掉
+  // shortcut: 每个附件一次 git grep；一次提交要删上百个孤儿变慢时改成一次读出暂存区笔记再逐个比对
+  async stagedMentions(paths: string[]): Promise<string[]> {
+    const hit: string[] = []
+    for (const p of paths) {
+      const name = path.posix.basename(p)
+      const forms = [...new Set([name, encodeSegment(name), encodeURIComponent(name), encodeURI(name)])].flatMap((f) => ['-e', f])
+      // 没有命中时退出码为 1
+      const out = await this.run(['--literal-pathspecs', 'grep', '--cached', '-F', '-i', '-l', '-z', ...forms, '--', '.']).catch(onExit1(''))
+      if (out.split('\0').some((f) => f.toLowerCase().endsWith('.md'))) hit.push(p)
+    }
+    return hit
+  }
+
+  async toplevel(): Promise<string> {
+    return (await this.run(['rev-parse', '--show-toplevel'])).trim()
+  }
+
+  // 暂存（含删除）；paths 为 ['.'] 时暂存笔记库内的全部改动
+  stage(paths: string[]): Promise<string> {
+    return this.mutate(['--literal-pathspecs', 'add', '-A', '--', ...paths])
+  }
+
+  // 取消暂存，只动暂存区；还没有任何提交时没有 HEAD 可还原，改为从暂存区移除
+  async unstage(paths: string[]): Promise<string> {
+    const args = (await this.hasHead()) ? ['restore', '--staged'] : ['rm', '--cached', '-r', '-q']
+    return this.mutate(['--literal-pathspecs', ...args, '--', ...paths])
+  }
+
+  // 提交暂存区。useConfigOnly：缺身份时报错（noIdentity），不让 git 用主机名拼一个
+  commit(message: string): Promise<string> {
+    return this.mutate(['-c', 'user.useConfigOnly=true', 'commit', '-q', '-m', message])
+  }
+
+  // 没有上游时推到 origin 的同名分支并设为上游
+  push(hasUpstream: boolean): Promise<string> {
+    return this.mutate(hasUpstream ? ['push'] : ['push', '-u', 'origin', 'HEAD'])
+  }
+
+  // 合并远端（不 rebase，不弹编辑器）；冲突时笔记库进入合并中（S16）
+  pull(): Promise<string> {
+    return this.mutate(['pull', '--no-rebase', '--no-edit'])
+  }
+
+  // git 面板底部的历史：动过笔记库内文件的最近 n 个提交，新的在前
+  async log(n = 200): Promise<LogEntry[]> {
+    if (!(await this.hasHead())) return []
+    return parseLog(await this.run(['--literal-pathspecs', 'log', '-z', `-n${n}`, LOG_FORMAT, '--', '.']))
   }
 
   async identity(): Promise<{ name: string | null; email: string | null }> {
@@ -270,11 +393,10 @@ export class Git {
   // 历史栏（S15）：rel（相对 cwd）的提交历史，--follow 跨重命名；path 换成相对 cwd 的写法（改名前在库外时以 ../ 开头）
   async fileLog(rel: string): Promise<LogEntry[]> {
     if (!(await this.hasHead())) return []
-    const [out, prefix] = await Promise.all([
+    const [out, p] = await Promise.all([
       this.run(['--literal-pathspecs', 'log', '--follow', '-z', '--name-status', LOG_FORMAT, '--', rel]),
-      this.run(['rev-parse', '--show-prefix']),
+      this.prefix(),
     ])
-    const p = prefix.replace(/\n$/, '')
     return parseLog(out).map((e) => ({ ...e, path: path.posix.relative(p, e.path) }))
   }
 

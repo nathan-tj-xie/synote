@@ -11,13 +11,14 @@ import { Orphans } from './Orphans'
 import { Palette } from './Palette'
 import { Rename } from './Rename'
 import { Search } from './Search'
-import { useUi, useVault } from './store'
+import { useGit, useUi, useVault } from './store'
 import { Welcome } from './Welcome'
 
 export function App() {
   const vault = useVault((st) => st.vault)
   const error = useUi((st) => st.error)
   const sidebar = useUi((st) => st.sidebar)
+  const changes = useGit((st) => (st.state?.status === 'ready' ? st.state.files.length : 0))
   const { t } = useTranslation()
 
   useEffect(
@@ -43,7 +44,7 @@ export function App() {
           ⌕
         </button>
         <button className={sidebar === 'git' ? s.activityOn : ''} title={t('git')} aria-label={t('git')} onClick={() => useUi.getState().setSidebar('git')}>
-          ⑂
+          ⑂{changes > 0 && <span className={s.badge}>{changes > 999 ? '999+' : changes}</span>}
         </button>
       </nav>
       <Group orientation="horizontal" className={s.main}>

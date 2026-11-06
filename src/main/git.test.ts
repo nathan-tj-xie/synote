@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { classifyGitError, findGit, Git, GitError, parseLog, parseStatus, parseVersion, versionOk, type Exec } from './git'
+import { classifyGitError, findGit, Git, GitError, parseBranch, parseLog, parseStatus, parseVersion, versionOk, type Exec } from './git'
 
 describe('parseStatus', () => {
   it('解析普通改动、重命名、未跟踪、冲突、忽略，路径含空格和中文', () => {
@@ -26,6 +26,18 @@ describe('parseStatus', () => {
   })
 
   it('空输出', () => expect(parseStatus('')).toEqual([]))
+})
+
+describe('parseBranch', () => {
+  it('分支、上游、ahead / behind', () => {
+    const out = ['# branch.oid abc', '# branch.head feat/中 文', '# branch.upstream origin/feat/中 文', '# branch.ab +2 -1', '? a.md', ''].join('\0')
+    expect(parseBranch(out)).toEqual({ branch: 'feat/中 文', upstream: 'origin/feat/中 文', ahead: 2, behind: 1 })
+  })
+  it('detached、没有上游', () => {
+    expect(parseBranch(['# branch.oid abc', '# branch.head (detached)', ''].join('\0'))).toEqual({ branch: null, upstream: null, ahead: 0, behind: 0 })
+    // 还没有提交
+    expect(parseBranch(['# branch.oid (initial)', '# branch.head main', ''].join('\0'))).toMatchObject({ branch: 'main', upstream: null })
+  })
 })
 
 describe('parseLog', () => {
@@ -222,11 +234,17 @@ describe('Git（系统 git）', () => {
 
     const git = new Git('git', process.env.PATH!, repo, undefined, env)
     expect(await git.isRepo()).toBe(true)
-    expect(await git.status()).toEqual([
-      { kind: 'changed', xy: '.M', path: 'a.md' },
-      { kind: 'renamed', xy: 'R.', path: '新 笔记.md', orig: '旧 目录/笔记 一.md' },
-      { kind: 'untracked', path: '未跟踪 文件.md' },
-    ])
+    expect(await git.status()).toEqual({
+      branch: expect.any(String),
+      upstream: null,
+      ahead: 0,
+      behind: 0,
+      files: [
+        { path: 'a.md', x: '.', y: 'M' },
+        { path: '新 笔记.md', x: 'R', y: '.', orig: '旧 目录/笔记 一.md' },
+        { path: '未跟踪 文件.md', x: '?', y: '?' },
+      ],
+    })
     expect(await git.identity()).toEqual({ name: null, email: null })
     // 不加 useConfigOnly 时 git 会用主机名自动拼一个身份
     await expect(git.run(['-c', 'user.useConfigOnly=true', 'commit', '-qam', 'x'])).rejects.toMatchObject({ kind: 'noIdentity' })
@@ -341,6 +359,101 @@ describe('Git（系统 git）', () => {
     expect(await kind(['pull', '--rebase', 'o', 'main'])).toBe('conflict') // rebase 的 CONFLICT 也在 stdout
   })
 
+  it('git 面板：只列笔记库（仓库子目录）内的改动，暂存 / 取消暂存、提交、push 设上游、pull、仓库历史', async () => {
+    const { dir, repo, env, sh, globalConfig } = setup()
+    const remote = path.join(dir, 'r.git')
+    execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote], { env })
+    sh('init', '-q', '-b', 'main')
+    sh('remote', 'add', 'origin', remote)
+    mkdirSync(path.join(repo, '笔记'))
+    writeFileSync(path.join(repo, '笔记', '[x].md'), '1\n') // 文件名里的 [ ] 按字面处理（按通配符会去匹配 x.md）
+    writeFileSync(path.join(repo, '笔记', 'b.md'), '1\n')
+    writeFileSync(path.join(repo, '库外.md'), '1\n')
+    const git = new Git('git', process.env.PATH!, path.join(repo, '笔记'), undefined, env)
+    expect((await git.status()).files).toEqual([
+      { path: '[x].md', x: '?', y: '?' },
+      { path: 'b.md', x: '?', y: '?' },
+    ])
+    expect(await git.log()).toEqual([])
+    // 库外预先暂存的文件：stagedOutside 列出来，提交前据此拦下
+    expect(await git.stagedOutside()).toEqual([])
+    sh('add', '库外.md')
+    expect(await git.stagedOutside()).toEqual(['库外.md'])
+    expect(await git.toplevel()).toBe(execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: repo, env }).toString().trim())
+    // 用户配置 diff.relative=true 时照样能查到库外的（否则 diff 只列 cwd 以内）
+    sh('config', 'diff.relative', 'true')
+    expect(await git.stagedOutside()).toEqual(['库外.md'])
+    sh('config', '--unset', 'diff.relative')
+    sh('reset', '-q', '--', '库外.md')
+    await git.stage(['[x].md'])
+    expect((await git.status()).files.map((f) => f.x + f.y)).toEqual(['A.', '??'])
+    await git.unstage(['[x].md']) // 还没有 HEAD：从暂存区移除
+    expect((await git.status()).files.map((f) => f.x + f.y)).toEqual(['??', '??'])
+    await git.stage(['.'])
+    // 缺身份：useConfigOnly 让 git 报错，而不是用主机名拼一个
+    await expect(git.commit('x')).rejects.toMatchObject({ kind: 'noIdentity' })
+    writeFileSync(globalConfig, '[user]\n\tname = t\n\temail = t@t\n')
+    await git.commit('-第一条') // 以 - 开头的提交信息不被当成选项
+    expect(await git.status()).toMatchObject({ branch: 'main', upstream: null, files: [] })
+    await git.push(false)
+    expect(await git.status()).toMatchObject({ upstream: 'origin/main', ahead: 0, behind: 0 })
+    writeFileSync(path.join(repo, '笔记', 'b.md'), '2\n')
+    await git.stage(['b.md'])
+    await git.unstage(['b.md']) // 有 HEAD：restore --staged
+    expect((await git.status()).files).toEqual([{ path: 'b.md', x: '.', y: 'M' }])
+    await git.stage(['b.md'])
+    await git.commit('第二条')
+    expect(await git.status()).toMatchObject({ ahead: 1, behind: 0 })
+    expect((await git.log()).map((e) => [e.subject, e.author, e.path])).toEqual([['第二条', 't', ''], ['-第一条', 't', '']])
+    // 另一个克隆推一个新提交：push 被拒，pull 合并后再 push
+    const other = path.join(dir, 'other')
+    execFileSync('git', ['clone', '-q', remote, other], { env })
+    writeFileSync(path.join(other, '笔记', '[x].md'), '远端\n')
+    execFileSync('git', ['commit', '-qam', '远端'], { cwd: other, env })
+    execFileSync('git', ['push', '-q'], { cwd: other, env })
+    await expect(git.push(true)).rejects.toMatchObject({ kind: 'nonFastForward' })
+    await git.pull()
+    expect(readFileSync(path.join(repo, '笔记', '[x].md'), 'utf8')).toBe('远端\n')
+    await git.push(true)
+    expect(await git.status()).toMatchObject({ ahead: 0, behind: 0 })
+  })
+
+  it('用户配置（color=always、diff.relative、status.relativePaths 等）不影响解析：status / stagedOutside / stagedMentions / fileLog', async () => {
+    const { repo, env, sh } = setup()
+    sh('init', '-q', '-b', 'main')
+    for (const [k, v] of [['color.ui', 'always'], ['color.grep', 'always'], ['color.diff', 'always'], ['color.status', 'always'], ['diff.relative', 'true'], ['status.relativePaths', 'false'], ['core.quotePath', 'true'], ['log.showSignature', 'true']])
+      sh('config', k, v)
+    mkdirSync(path.join(repo, '笔记'))
+    writeFileSync(path.join(repo, '笔记', '旧 名.md'), '![](attachments/图.png)\n')
+    writeFileSync(path.join(repo, '库外.md'), '1\n')
+    sh('add', '.')
+    sh('commit', '-qm', '1')
+    sh('mv', '笔记/旧 名.md', '笔记/新 名.md')
+    sh('commit', '-qm', '2')
+    writeFileSync(path.join(repo, '库外.md'), '2\n')
+    sh('add', '库外.md')
+    writeFileSync(path.join(repo, '笔记', '新 名.md'), '') // 工作区删了引用，暂存区里还在
+    const git = new Git('git', process.env.PATH!, path.join(repo, '笔记'), undefined, env)
+    expect((await git.status()).files).toEqual([{ path: '新 名.md', x: '.', y: 'M' }])
+    expect(await git.stagedOutside()).toEqual(['库外.md'])
+    expect(await git.stagedMentions(['attachments/图.png'])).toEqual(['attachments/图.png'])
+    expect((await git.fileLog('新 名.md')).map((e) => [e.subject, e.status, e.path])).toEqual([['2', 'R', '新 名.md'], ['1', 'A', '旧 名.md']])
+  })
+
+  it('stagedMentions：按暂存区版本的笔记查附件引用（编码形式、大小写不敏感），不看工作区', async () => {
+    const { repo, env, sh } = setup()
+    sh('init', '-q')
+    writeFileSync(path.join(repo, 'a.md'), '![](attachments/My%20Pic.PNG)\n')
+    writeFileSync(path.join(repo, 'b.txt'), 'x.png\n') // 不是笔记，不算
+    sh('add', '.')
+    sh('config', 'grep.fullName', 'true')
+    const git = new Git('git', process.env.PATH!, repo, undefined, env)
+    writeFileSync(path.join(repo, 'a.md'), '') // 工作区删了引用，但没暂存
+    expect(await git.stagedMentions(['attachments/my pic.png', 'attachments/x.png', 'attachments/none.png'])).toEqual(['attachments/my pic.png'])
+    sh('add', 'a.md')
+    expect(await git.stagedMentions(['attachments/my pic.png'])).toEqual([])
+  })
+
   // 靠「PATH 里只放 git、不放 git-lfs」来复现。Git for Windows 把 git-lfs.exe 和 git 依赖的 DLL 放在同一个 mingw64/bin 里，
   // 没法单独去掉 git-lfs；Windows 上 msys sh 的报错文本相同，由上面的文本用例覆盖
   it.skipIf(process.platform === 'win32')('缺 git-lfs 经 Git.run() 分类为 lfsMissing', async () => {
@@ -406,7 +519,7 @@ describe('Git（系统 git）', () => {
     const git = new Git('git', process.env.PATH!, repo, changed, env)
     await git.mutate(['checkout', '--', 'a.md'])
     expect(changed).toHaveBeenCalledTimes(1)
-    expect(await git.status()).toEqual([{ kind: 'untracked', path: '.gitattributes' }])
+    expect((await git.status()).files).toEqual([{ path: '.gitattributes', x: '?', y: '?' }])
     expect(await git.lfsPaths(['attachments/图.png', 'a.md'])).toEqual(['attachments/图.png'])
   })
 
@@ -468,7 +581,7 @@ describe('Git（系统 git）', () => {
     await git.restore(src!.hash, 'attachments/图 [1].png')
     expect(readFileSync(path.join(repo, 'attachments/图 [1].png'), 'utf8')).toBe('v2')
     expect(changed).toHaveBeenCalled() // 恢复后通知索引对账
-    expect(await git.status()).toEqual([{ kind: 'untracked', path: 'attachments/图 [1].png' }])
+    expect((await git.status()).files).toEqual([{ path: 'attachments/图 [1].png', x: '?', y: '?' }])
     expect(await git.restoreSource('attachments/没有.png')).toBeNull()
     expect(await git.isFileAt(src!.hash, 'attachments')).toBe(false) // 目录
     rmSync(path.join(repo, 'attachments/图 [1].png'))

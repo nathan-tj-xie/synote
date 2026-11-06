@@ -642,11 +642,11 @@ test('git view: missing identity and missing git', async () => {
   let app = await electron.launch({ args: ['.'], env })
   let win = await app.firstWindow()
   await win.getByRole('button', { name: 'Git' }).click()
-  await expect(win.getByText('1 处更改')).toBeVisible({ timeout: 10_000 })
+  await expect(win.getByLabel('1 处更改')).toBeVisible({ timeout: 10_000 })
   await expect(win.getByText('git config --global user.email')).toBeVisible()
   // 面板开着时外部新增文件，更改数靠主进程推送更新
   writeFileSync(path.join(vault, '另一篇.md'), '')
-  await expect(win.getByText('2 处更改')).toBeVisible({ timeout: 10_000 })
+  await expect(win.getByLabel('2 处更改')).toBeVisible({ timeout: 10_000 })
   await app.close()
 
   // 登录 shell 失败、当前 PATH 为空：没有可用的 git，文件树照常可用

@@ -50,11 +50,18 @@ export async function trackedOf(git: Git | null, rels: string[]): Promise<Set<st
   return out
 }
 
-// 已跟踪的 git rm（进入下次提交，可从历史恢复），其余移到回收站。返回已删除的相对路径
-export async function removeOrphans(targets: [string, string][], git: Git | null, trash: (abs: string) => Promise<void>): Promise<string[]> {
+// 已跟踪的 git rm（进入下次提交，可从历史恢复），其余移到回收站。返回已删除的相对路径；progress 每删掉一个调用一次
+export async function removeOrphans(targets: [string, string][], git: Git | null, trash: (abs: string) => Promise<void>, progress = () => {}): Promise<string[]> {
   const rels = targets.map(([rel]) => rel)
   const tracked = await trackedOf(git, rels)
-  for (const c of chunks(rels.filter((r) => tracked.has(r)))) await git!.rm(c)
-  for (const [rel, abs] of targets) if (!tracked.has(rel)) await trash(abs)
+  for (const c of chunks(rels.filter((r) => tracked.has(r)))) {
+    await git!.rm(c)
+    c.forEach(progress)
+  }
+  for (const [rel, abs] of targets) {
+    if (tracked.has(rel)) continue
+    await trash(abs)
+    progress()
+  }
   return rels
 }

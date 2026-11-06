@@ -337,6 +337,14 @@ export function toggleDiff() {
   if (!on) view!.focus()
 }
 
+// git 面板点改动的文件（S13）：打开它并直接进入工作区对比（已在对比中就保持）
+export function openDiff(path: string) {
+  if (locked) return
+  if (diffMode.get(path)?.rev !== 'HEAD') setMode(path, { rev: 'HEAD', path })
+  if (path === shown) syncDiff()
+  useEditor.getState().open(path)
+}
+
 // 历史栏选中提交（S15）：当前笔记 ↔ 该提交里的版本，再点同一个提交回到正文。左侧只读，块级拣回和输入一样写回 CM6
 export function compareWith(path: string, e: LogEntry) {
   if (path !== shown || locked) return
@@ -465,6 +473,22 @@ export async function reloadIfClean(path: string) {
   if (path === shown && view) view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text }, effects: setEol.of(detectEol(text)), annotations: Transaction.remote.of(true) })
   else states.set(path, makeState(text, path))
   useEditor.getState().setDirty(path, false)
+}
+
+// 会改写工作区的 git 操作（pull 等，S13）：插完在途附件、加锁、所有输入落盘（写不进去就抛 unsaved），操作期间编辑器只读；
+// 结束后（成功或失败）把每个已打开的笔记按磁盘主动重载一次再解锁，不等 watcher：否则解锁后、重载前的输入会把旧正文存回去
+export async function withWorktreeLock<T>(unsaved: string, f: () => Promise<T>): Promise<T> {
+  if (locked) throw new Error(i18next.t('worktreeBusy'))
+  await attachmentsSettled()
+  if (locked) throw new Error(i18next.t('worktreeBusy'))
+  setLocked(true)
+  try {
+    if (!(await flushAll())) throw new Error(unsaved)
+    return await f()
+  } finally {
+    await Promise.all([...new Set([...states.keys(), ...(shown ? [shown] : [])])].map(reloadIfClean))
+    setLocked(false)
+  }
 }
 
 // 重命名 / 移动（S9）：主进程算出并原子地写下所有改写，编辑器这边保证不和它打架——先插完在途附件、加锁、把所有输入落盘

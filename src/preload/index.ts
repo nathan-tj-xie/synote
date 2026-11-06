@@ -44,6 +44,12 @@ const api: SynoteApi = {
   fileLog: (v, p) => ipcRenderer.invoke('git:log', v, p),
   restoreSource: (v, p) => ipcRenderer.invoke('git:restoreSource', v, p),
   restoreAttachment: (v, p, h) => ipcRenderer.invoke('git:restore', v, p, h),
+  gitStage: (v, p) => ipcRenderer.invoke('git:stage', v, p),
+  gitUnstage: (v, p) => ipcRenderer.invoke('git:unstage', v, p),
+  gitCommit: (v, m, all, o) => ipcRenderer.invoke('git:commit', v, m, all, o),
+  gitPush: (v) => ipcRenderer.invoke('git:push', v),
+  gitPull: (v) => ipcRenderer.invoke('git:pull', v),
+  repoLog: (v) => ipcRenderer.invoke('git:repoLog', v),
   onGitChanged: subscribe('git:changed'),
 }
 
