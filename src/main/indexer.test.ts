@@ -91,11 +91,13 @@ describe('Indexer', () => {
 
   test('backlinks, attachment refs, orphans and search', async () => {
     const { idx } = setup({
-      'a.md': '链接到 [b](b.md) 和 [[c]]，![](attachments/used.png)',
+      'a.md': '链接到 [b](b.md) 和 [[c]]，![](attachments/used.png) ![](attachments/lfs.png)',
       'sub/c.md': '实时预览很好用 Hello World',
       'b.md': '',
       'attachments/used.png': 'x',
       'attachments/orphan.png': 'y',
+      // LFS 指针（S17）：引用和孤儿照样按路径判断，不因内容是指针而算缺失或孤儿
+      'attachments/lfs.png': `version https://git-lfs.github.com/spec/v1\noid sha256:${'a'.repeat(64)}\nsize 9\n`,
       '.git/x.md': '[b](../b.md)',
     })
     await idx.reconcile()
@@ -103,6 +105,7 @@ describe('Indexer', () => {
     expect(idx.backlinks('b.md').map((b) => b.path)).toEqual(['a.md'])
     expect(idx.backlinks('sub/c.md').map((b) => b.path)).toEqual(['a.md'])
     expect(idx.attachmentRefs('attachments/used.png')).toBe(1)
+    expect(idx.attachmentRefs('attachments/lfs.png')).toBe(1)
     expect(idx.orphans()).toEqual(['attachments/orphan.png'])
     expect(idx.search('时预览').map((h) => h.path)).toEqual(['sub/c.md'])
     expect(idx.search('预览').map((h) => h.path)).toEqual(['sub/c.md']) // 2 字走 LIKE

@@ -1,4 +1,5 @@
 import { existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -106,6 +107,22 @@ describe('vault', () => {
     expect(await saveAttachment(root, 'a.png', new Uint8Array([3, 2, 1]))).toBe('attachments/a-1.png')
     expect([...readFileSync(path.join(root, 'attachments/a.png'))]).toEqual([1, 2, 3])
     expect(readdirSync(path.join(root, 'attachments')).sort()).toEqual(['a-1.png', 'a-2.png', 'a.png'])
+  })
+
+  // S17：工作区里是 LFS 指针（内容没下载）的附件，用指针的 oid（即内容的 SHA-256）和大小去重，不再写一份
+  it('reuses an LFS pointer whose oid and size match the new content', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'synote-'))
+    mkdirSync(path.join(root, 'attachments'))
+    const big = new Uint8Array(5000).fill(7)
+    const oid = createHash('sha256').update(big).digest('hex')
+    const ptr = (o: string, size: number) => `version https://git-lfs.github.com/spec/v1\noid sha256:${o}\nsize ${size}\n`
+    writeFileSync(path.join(root, 'attachments/p.png'), ptr(oid, 5000))
+    writeFileSync(path.join(root, 'attachments/q.png'), ptr('0'.repeat(64), 5000))
+    expect(await saveAttachment(root, 'new.png', big)).toBe('attachments/p.png')
+    expect(await saveAttachment(root, 'other.png', new Uint8Array(5000).fill(8))).toBe('attachments/other.png') // oid 不同
+    // 指针文本本身被当作新内容粘贴进来时，按普通内容比较（和指针文件逐字节相同）
+    expect(await saveAttachment(root, 'x.png', new TextEncoder().encode(ptr(oid, 5000)))).toBe('attachments/p.png')
+    expect(readFileSync(path.join(root, 'attachments/p.png'), 'utf8')).toBe(ptr(oid, 5000)) // 指针原样不动
   })
 
   it.skipIf(process.platform === 'win32')('refuses an attachments/ that links outside the vault', async () => {

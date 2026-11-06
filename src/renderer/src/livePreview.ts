@@ -7,6 +7,8 @@ import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, typ
 import type { SyntaxNode } from '@lezer/common'
 import { tags as t } from '@lezer/highlight'
 import { i18next } from '../../shared/i18n'
+import type { Presence } from '../../shared/api'
+import { parseLfsPointer, sizeLabel, type LfsPointer } from '../../shared/lfs'
 import { linkHref, linkRefs as treeRefs, RAW, wikiLinks } from '../../shared/mdLinks'
 import { parseWiki } from '../../shared/url'
 import { dataUrl, decodeEntities, imageMime, MAX_IMAGE, resolveImage, resolveLink, unescapeMd } from './diffUtil'
@@ -109,18 +111,18 @@ class FenceLabel extends WidgetType {
 }
 
 // 图片：只读库内文件（readBytes 校验库标识与路径），转成 data URL（CSP 只放行 'self' 和 data:）。
-// 缓存按库 + 路径，文件有外部改动时失效
-const images = new Map<string, Promise<string | null>>()
+// 缓存按库 + 路径，文件有外部改动时失效。工作区里是 LFS 指针（内容没下载，S17）时结果是指针本身
+const images = new Map<string, Promise<string | LfsPointer | null>>()
 let imageGen = 0
 const views = new Set<EditorView>()
 
-function loadImage(vault: string, path: string): Promise<string | null> {
+function loadImage(vault: string, path: string): Promise<string | LfsPointer | null> {
   const key = `${vault}\0${path}`
   let p = images.get(key)
   if (!p) {
     if (images.size >= 200) images.clear() // shortcut: 满了整个清空而不是 LRU；图片多的笔记来回切换卡顿时再换
     p = window.synote.readBytes(vault, path).then(
-      (b) => (b.length > MAX_IMAGE ? Promise.reject(new Error('too large')) : dataUrl(b, imageMime(path)!)),
+      (b) => parseLfsPointer(b) ?? (b.length > MAX_IMAGE ? Promise.reject(new Error('too large')) : dataUrl(b, imageMime(path)!)),
       () => null,
     )
     images.set(key, p)
@@ -128,11 +130,11 @@ function loadImage(vault: string, path: string): Promise<string | null> {
   return p
 }
 
-// 非图片附件链接的目标是否存在（缺失时显示占位）：按库 + 路径缓存，没有的项一次重建里攒成一批，经 exists 查一次，
-// 不是每次渲染都查。查到缺失才需要重建（默认按存在渲染）；查询失败按存在处理，免得反复查
-const present = new Map<string, boolean>()
+// 非图片附件链接的目标是否存在（缺失时显示占位）：按库 + 路径缓存，没有的项一次重建里攒成一批，经 presence 查一次，
+// 不是每次渲染都查。查到缺失或 LFS 指针（S17）才需要重建（默认按存在渲染）；查询失败按存在处理，免得反复查
+const present = new Map<string, Presence>()
 const asking = new Map<string, Set<string>>() // 库 → 待查路径
-function isPresent(vault: string, path: string): boolean | undefined {
+function presenceOf(vault: string, path: string): Presence | undefined {
   const key = `${vault}\0${path}`
   if (present.has(key)) return present.get(key)
   if (!asking.size) queueMicrotask(askPresent)
@@ -142,13 +144,13 @@ function isPresent(vault: string, path: string): boolean | undefined {
 function askPresent() {
   for (const [vault, set] of asking) {
     const paths = [...set]
-    window.synote.exists(vault, paths).then(
+    window.synote.presence(vault, paths).then(
       (r) => {
         if (present.size >= 5000) present.clear() // shortcut: 满了整个清空而不是 LRU，附件链接极多时再换
         paths.forEach((p, i) => present.set(`${vault}\0${p}`, r[i]))
-        if (r.includes(false)) rebuildViews()
+        if (r.some((x) => x.state !== 'present')) rebuildViews()
       },
-      () => paths.forEach((p) => present.set(`${vault}\0${p}`, true)),
+      () => paths.forEach((p) => present.set(`${vault}\0${p}`, { state: 'present' })),
     )
   }
   asking.clear()
@@ -184,49 +186,70 @@ function broken(state: EditorState, h: Href): boolean {
   if (!info) return false
   const t = resolveHref(h, info.path)
   if (!t) return 'wiki' in h
-  return !t.path.startsWith('attachments/') && isPresent(info.vault, t.path) === false
+  return !t.path.startsWith('attachments/') && presenceOf(info.vault, t.path)?.state === 'missing'
 }
 const linkClass = (state: EditorState, h: Href) => (broken(state, h) ? 'cm-lp-link cm-lp-broken' : 'cm-lp-link')
+
+// 占位里的按钮：执行期间禁用，失败时报错
+function placeholderButton(box: HTMLElement, label: string, run: () => Promise<void>) {
+  const btn = box.appendChild(document.createElement('button'))
+  btn.className = 'cm-lp-restore'
+  btn.textContent = label
+  btn.addEventListener('mousedown', (e) => e.preventDefault()) // 不让光标移进来（那样整行会切成源码）
+  btn.addEventListener('click', async (e) => {
+    e.preventDefault()
+    btn.disabled = true
+    try {
+      await run()
+    } catch (err) {
+      useUi.getState().setError(String(err))
+    } finally {
+      btn.disabled = false
+    }
+  })
+}
 
 // 附件缺失占位的内容：提示 + "从历史恢复"（S15，#9 决定 7）。主进程找最后一个还有它的提交，确认后 git restore 写回工作区；
 // 写回后丢掉存在性和图片缓存，占位随即消失（索引的变化推送也会再丢一次）
 function fillMissing(box: HTMLElement, vault: string, path: string) {
   box.className = 'cm-lp-image-missing'
   box.textContent = i18next.t('attachmentMissing', { path })
-  const btn = box.appendChild(document.createElement('button'))
-  btn.className = 'cm-lp-restore'
-  btn.textContent = i18next.t('restoreFromHistory')
-  btn.addEventListener('mousedown', (e) => e.preventDefault()) // 不让光标移进来（那样整行会切成源码）
-  btn.addEventListener('click', async (e) => {
-    e.preventDefault()
-    const fail = (err: unknown) => useUi.getState().setError(String(err))
-    try {
-      const src = await window.synote.restoreSource(vault, path)
-      if (!src) return fail(i18next.t('restoreNotFound', { path }))
-      const date = new Date(src.time * 1000).toLocaleString('zh-CN')
-      if (!confirm(i18next.t('restoreConfirm', { hash: src.hash.slice(0, 7), date, subject: src.subject, path }))) return
-      await window.synote.restoreAttachment(vault, path, src.hash)
-      forgetFiles(vault, [path])
-    } catch (err) {
-      fail(err)
-    }
+  placeholderButton(box, i18next.t('restoreFromHistory'), async () => {
+    const src = await window.synote.restoreSource(vault, path)
+    if (!src) throw new Error(i18next.t('restoreNotFound', { path }))
+    const date = new Date(src.time * 1000).toLocaleString('zh-CN')
+    if (!confirm(i18next.t('restoreConfirm', { hash: src.hash.slice(0, 7), date, subject: src.subject, path }))) return
+    await window.synote.restoreAttachment(vault, path, src.hash)
+    forgetFiles(vault, [path])
   })
 }
 
-// 指向库内附件（attachments/ 下）的普通链接，目标已知不存在时的占位
+// 工作区里是 LFS 指针的图片（S17）：和附件缺失区分开的占位，"下载"执行 git lfs pull 写回工作区，之后丢掉缓存换成图片
+function fillLfs(box: HTMLElement, vault: string, path: string, size: number) {
+  box.className = 'cm-lp-image-missing cm-lp-lfs'
+  box.textContent = i18next.t('lfsNotDownloaded', { size: sizeLabel(size), path })
+  placeholderButton(box, i18next.t('lfsDownload'), async () => {
+    await window.synote.lfsPull(vault, path)
+    forgetFiles(vault, [path])
+  })
+}
+
+// 指向库内附件（attachments/ 下）的普通链接，目标已知不存在时的占位；lfs 不为 null 时是 LFS 内容未下载的占位（S17，大小）
 class MissingWidget extends WidgetType {
   constructor(
     readonly vault: string,
     readonly path: string,
+    readonly lfs: number | null,
   ) {
     super()
   }
   eq(o: MissingWidget) {
-    return o.vault === this.vault && o.path === this.path
+    return o.vault === this.vault && o.path === this.path && o.lfs === this.lfs
   }
   toDOM() {
     const el = document.createElement('span')
-    fillMissing(el, this.vault, this.path)
+    if (this.lfs === null) fillMissing(el, this.vault, this.path)
+    else fillLfs(el, this.vault, this.path, this.lfs)
     return el
   }
 }
@@ -234,7 +257,9 @@ class MissingWidget extends WidgetType {
 function missingWidget(state: EditorState, target: string): MissingWidget | null {
   const info = state.facet(note)
   const path = info && target ? resolveLink(target, info.path) : null
-  return path?.startsWith('attachments/') && isPresent(info!.vault, path) === false ? new MissingWidget(info!.vault, path) : null
+  if (!path?.startsWith('attachments/')) return null
+  const p = presenceOf(info!.vault, path)
+  return p?.state === 'missing' ? new MissingWidget(info!.vault, path, null) : p?.state === 'lfs' ? new MissingWidget(info!.vault, path, p.pointer.size) : null
 }
 
 class ImageWidget extends WidgetType {
@@ -271,6 +296,7 @@ class ImageWidget extends WidgetType {
       (url) => {
         // 附件缺失（#8）：只显示占位，不自动修复也不改引用；attachments/ 下的可以手动从历史恢复
         if (!url) return path.startsWith('attachments/') ? fillMissing(box, vault, path) : fail(i18next.t('attachmentMissing', { path }))
+        if (typeof url !== 'string') return fillLfs(box, vault, path, url.size)
         const img = document.createElement('img')
         img.src = url
         img.alt = this.alt

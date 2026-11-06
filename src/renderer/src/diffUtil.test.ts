@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { relativeLink } from '../../shared/url'
-import { bomOffset, decodeEntities, destination, imageAt, minimalEdit, normalizeLabel, resolveImage } from './diffUtil'
+import { parser } from '@lezer/markdown'
+import { bomOffset, decodeEntities, destination, escapeMd, imageAt, lfsHoverMarkdown, minimalEdit, normalizeLabel, resolveImage, unescapeMd } from './diffUtil'
 
 const apply = (a: string, e: ReturnType<typeof minimalEdit>) => (e ? a.slice(0, e.from) + e.insert + a.slice(e.to) : a)
 
@@ -109,5 +110,34 @@ describe('relativeLink', () => {
   it('解码后还原成原路径', () => {
     for (const [note, p] of [['x y/n.md', 'attachments/a b(1)#%&?c.png'], ['n.md', 'attachments/<中>.png']])
       expect(resolveImage(destination(relativeLink(note, p)), note)).toBe(p)
+  })
+})
+
+// 悬停 Markdown 的转义（S17 codex 审查）：文件名里拼出的链接、图片、HTML 都只能是字面文字
+describe('escapeMd / lfsHoverMarkdown', () => {
+  const nodes = (md: string, name: string) => {
+    const out: string[] = []
+    parser.parse(md).iterate({ enter: (n) => void (n.name === name && out.push(md.slice(n.from, n.to))) })
+    return out
+  }
+  const evil = 'attachments/[下载](command:editor.action.deleteLines).png'
+
+  it('转义后没有链接、图片、HTML，还原回原文', () => {
+    for (const s of [evil, '![x](javascript:alert(1))', '<img src=x onerror=alert(1)>', 'a*b*_c_`d`', '[a]: command:x']) {
+      const md = escapeMd(s)
+      for (const n of ['Link', 'Image', 'HTMLTag', 'Emphasis', 'InlineCode', 'LinkReference', 'Autolink']) expect(nodes(md, n)).toEqual([])
+      expect(unescapeMd(md)).toBe(s)
+    }
+    expect(escapeMd('a\nb')).toBe('a b')
+  })
+
+  it('LFS 占位悬停只有一个链接，就是自己的命令', () => {
+    const md = lfsHoverMarkdown(`LFS 内容未下载（5 B）：${evil}`, '下载', ['original', 3, 4])
+    expect(nodes(md, 'Link')).toHaveLength(1)
+    const url = nodes(md, 'URL')
+    expect(url).toHaveLength(1)
+    expect(url[0]).toMatch(/^command:synote\.lfsDownload\?/)
+    expect(JSON.parse(decodeURIComponent(url[0].split('?')[1]))).toEqual(['original', 3, 4])
+    expect(md).not.toMatch(/\]\(command:editor/)
   })
 })

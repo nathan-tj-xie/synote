@@ -1,5 +1,6 @@
 // 主进程 ↔ 渲染进程的 IPC 契约，两边共享类型
 import type { CommandId } from './commands'
+import type { LfsPointer } from './lfs'
 import type { Edit } from './mdLinks'
 
 export type Entry = { path: string; dir: boolean } // path 为相对笔记库根目录的 POSIX 路径
@@ -26,6 +27,8 @@ export type GitErrorKind =
   | 'noIdentity'
   | 'conflict'
   | 'lfsMissing'
+  // LFS 的 smudge / clean filter 或下载失败（S17）：装了 git-lfs，但离线、LFS 远端不可达等
+  | 'lfsFilter'
   | 'network'
   | 'notRepo'
   // 提交前发现暂存区里有笔记库之外的文件（S13）：面板看不到它们，不替用户提交
@@ -37,8 +40,19 @@ export type GitState =
   | { status: 'missing' }
   | { status: 'tooOld'; bin: string; version: string }
   | { status: 'notRepo'; version: string }
-  // name / email 有一个为 null 就禁用提交；lfs：本机是否装了 git-lfs（供 S17）；files：笔记库内的改动（S13）
-  | ({ status: 'ready'; version: string; name: string | null; email: string | null; files: GitFile[]; lfs: boolean } & GitBranch)
+  // name / email 有一个为 null 就禁用提交；files：笔记库内的改动（S13）。
+  // lfs：本机是否装了 git-lfs；lfsUsed：笔记库里有路径按 .gitattributes 走 LFS（只在 lfs 为 false 时检测，否则为 false）；
+  // lfsError：git status 因 LFS filter 失败（如配置了 filter.lfs.required 却找不到 git-lfs），此时 files 为空、分支信息缺省（S17）
+  | ({
+      status: 'ready'
+      version: string
+      name: string | null
+      email: string | null
+      files: GitFile[]
+      lfs: boolean
+      lfsUsed: boolean
+      lfsError: { kind: 'lfsMissing' | 'lfsFilter'; raw: string } | null
+    } & GitBranch)
 
 // 分支与上游（S13）：branch 为 null 表示 detached；没有上游时 upstream 为 null，ahead / behind 为 0
 export type GitBranch = { branch: string | null; upstream: string | null; ahead: number; behind: number }
@@ -63,6 +77,9 @@ export type OrphanAttachment = { path: string; tracked: boolean }
 // status 是该提交对它的改动（A / M / R / D…），time 为秒
 export type LogEntry = { hash: string; time: number; author: string; subject: string; path: string; status: string }
 
+// 一个路径的存在状态：missing 不存在（含越出笔记库）；present 存在；lfs 存在但内容是 LFS 指针、还没下载（S17）
+export type Presence = { state: 'missing' } | { state: 'present' } | { state: 'lfs'; pointer: LfsPointer }
+
 export type ItemMenuAction = Extract<CommandId, 'newNote' | 'rename' | 'trash'> | null
 
 // 重命名 / 移动后改写过的笔记（旧路径）：改写前的正文和改写（偏移按 before），渲染进程据此更新已打开的笔记
@@ -80,8 +97,8 @@ export interface SynoteApi {
   readFile(vault: string, path: string): Promise<string>
   writeFile(vault: string, path: string, content: string): Promise<void>
   readBytes(vault: string, path: string): Promise<Uint8Array>
-  // 每个路径是否存在（实时预览的附件缺失占位用）
-  exists(vault: string, paths: string[]): Promise<boolean[]>
+  // 每个路径的存在状态（实时预览的附件缺失 / LFS 未下载占位、跳转前检查笔记是否存在）
+  presence(vault: string, paths: string[]): Promise<Presence[]>
   createNote(vault: string, dir: string): Promise<string>
   // 粘贴 / 拖入的附件写进 attachments/（S10），name 为 null 表示剪贴板图片；内容相同的已有文件直接复用。
   // warn：large 为超过 50 MiB，huge 为超过 100 MiB 且不走 LFS
@@ -117,7 +134,12 @@ export interface SynoteApi {
   // 弹出文件选择框指定 git 可执行文件，取消时为 null
   chooseGit(): Promise<GitState | null>
   // 工作区对比（S14）、历史对比（S15）：rev（HEAD 或完整 oid）里的文件内容，那里没有时为 null；没有可用 git 或不是仓库时报错
+  // LFS（S17）：对象已在本地时给真实内容，否则原样给指针（不联网）
   readRev(vault: string, rev: string, path: string): Promise<Uint8Array | null>
+  // 用户点了"下载"：历史版本里的 LFS 指针经 git lfs smudge 换成真实内容（会联网）
+  lfsSmudge(vault: string, rev: string, path: string): Promise<Uint8Array | null>
+  // 工作区里是 LFS 指针的文件：git lfs pull 下载真实内容写回工作区；不是指针时什么都不做
+  lfsPull(vault: string, path: string): Promise<void>
   // 历史栏（S15）：笔记的提交历史（git log --follow），新的在前；还没有提交时为空
   fileLog(vault: string, path: string): Promise<LogEntry[]>
   // 从历史恢复缺失附件（S15）：最后一个还有它的提交，历史里从没有过时为 null；restore 只写工作区，已存在时拒绝

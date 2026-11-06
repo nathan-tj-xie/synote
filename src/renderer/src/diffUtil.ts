@@ -45,6 +45,13 @@ export const imageMime = (p: string): string | undefined => mimes[p.split('.').p
 
 // Markdown 反斜杠转义（ASCII 标点）还原成字符本身
 export const unescapeMd = (s: string) => s.replace(/\\([!-/:-@[-`{-~])/g, '$1')
+// 反过来：任意文本（文件名、报错）放进 Markdown 时，ASCII 标点全部加反斜杠，换行换成空格，渲染出来就是字面文字，
+// 拼不出链接、图片、HTML。悬停里的 command 链接是可信的，文件名里的 `[x](command:…)` 不能变成可点的命令
+export const escapeMd = (s: string) => s.replace(/[!-/:-@[-`{-~]/g, '\\$&').replace(/[\r\n]+/g, ' ')
+
+// LFS 占位的悬停（S17）：转义过的说明文字 + 唯一一个 command 链接；参数编成 JSON 后整段百分号编码（括号也编，免得提前结束链接）
+export const lfsHoverMarkdown = (text: string, label: string, args: unknown[]) =>
+  `${escapeMd(text)} [${escapeMd(label)}](command:synote.lfsDownload?${encodeURIComponent(JSON.stringify(args)).replace(/[()]/g, (c) => `%${c.charCodeAt(0).toString(16)}`)})`
 
 
 // 同上，不是图片时也为 null

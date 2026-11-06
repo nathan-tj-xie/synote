@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { Entry } from '../shared/api'
+import { parseLfsPointer } from '../shared/lfs'
 
 // 文件树中隐藏：点开头的文件 / 文件夹（.git、.synote 等）和根目录下的 attachments/
 export function isHidden(rel: string): boolean {
@@ -100,7 +101,8 @@ export function numberedName(name: string, i: number): string {
 const sha256 = (b: Uint8Array) => createHash('sha256').update(b).digest('hex')
 
 // 把附件写进库根的 attachments/，返回相对库根的路径。attachments/ 里已有 SHA-256 相同的文件就直接复用（先按大小筛，
-// 只对同样大小的算哈希）；否则从 name 起找第一个空位，wx 写入不覆盖已有文件。调用方负责串行，避免并发写出两份
+// 只对同样大小的算哈希）；已有文件是 LFS 指针（内容没下载）时用它的 oid 比较，LFS oid 就是内容的 SHA-256（S17）。
+// 否则从 name 起找第一个空位，wx 写入不覆盖已有文件。调用方负责串行，避免并发写出两份
 export async function saveAttachment(root: string, name: string, bytes: Uint8Array): Promise<string> {
   await fs.mkdir(await realParentInVault(root, 'attachments'), { recursive: true })
   // 真实父目录校验：attachments 被换成指向库外的链接时这里就拒绝
@@ -109,7 +111,12 @@ export async function saveAttachment(root: string, name: string, bytes: Uint8Arr
   for (const d of await fs.readdir(dir, { withFileTypes: true })) {
     if (!d.isFile()) continue // 链接、子目录不算（扁平目录，链接可能指向库外）
     const p = path.join(dir, d.name)
-    if ((await fs.stat(p)).size === bytes.length && sha256(await fs.readFile(p)) === hash) return `attachments/${d.name}`
+    const size = (await fs.stat(p)).size
+    if (size === bytes.length && sha256(await fs.readFile(p)) === hash) return `attachments/${d.name}`
+    if (size < 1024) {
+      const ptr = parseLfsPointer(await fs.readFile(p))
+      if (ptr?.oid === hash && ptr.size === bytes.length) return `attachments/${d.name}`
+    }
   }
   for (let i = 0; ; i++) {
     const rel = `attachments/${numberedName(name, i)}`

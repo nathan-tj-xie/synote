@@ -4,7 +4,8 @@ import { existsSync, promises as fs, statSync, watch, type FSWatcher } from 'nod
 import path from 'node:path'
 import { i18next, i18nOptions } from '../shared/i18n'
 import { commands } from '../shared/commands'
-import { indexMethods, type GitDone, type GitOpResult, type GitState, type OrphanAttachment, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
+import { indexMethods, type GitDone, type GitOpResult, type GitState, type OrphanAttachment, type ItemMenuAction, type Presence, type VaultConfig, type VaultInfo } from '../shared/api'
+import { parseLfsPointer } from '../shared/lfs'
 import { tokens } from '../shared/tokens'
 import { exec, findGit, Git, GitError, StagedOutsideError, type GitDetectionResult } from './git'
 import { attachmentTarget, checkOrphans, isAttachmentPath, removeOrphans, trackedOf } from './orphans'
@@ -85,8 +86,9 @@ function watchVault(dir: string): FSWatcher {
   // shortcut: 每批外部改动都全量重扫文件树，10k 库约百毫秒；等 S6 索引服务的 stat 对账就绪后改为增量
   return watch(dir, { recursive: true }, (_event, filename) => {
     if (!filename) return
-    pushGitState() // .git 里的 HEAD、index、refs 变化也算，外部 git 操作能及时反映
     const rel = toPosix(filename.toString())
+    if (lfsAttrPath(rel)) lfsUsedCache = null // 在推送状态之前作废，下一次查询按新文件重算
+    pushGitState() // .git 里的 HEAD、index、refs 变化也算，外部 git 操作能及时反映
     if (isHidden(rel)) return
     changed.add(rel)
     clearTimeout(timer)
@@ -215,9 +217,33 @@ async function gitState(): Promise<GitState> {
 // 只用传入的实例，期间全局的 git 被替换或置空也不受影响
 async function queryGit(g: Git, version: string): Promise<GitState> {
   if (!(await g.isRepo())) return { status: 'notRepo', version }
-  const [identity, st, lfs] = await Promise.all([g.identity(), g.status(), g.lfsInstalled()])
-  return { status: 'ready', version, ...identity, ...st, lfs }
+  const [identity, st, lfs] = await Promise.all([g.identity(), lfsStatus(g), g.lfsInstalled()])
+  return { status: 'ready', version, ...identity, ...st, lfs, lfsUsed: !lfs && (await lfsUsedOf(g)) }
 }
+
+// lfsUsed 要扫 attachments/ 下所有文件的属性（只在没装 git-lfs 时查）：按 git 实例缓存，
+// .gitattributes 或 attachments/ 有变化（watcher、写入附件）时作废；查询失败不缓存
+// shortcut: watcher 只看笔记库目录，库是仓库子目录时仓库根的 .gitattributes 改动要等重新检测或重开库；有人反馈再监视仓库根
+let lfsUsedCache: { g: Git; v: Promise<boolean> } | null = null
+function lfsUsedOf(g: Git): Promise<boolean> {
+  if (lfsUsedCache?.g !== g) {
+    const c = { g, v: g.lfsUsed() }
+    c.v.catch(() => lfsUsedCache === c && (lfsUsedCache = null))
+    lfsUsedCache = c
+  }
+  return lfsUsedCache.v
+}
+const lfsAttrPath = (rel: string) => rel === 'attachments' || rel.startsWith('attachments/') || path.posix.basename(rel) === '.gitattributes' || rel === '.git/info/attributes'
+
+// status 因 LFS filter 失败（S17）时不降级成非 git 目录：照常给出 ready，带上错误由 git 面板引导
+const lfsStatus = (g: Git) =>
+  g.status().then(
+    (st) => ({ ...st, lfsError: null }),
+    (e) => {
+      if (!(e instanceof GitError) || (e.kind !== 'lfsMissing' && e.kind !== 'lfsFilter')) throw e
+      return { branch: null, upstream: null, ahead: 0, behind: 0, files: [], lfsError: { kind: e.kind, raw: e.message } }
+    },
+  )
 
 // 状态由主进程推送（ADR 0005）：文件改动后防抖重查，渲染进程的 git store 据此更新
 let gitTimer: NodeJS.Timeout | undefined
@@ -250,10 +276,17 @@ ipcMain.handle('vault:writeConfig', async (_e, vault: string, config: VaultConfi
 })
 // 读取跟随符号链接，所以按真实路径校验（实时预览会自动读图片，不能让一个指向库外的链接读出库外文件）
 ipcMain.handle('file:read', async (_e, vault: string, rel: string) => fs.readFile(await realInVault(checkVault(vault), rel), 'utf8'))
-// 实时预览查附件链接是否存在（S10）：一批路径一次查，同样按真实路径校验，越出笔记库的按不存在
-ipcMain.handle('file:exists', async (_e, vault: string, rels: string[]) => {
+// 实时预览查附件链接是否存在（S10）：一批路径一次查，同样按真实路径校验，越出笔记库的按不存在。
+// 小于 1024 字节的文件顺带识别 LFS 指针（S17），是指针就给出指针（大文件不读内容）
+ipcMain.handle('file:presence', async (_e, vault: string, rels: string[]) => {
   const r = checkVault(vault)
-  return Promise.all(rels.map((p) => realInVault(r, p).then(() => true, () => false)))
+  const probe = async (p: string): Promise<Presence> => {
+    const abs = await realInVault(r, p)
+    const st = await fs.stat(abs)
+    const pointer = st.isFile() && st.size < 1024 ? parseLfsPointer(await fs.readFile(abs)) : null
+    return pointer ? { state: 'lfs', pointer } : { state: 'present' }
+  }
+  return Promise.all(rels.map((p) => probe(p).catch((): Presence => ({ state: 'missing' }))))
 })
 ipcMain.handle('file:readBytes', async (_e, vault: string, rel: string) => fs.readFile(await realInVault(checkVault(vault), rel)))
 // diff / 历史用的 git：没有可用 git、不是仓库时报错（不像 vaultRepo 那样当作非 git 目录）
@@ -272,14 +305,47 @@ const checkRev = (rev: unknown, head = false): string => {
   if (typeof rev !== 'string' || !(/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(rev) || (head && rev === 'HEAD'))) throw new Error(`invalid revision: ${rev}`)
   return rev
 }
+const checkRevPath = (rel: unknown): string => {
+  if (typeof rel !== 'string' || !rel || rel.includes('\0') || path.posix.isAbsolute(rel) || path.win32.isAbsolute(rel)) throw new Error(`invalid path: ${rel}`)
+  return rel
+}
 // 工作区对比的 HEAD 一侧（S14）、历史对比的旧版本（S15）：经常驻 cat-file 读，那个版本里没有这个文件时为 null。
 // `rev:./` 按 git 的工作目录（即笔记库）解析，笔记库是仓库子目录时也对。只读 git 对象、不碰文件系统，
-// 所以历史里改名前位于库外（../ 开头，来自 git:log）的路径也放行
+// 所以历史里改名前位于库外（../ 开头，来自 git:log）的路径也放行。
+// LFS 指针的对象在本地时给真实内容，否则原样给指针、由渲染进程显示占位（S17，悬停时绝不下载）
 ipcMain.handle('git:readRev', (_e, vault: string, rev: string, rel: string) => {
   const r = checkVault(vault)
   checkRev(rev, true)
-  if (typeof rel !== 'string' || !rel || rel.includes('\0') || path.posix.isAbsolute(rel) || path.win32.isAbsolute(rel)) throw new Error(`invalid path: ${rel}`)
-  return diffGit(r, (g) => g.readBlob(`${rev}:./${rel}`))
+  checkRevPath(rel)
+  return diffGit(r, (g) => g.readFileAt(`${rev}:./${rel}`))
+})
+// LFS 操作的失败经 IPC 只剩一段文本：前面加上按分类的说明（如缺 git-lfs、下载失败），渲染进程原样显示
+const explain = (e: unknown): never => {
+  throw e instanceof GitError && e.kind !== 'unknown' ? new Error(`${t(`gitErr_${e.kind}`)}\n${e.message}`) : e
+}
+// 用户点了"下载"的历史版本 LFS 指针（S17）：git lfs smudge，只读 git 对象和 LFS 存储，不写工作区
+ipcMain.handle('git:lfsSmudge', (_e, vault: string, rev: string, rel: string) => {
+  const r = checkVault(vault)
+  checkRev(rev, true)
+  checkRevPath(rel)
+  return diffGit(r, (g) => g.lfsSmudge(`${rev}:./${rel}`, rel)).catch(explain)
+})
+// 工作区里的 LFS 指针下载真实内容（S17）：库内规范相对路径、真实路径在库内、当前确实是指针才执行 git lfs pull。
+// 会改写工作区里的文件，和附件写入、恢复、孤儿删除串在同一条链上
+ipcMain.handle('git:lfsPull', (_e, vault: string, rel: string) => {
+  const r = checkVault(vault)
+  if (!relOk(rel)) throw new Error(`invalid path: ${rel}`)
+  const job = attaching
+    .then(() =>
+      diffGit(r, async (g) => {
+        const abs = await realInVault(r, rel)
+        if ((await fs.stat(abs)).size >= 1024 || !parseLfsPointer(await fs.readFile(abs))) return
+        await g.lfsPull(rel)
+      }),
+    )
+    .catch(explain)
+  attaching = job.catch(() => {})
+  return job
 })
 // 历史栏（S15）：当前笔记的 git log --follow
 ipcMain.handle('git:log', (_e, vault: string, rel: string) => {
@@ -379,6 +445,9 @@ ipcMain.handle('file:saveAttachment', (_e, vault: string, name: string | null, b
     const rel = await saveAttachment(r, attachmentName(name, new Date()), bytes)
     if (!fresh.has(r)) fresh.set(r, new Map())
     fresh.get(r)!.set(rel, Date.now() + FRESH_MS)
+    // 新附件可能按 .gitattributes 走 LFS（如 `*.png filter=lfs` 的第一张图）：重算 lfsUsed 并立即推送，没装 git-lfs 时面板随即提示
+    lfsUsedCache = null
+    pushGitState()
     return { path: rel, warn: await sizeWarning(r, rel, bytes.length) }
   })
   attaching = job.catch(() => {})

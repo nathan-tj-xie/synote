@@ -1,7 +1,8 @@
 import { execFileSync, type ChildProcess } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { classifyGitError, findGit, Git, GitError, parseBranch, parseLog, parseStatus, parseVersion, versionOk, type Exec } from './git'
 
@@ -110,6 +111,12 @@ describe('classifyGitError', () => {
     ['git-lfs filter-process: git-lfs: command not found\nfatal: the remote end hung up unexpectedly', 'lfsMissing'],
     ["git-lfs clean -- 'a.bin': git-lfs: command not found\nfatal: a.bin: clean filter 'lfs' failed", 'lfsMissing'],
     ["This repository is configured for Git LFS but 'git-lfs' was not found on your path.", 'lfsMissing'],
+    ["git: 'lfs' is not a git command. See 'git --help'.", 'lfsMissing'],
+    // lfsFilter（git-lfs 3.8 实测：smudge / pull 离线、checkout 时 smudge 失败）
+    ['Downloading a.png (5 B)\nError downloading object: a.png (0000000): Smudge error: Error downloading a.png (00…01): error initializing custom adapter', 'lfsFilter'],
+    ["Error initializing custom adapter\nFailed to fetch some objects from 'file:///x/remote.git'", 'lfsFilter'],
+    ['error: external filter \'git-lfs filter-process\' failed\nfatal: a.png: smudge filter lfs failed', 'lfsFilter'],
+    ["Smudge error: Error downloading a.png: Post \"https://x.invalid/info/lfs/objects/batch\": dial tcp: lookup x.invalid: Could not resolve host", 'lfsFilter'],
     // network
     ["fatal: unable to access 'https://x.invalid/a/': Could not resolve host: x.invalid", 'network'],
     ["fatal: unable to access 'https://127.0.0.1:1/x/': Failed to connect to 127.0.0.1 port 1 after 0 ms: Couldn't connect to server", 'network'],
@@ -596,5 +603,147 @@ describe('Git（系统 git）', () => {
     sh('commit', '-qm', 'link')
     rmSync(path.join(repo, 'attachments/l.png'))
     expect(await new Git('git', process.env.PATH!, repo, undefined, env).restoreSource('attachments/l.png')).toBeNull()
+  })
+
+  // LFS（S17）：本地 file:// 远端走 git-lfs 的 standalone transfer，不联网。没装 git-lfs 的机器跳过（CI 的 macOS / Windows 镜像都带）
+  const hasLfs = (() => {
+    try {
+      execFileSync('git', ['lfs', 'version'])
+      return true
+    } catch {
+      return false
+    }
+  })()
+  // 每条用例要跑十几条 git / git-lfs 命令，Windows CI 上远超默认的 5 s
+  const LFS_TIMEOUT = 60_000
+  // 带 --include 特殊字符的附件名：[ ] * , 和空格；Windows 文件名不能含 *，那里去掉 *
+  const SPECIAL = process.platform === 'win32' ? 'a b[1],c.png' : 'a b[1]*,c.png'
+  // 源仓库提交两版附件（第二版删掉 old.png）推到 bare 远端，再按 GIT_LFS_SKIP_SMUDGE=1 克隆：工作区全是指针、本地没有 LFS 对象。
+  // 笔记库是克隆里的 `笔 记` 子目录，附件名带 LFS --include 的特殊字符
+  const lfsRepo = () => {
+    const t = setup()
+    writeFileSync(t.globalConfig, '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n\tsmudge = git-lfs smudge -- %f\n\tprocess = git-lfs filter-process\n\trequired = true\n')
+    const src = path.join(t.dir, 'src')
+    const remote = path.join(t.dir, 'remote.git')
+    const clone = path.join(t.dir, 'clone')
+    const g = (cwd: string, ...a: (string | { input: string })[]) => {
+      const input = a.find((x) => typeof x !== 'string')?.input
+      return execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a.filter((x) => typeof x === 'string')], { cwd, env: t.env, input }).toString()
+    }
+    mkdirSync(path.join(src, '笔 记', 'attachments'), { recursive: true })
+    writeFileSync(path.join(src, '.gitattributes'), '笔?记/attachments/** filter=lfs diff=lfs merge=lfs -text\n')
+    const files = { [SPECIAL]: Buffer.alloc(3000, 1), 'x.png': Buffer.alloc(2000, 2), 'old.png': Buffer.alloc(2500, 3) }
+    for (const [n, b] of Object.entries(files)) writeFileSync(path.join(src, '笔 记', 'attachments', n), b)
+    g(t.dir, 'init', '-q', '--bare', '-b', 'main', remote)
+    g(src, 'init', '-q', '-b', 'main')
+    g(src, 'add', '.')
+    g(src, 'commit', '-qm', '1')
+    g(src, 'rm', '-q', '笔 记/attachments/old.png')
+    g(src, 'commit', '-qm', '2')
+    // LFS 的本地传输要 file:// URL，裸路径不行；Windows 上是 file:///C:/…
+    g(src, 'push', '-q', pathToFileURL(remote).href, 'main')
+    execFileSync('git', ['clone', '-q', pathToFileURL(remote).href, clone], { env: { ...t.env, GIT_LFS_SKIP_SMUDGE: '1' } })
+    return { ...t, vault: path.join(clone, '笔 记'), remote, files, g }
+  }
+
+  it.skipIf(!hasLfs)('LFS 已安装：历史指针先查本地对象，点了才 smudge；工作区指针按字面路径 lfs pull', async () => {
+    const { vault, remote, files, env, g } = lfsRepo()
+    const changed = vi.fn()
+    const git = new Git('git', process.env.PATH!, vault, changed, env)
+    const att = (n: string) => path.join(vault, 'attachments', n)
+    expect(await git.lfsInstalled()).toBe(true)
+    expect(await git.lfsUsed()).toBe(true)
+    // 工作区和 HEAD 里都是指针，本地没有对象：readFileAt 原样给指针，不下载
+    expect(readFileSync(att('x.png')).length).toBeLessThan(200)
+    const ptr = await git.readFileAt('HEAD:./attachments/x.png')
+    expect(ptr?.toString()).toMatch(/^version https:\/\/git-lfs/)
+    expect(await git.readFileAt('HEAD~1:./attachments/old.png')).toEqual(await git.readBlob('HEAD~1:./attachments/old.png'))
+
+    // 工作区：pull 只下这一个（带 [ ] * , 和空格的另一个仍是指针）。lfs.fetchexclude 排除了一切，pull 和下面的历史 smudge
+    // 照样下（用户点了才下载）
+    g(vault, 'config', 'lfs.fetchexclude', '*')
+    await git.lfsPull('attachments/x.png')
+    expect(readFileSync(att('x.png'))).toEqual(files['x.png'])
+    expect(readFileSync(att(SPECIAL)).length).toBeLessThan(200)
+    expect(changed).toHaveBeenCalled()
+    // 对象已在本地：历史读取直接换成真实内容
+    expect(await git.readFileAt('HEAD:./attachments/x.png')).toEqual(files['x.png'])
+
+    // 历史里删掉的：点了才 smudge，之后对象在本地，readFileAt 直接给内容
+    expect(await git.lfsSmudge('HEAD~1:./attachments/old.png', 'attachments/old.png')).toEqual(files['old.png'])
+    expect(await git.readFileAt('HEAD~1:./attachments/old.png')).toEqual(files['old.png'])
+    // 不是指针的原样返回
+    expect((await git.lfsSmudge('HEAD:./../.gitattributes', '../.gitattributes'))?.toString()).toContain('filter=lfs')
+
+    // 远端不可达：pull / smudge 失败分类为 lfsFilter，文件不动
+    renameSync(remote, `${remote}.gone`)
+    await expect(git.lfsPull(`attachments/${SPECIAL}`)).rejects.toMatchObject({ kind: 'lfsFilter' })
+    expect(readFileSync(att(SPECIAL)).length).toBeLessThan(200)
+    const orphanPtr = g(vault, 'hash-object', '-w', '--no-filters', '--stdin', { input: `version https://git-lfs.github.com/spec/v1\noid sha256:${'1'.repeat(64)}\nsize 5\n` }).trim()
+    await expect(git.lfsSmudge(orphanPtr, 'attachments/zz.png')).rejects.toMatchObject({ kind: 'lfsFilter' })
+    renameSync(`${remote}.gone`, remote)
+    await git.lfsPull(`attachments/${SPECIAL}`)
+    expect(readFileSync(att(SPECIAL))).toEqual(files[SPECIAL])
+    expect((await git.status()).files).toEqual([])
+    git.close()
+  }, LFS_TIMEOUT)
+
+  // 下载命令退出码 0 却没换出内容（比如被别的配置跳过）：用一个包装过的 git 模拟，smudge 原样吐回指针、pull 什么都不做
+  it.skipIf(!hasLfs || process.platform === 'win32')('下载"成功"后仍是指针：smudge / pull 都报 lfsFilter', async () => {
+    const { dir, vault, env } = lfsRepo()
+    const fake = path.join(dir, 'fake-git')
+    writeFileSync(fake, `#!/bin/sh\ncase " $* " in\n  *" lfs smudge "*) cat; exit 0;;\n  *" lfs pull "*) exit 0;;\nesac\nexec git "$@"\n`, { mode: 0o755 })
+    const git = new Git(fake, process.env.PATH!, vault, undefined, env)
+    await expect(git.lfsSmudge('HEAD~1:./attachments/old.png', 'attachments/old.png')).rejects.toMatchObject({ kind: 'lfsFilter', stderr: expect.stringContaining('still an LFS pointer') })
+    await expect(git.lfsPull('attachments/x.png')).rejects.toMatchObject({ kind: 'lfsFilter', stderr: expect.stringContaining('still an LFS pointer') })
+    git.close()
+  }, LFS_TIMEOUT)
+
+  // 没装 git-lfs：同上「PATH 里只放 git」的做法。读历史只靠 cat-file，照常给出指针；按属性仍能看出库用了 LFS
+  it.skipIf(!hasLfs || process.platform === 'win32')('LFS 未安装：指针照常读出，lfs pull / smudge 分类为 lfsMissing', async () => {
+    const { dir, vault, env } = lfsRepo()
+    const bin = path.join(dir, 'bin')
+    mkdirSync(bin)
+    symlinkSync(execFileSync('git', ['--exec-path']).toString().trim() + '/git', path.join(bin, 'git'))
+    // 全局 filter 配置也去掉（macOS 上常见的状态），否则 status 会因找不到 git-lfs 失败
+    const noFilter = { ...env, GIT_CONFIG_GLOBAL: path.join(dir, 'empty') }
+    writeFileSync(noFilter.GIT_CONFIG_GLOBAL, '')
+    const git = new Git(path.join(bin, 'git'), bin, vault, undefined, noFilter)
+    expect(await git.lfsInstalled()).toBe(false)
+    expect(await git.lfsUsed()).toBe(true)
+    expect((await git.readFileAt('HEAD:./attachments/x.png'))?.toString()).toMatch(/^version https:\/\/git-lfs/)
+    await expect(git.lfsPull('attachments/x.png')).rejects.toMatchObject({ kind: 'lfsMissing' })
+    await expect(git.lfsSmudge('HEAD:./attachments/x.png', 'attachments/x.png')).rejects.toMatchObject({ kind: 'lfsMissing' })
+    // 有 filter.lfs.required 却找不到 git-lfs：status 需要重新 hash 指针时失败，分类为 lfsMissing（主进程据此给 lfsError）
+    const required = new Git(path.join(bin, 'git'), bin, vault, undefined, env)
+    writeFileSync(path.join(vault, 'attachments/x.png'), readFileSync(path.join(vault, 'attachments/x.png'))) // 改 mtime
+    await expect(required.status()).rejects.toMatchObject({ kind: 'lfsMissing' })
+    git.close()
+    required.close()
+  }, LFS_TIMEOUT)
+
+  // 按扩展名配置 LFS、还没有任何已跟踪的 PNG：第一张粘贴进来的未跟踪图片就要让 lfsUsed 为 true（codex #37 第三轮）
+  it('lfsUsed 看 attachments/ 下的未跟踪文件，忽略的不算', async () => {
+    const { repo, env, sh } = setup()
+    sh('init', '-q')
+    writeFileSync(path.join(repo, '.gitattributes'), '*.png filter=lfs diff=lfs merge=lfs -text\n')
+    writeFileSync(path.join(repo, '.gitignore'), 'attachments/ignored.png\n')
+    mkdirSync(path.join(repo, 'attachments'))
+    writeFileSync(path.join(repo, 'attachments/a.pdf'), 'pdf')
+    writeFileSync(path.join(repo, 'attachments/ignored.png'), 'x')
+    sh('add', '.')
+    sh('commit', '-qm', '1')
+    const git = new Git('git', process.env.PATH!, repo, undefined, env)
+    expect(await git.lfsUsed()).toBe(false) // 只有 pdf（不走 LFS）和被忽略的 png
+    writeFileSync(path.join(repo, 'attachments/图 [1].png'), 'png')
+    expect(await git.lfsUsed()).toBe(true)
+  })
+
+  it('没有 LFS 属性的库 lfsUsed 为 false', async () => {
+    const { repo, env, sh } = setup()
+    sh('init', '-q')
+    writeFileSync(path.join(repo, 'a.md'), 'a\n')
+    sh('add', '.')
+    expect(await new Git('git', process.env.PATH!, repo, undefined, env).lfsUsed()).toBe(false)
   })
 })
