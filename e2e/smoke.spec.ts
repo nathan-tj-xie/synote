@@ -1078,6 +1078,7 @@ test('pasting the same image twice writes one file; dropped files keep their nam
   const file = path.join(vault, '我的 笔记', 'n.md')
   const link = /!\[image-\d{8}-\d{6}\]\(\.\.\/attachments\/(image-\d{8}-\d{6}\.png)\)/g
   await expect.poll(() => [...readFileSync(file, 'utf8').matchAll(link)].length).toBe(1)
+  await expect(win.locator('.cm-lp-image img')).toHaveCount(1) // 光标换到下一行，不点别处图片也直接渲染
   await fire(win, 'paste', 'image.png', png, 'image/png')
   await expect.poll(() => [...readFileSync(file, 'utf8').matchAll(link)].length).toBe(2)
   const names = [...readFileSync(file, 'utf8').matchAll(link)].map((m) => m[1])
@@ -1301,7 +1302,7 @@ test('an attachment pasted and then undone can be cleaned', async () => {
   await win.keyboard.press('End')
   await fire(win, 'drop', 'oops.pdf', [9, 9], 'application/pdf')
   const file = path.join(vault, 'n.md')
-  await expect.poll(() => readFileSync(file, 'utf8')).toBe('开头[oops](attachments/oops.pdf)')
+  await expect.poll(() => readFileSync(file, 'utf8')).toBe('开头[oops](attachments/oops.pdf)\n')
   await win.keyboard.press('ControlOrMeta+z')
   await expect.poll(() => readFileSync(file, 'utf8')).toBe('开头')
   const dialog = await cleanOrphans(win)

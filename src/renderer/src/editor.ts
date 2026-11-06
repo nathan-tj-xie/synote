@@ -224,11 +224,14 @@ function attach(e: Event, files: FileList | undefined, paste: boolean, at?: numb
     if (!s || !r) return false // 标签页已关，或外部改动重新加载过（位置已作废）
     const spec: TransactionSpec = { effects: dropPending.of(id) }
     if (links.length && !locked) {
-      const insert = links.join('\n')
+      let insert = links.join('\n')
       const cur = s.selection.main
+      // 光标还停在发起时那段上才把它放到链接后面（换到下一行，否则光标所在行显示源码、图片不渲染），否则只随改动映射
+      if (cur.from === r.from && cur.to === r.to) {
+        insert += '\n'
+        spec.selection = { anchor: r.from + insert.length }
+      }
       spec.changes = { from: r.from, to: r.to, insert }
-      // 光标还停在发起时那段上才把它放到链接后面，否则只随改动映射
-      if (cur.from === r.from && cur.to === r.to) spec.selection = { anchor: r.from + insert.length }
       spec.userEvent = 'input.paste'
     }
     if (note === shown) view!.dispatch(spec)
