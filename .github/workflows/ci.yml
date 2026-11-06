@@ -1,6 +1,7 @@
 name: CI
-# 不在每次 push / PR 时跑：代码审查通过、准备合并进 main 前手动触发一次（gh workflow run ci.yml --ref <分支>）
+# PR 在代码审查通过后才开，所以随 PR 自动跑基本只跑一次；workflow_dispatch 留着手动重跑
 on:
+  pull_request:
   workflow_dispatch:
 
 jobs:
