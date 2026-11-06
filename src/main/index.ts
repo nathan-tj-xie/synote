@@ -57,6 +57,8 @@ async function commitVault(dir: string): Promise<void> {
   // 以下同步完成：释放旧库的服务、换上新库的、切 root
   watcher?.close()
   watcher = w
+  gitDirWatcher?.w?.close()
+  gitDirWatcher = null
   useIndexer(proc, dir)
   root = dir
   gitGen++ // 进行中的 git 状态查询作废
@@ -218,9 +220,32 @@ async function gitState(): Promise<GitState> {
 // 只用传入的实例，期间全局的 git 被替换或置空也不受影响
 async function queryGit(g: Git, version: string): Promise<GitState> {
   if (!(await g.isRepo())) return { status: 'notRepo', version }
+  await watchGitDir(g)
   const [identity, st, lfs] = await Promise.all([g.identity(), lfsStatus(g), g.lfsInstalled()])
   merging = st.merging
   return { status: 'ready', version, ...identity, ...st, lfs, lfsUsed: !lfs && (await lfsUsedOf(g)) }
+}
+
+// 笔记库是仓库子目录或 git worktree 时，git 目录（MERGE_HEAD、index、HEAD 所在）不在笔记库的 watcher 里：单独监听它的顶层，
+// 外部在终端里完成 / 放弃合并、提交等只动 .git 的操作也能推送状态（S16）。按 git 实例只查一次
+// shortcut: 只看 git 目录顶层，不看 common dir 的 refs；外部 fetch / push 只改 refs 的情况要等下一次状态查询，有人反馈再监视 refs
+let gitDirWatcher: { g: Git; w: FSWatcher | null } | null = null
+async function watchGitDir(g: Git) {
+  if (gitDirWatcher?.g === g) return
+  const dir = (await g.run(['rev-parse', '--absolute-git-dir'])).trim()
+  if (gitDirWatcher?.g === g || g.cwd !== root) return // 期间另一次查询已经建好，或已换库
+  gitDirWatcher?.w?.close()
+  const rel = path.relative(g.cwd, dir)
+  let w: FSWatcher | null = null
+  // 监听失败（目录被删等）只记日志：状态查询照常，退回只靠笔记库的 watcher
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    try {
+      w = watch(dir, () => pushGitState()).on('error', (e) => console.error('[git] git dir watch failed', e))
+    } catch (e) {
+      console.error('[git] cannot watch git dir', e)
+    }
+  }
+  gitDirWatcher = { g, w }
 }
 
 // lfsUsed 要扫 attachments/ 下所有文件的属性（只在没装 git-lfs 时查）：按 git 实例缓存，

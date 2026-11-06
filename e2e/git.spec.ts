@@ -464,3 +464,19 @@ test('merge: restored after restart, abort with confirmation, follows merges sta
   await expect(banner(w)).toHaveCount(0, { timeout: 10_000 })
   await again.app.close()
 })
+
+// 笔记库是仓库子目录：.git 不在笔记库的监听范围里，外部完成合并（只动 .git）也要能退出合并中
+test('merge: a subfolder vault follows a merge finished outside', async () => {
+  const { app, win, vault, git, pushFromOther } = await launchRepo({ 'sub/a.md': 'a\n' }, true, 'sub')
+  pushFromOther('sub/a.md', '远端\n')
+  writeFileSync(path.join(vault, 'a.md'), '本地\n')
+  git('commit', '-qam', '本地')
+  expect(() => git('pull', '-q', '--no-rebase', '--no-edit')).toThrow()
+  await expect(banner(win)).toContainText('1 个冲突文件', { timeout: 10_000 })
+  writeFileSync(path.join(vault, 'a.md'), '合并\n')
+  git('add', 'sub/a.md')
+  await expect(banner(win)).toContainText('冲突已全部解决', { timeout: 10_000 })
+  git('commit', '-q', '--no-edit')
+  await expect(banner(win)).toHaveCount(0, { timeout: 10_000 })
+  await app.close()
+})
