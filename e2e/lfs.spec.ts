@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 // LFS 兼容（S17）：本地 bare 远端 + git-lfs 的 file:// 传输（standalone transfer，不联网）。
 // 没装 git-lfs 的机器造不出 LFS 仓库，整个文件跳过（CI 的 macOS 镜像带 git-lfs）
@@ -19,8 +20,9 @@ test.skip(!hasLfs, 'git-lfs not installed')
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64')
 const OLD = Buffer.concat([PNG, Buffer.from('old')]) // 尾部多几个字节仍能显示，内容（oid）和 p.png 不同
 const PDF = Buffer.from('%PDF-1.4 假的\n')
-// 文件名里拼出一个 command 链接（codex #37 审查）：悬停里只能显示成字面文字，不能变成可点的编辑器命令
-const EVIL = '[下载](command:editor.action.deleteLines).png'
+// 文件名里拼出一个 command 链接（codex #37 审查）：悬停里只能显示成字面文字，不能变成可点的编辑器命令。
+// Windows 文件名不能含 :，那里换成 -（仍是一段会被渲染成链接的 Markdown，验证转义）
+const EVIL = process.platform === 'win32' ? '[下载](command-editor.action.deleteLines).png' : '[下载](command:editor.action.deleteLines).png'
 const FILTER = '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n\tsmudge = git-lfs smudge -- %f\n\tprocess = git-lfs filter-process\n\trequired = true\n'
 
 // 源仓库：v1 的 a.md 引用 old.png 和一个文件名里拼了 Markdown 命令链接的图片；v2 删掉这两个，改引用 p.png 和 d.pdf。按 GIT_LFS_SKIP_SMUDGE=1 克隆成笔记库：附件全是指针，本地没有对象。
@@ -53,8 +55,9 @@ async function launchLfs(lfs: boolean) {
   writeFileSync(path.join(src, 'a.md'), '首行\n\n![图](attachments/p.png)\n\n看 [文档](attachments/d.pdf)\n')
   git(src, 'add', '.')
   git(src, 'commit', '-qm', 'v2')
-  git(src, 'push', '-q', `file://${remote}`, 'main')
-  execFileSync('git', ['clone', '-q', `file://${remote}`, vault], { env: { ...env, GIT_LFS_SKIP_SMUDGE: '1' } })
+  // file:// URL 按平台拼（Windows 上是 file:///C:/…）
+  git(src, 'push', '-q', pathToFileURL(remote).href, 'main')
+  execFileSync('git', ['clone', '-q', pathToFileURL(remote).href, vault], { env: { ...env, GIT_LFS_SKIP_SMUDGE: '1' } })
   return { ...(await launchApp(base, vault, lfs)), appConfig }
 }
 
@@ -113,11 +116,18 @@ test('LFS installed: pointer placeholder downloads in place, dedupe by oid, hist
   await items.nth(1).click()
   // 长行在窄窗口里会折行：只认以 `![alt` 开头的那一段
   const imgLine = (alt: string) => win.locator('.monaco-diff-editor .editor.original .view-line', { hasText: new RegExp(`^!\\[${alt}`) })
+  const placeholder = win.locator('.monaco-hover').filter({ hasText: 'LFS 内容未下载' })
+  // diff 刚算完时行还在重排，第一次悬停可能落空：移开再悬停，直到弹出占位
+  const hoverUntilPlaceholder = (alt: string) =>
+    expect(async () => {
+      await win.mouse.move(0, 0)
+      await imgLine(alt).hover({ position: { x: 12, y: 8 } })
+      await expect(placeholder).toBeVisible({ timeout: 2000 })
+    }).toPass({ timeout: 15_000 })
   // 恶意文件名：悬停里原样显示文字，只有我们自己的那一个链接；点它也只是下载，正文不变
-  await expect(imgLine('坏')).toBeVisible({ timeout: 10_000 })
-  await imgLine('坏').hover({ position: { x: 12, y: 8 } })
-  const evil = win.locator('.monaco-hover').filter({ hasText: 'LFS 内容未下载' })
-  await expect(evil).toContainText(EVIL, { timeout: 10_000 })
+  await hoverUntilPlaceholder('坏')
+  const evil = placeholder
+  await expect(evil).toContainText(EVIL)
   await expect(evil.getByRole('link')).toHaveCount(1)
   await evil.getByRole('link', { name: '下载' }).click()
   await expect(win.locator('.monaco-hover img')).toBeVisible({ timeout: 10_000 })
@@ -125,11 +135,9 @@ test('LFS installed: pointer placeholder downloads in place, dedupe by oid, hist
   expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('首行\n\n![图](attachments/p.png)\n\n看 [文档](attachments/d.pdf)\n')
   await win.mouse.move(0, 0)
 
-  const line = imgLine('旧')
-  await expect(line).toBeVisible()
-  await line.hover({ position: { x: 12, y: 8 } })
-  const hover = win.locator('.monaco-hover').filter({ hasText: 'LFS 内容未下载' })
-  await expect(hover).toBeVisible({ timeout: 10_000 })
+  await hoverUntilPlaceholder('旧')
+  const hover = placeholder
+  await expect(hover).toContainText('old.png')
   expect(() => readFileSync(obj)).toThrow() // 悬停没有触发下载
   await hover.getByRole('link', { name: '下载' }).click()
   // 对象存进了本地 LFS 存储，之后读历史直接命中
@@ -139,6 +147,8 @@ test('LFS installed: pointer placeholder downloads in place, dedupe by oid, hist
 })
 
 test('LFS not installed: git panel prompts to install, download reports it, status filter failure keeps git mode', async () => {
+  // Git for Windows 把 git-lfs 和 git 依赖的 DLL 放在同一个 mingw64/bin 里，造不出"只有 git、没有 git-lfs"（同 git.test.ts）
+  test.skip(process.platform === 'win32', 'cannot separate git-lfs from Git for Windows')
   const { app, win, vault, appConfig } = await launchLfs(false)
   // 占位照常显示；点"下载"报缺 git-lfs，文件不动
   await win.getByRole('treeitem', { name: 'a.md' }).click()
@@ -166,6 +176,8 @@ test('LFS not installed: git panel prompts to install, download reports it, stat
 
 // 按扩展名配置 LFS（`*.png filter=lfs`）、仓库里还没有任何 PNG：没装 git-lfs 时起初不提示，粘贴第一张图后面板随即提示（codex #37 第三轮）
 test('LFS not installed: the first pasted attachment matching *.png filter=lfs brings up the install prompt', async () => {
+  // Git for Windows 把 git-lfs 和 git 依赖的 DLL 放在同一个 mingw64/bin 里，造不出"只有 git、没有 git-lfs"（同 git.test.ts）
+  test.skip(process.platform === 'win32', 'cannot separate git-lfs from Git for Windows')
   const base = mkdtempSync(path.join(tmpdir(), 'synote-lfs-e2e-'))
   const vault = path.join(base, 'vault')
   mkdirSync(vault)

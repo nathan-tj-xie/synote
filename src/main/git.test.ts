@@ -2,6 +2,7 @@ import { execFileSync, type ChildProcess } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { classifyGitError, findGit, Git, GitError, parseBranch, parseLog, parseStatus, parseVersion, versionOk, type Exec } from './git'
 
@@ -613,6 +614,8 @@ describe('Git（系统 git）', () => {
       return false
     }
   })()
+  // 带 --include 特殊字符的附件名：[ ] * , 和空格；Windows 文件名不能含 *，那里去掉 *
+  const SPECIAL = process.platform === 'win32' ? 'a b[1],c.png' : 'a b[1]*,c.png'
   // 源仓库提交两版附件（第二版删掉 old.png）推到 bare 远端，再按 GIT_LFS_SKIP_SMUDGE=1 克隆：工作区全是指针、本地没有 LFS 对象。
   // 笔记库是克隆里的 `笔 记` 子目录，附件名带 LFS --include 的特殊字符
   const lfsRepo = () => {
@@ -627,7 +630,7 @@ describe('Git（系统 git）', () => {
     }
     mkdirSync(path.join(src, '笔 记', 'attachments'), { recursive: true })
     writeFileSync(path.join(src, '.gitattributes'), '笔?记/attachments/** filter=lfs diff=lfs merge=lfs -text\n')
-    const files = { 'a b[1]*,c.png': Buffer.alloc(3000, 1), 'x.png': Buffer.alloc(2000, 2), 'old.png': Buffer.alloc(2500, 3) }
+    const files = { [SPECIAL]: Buffer.alloc(3000, 1), 'x.png': Buffer.alloc(2000, 2), 'old.png': Buffer.alloc(2500, 3) }
     for (const [n, b] of Object.entries(files)) writeFileSync(path.join(src, '笔 记', 'attachments', n), b)
     g(t.dir, 'init', '-q', '--bare', '-b', 'main', remote)
     g(src, 'init', '-q', '-b', 'main')
@@ -635,8 +638,9 @@ describe('Git（系统 git）', () => {
     g(src, 'commit', '-qm', '1')
     g(src, 'rm', '-q', '笔 记/attachments/old.png')
     g(src, 'commit', '-qm', '2')
-    g(src, 'push', '-q', `file://${remote}`, 'main') // LFS 的本地传输要 file:// URL，裸路径不行
-    execFileSync('git', ['clone', '-q', `file://${remote}`, clone], { env: { ...t.env, GIT_LFS_SKIP_SMUDGE: '1' } })
+    // LFS 的本地传输要 file:// URL，裸路径不行；Windows 上是 file:///C:/…
+    g(src, 'push', '-q', pathToFileURL(remote).href, 'main')
+    execFileSync('git', ['clone', '-q', pathToFileURL(remote).href, clone], { env: { ...t.env, GIT_LFS_SKIP_SMUDGE: '1' } })
     return { ...t, vault: path.join(clone, '笔 记'), remote, files, g }
   }
 
@@ -658,7 +662,7 @@ describe('Git（系统 git）', () => {
     g(vault, 'config', 'lfs.fetchexclude', '*')
     await git.lfsPull('attachments/x.png')
     expect(readFileSync(att('x.png'))).toEqual(files['x.png'])
-    expect(readFileSync(att('a b[1]*,c.png')).length).toBeLessThan(200)
+    expect(readFileSync(att(SPECIAL)).length).toBeLessThan(200)
     expect(changed).toHaveBeenCalled()
     // 对象已在本地：历史读取直接换成真实内容
     expect(await git.readFileAt('HEAD:./attachments/x.png')).toEqual(files['x.png'])
@@ -671,13 +675,13 @@ describe('Git（系统 git）', () => {
 
     // 远端不可达：pull / smudge 失败分类为 lfsFilter，文件不动
     renameSync(remote, `${remote}.gone`)
-    await expect(git.lfsPull('attachments/a b[1]*,c.png')).rejects.toMatchObject({ kind: 'lfsFilter' })
-    expect(readFileSync(att('a b[1]*,c.png')).length).toBeLessThan(200)
+    await expect(git.lfsPull(`attachments/${SPECIAL}`)).rejects.toMatchObject({ kind: 'lfsFilter' })
+    expect(readFileSync(att(SPECIAL)).length).toBeLessThan(200)
     const orphanPtr = g(vault, 'hash-object', '-w', '--no-filters', '--stdin', { input: `version https://git-lfs.github.com/spec/v1\noid sha256:${'1'.repeat(64)}\nsize 5\n` }).trim()
     await expect(git.lfsSmudge(orphanPtr, 'attachments/zz.png')).rejects.toMatchObject({ kind: 'lfsFilter' })
     renameSync(`${remote}.gone`, remote)
-    await git.lfsPull('attachments/a b[1]*,c.png')
-    expect(readFileSync(att('a b[1]*,c.png'))).toEqual(files['a b[1]*,c.png'])
+    await git.lfsPull(`attachments/${SPECIAL}`)
+    expect(readFileSync(att(SPECIAL))).toEqual(files[SPECIAL])
     expect((await git.status()).files).toEqual([])
     git.close()
   })
