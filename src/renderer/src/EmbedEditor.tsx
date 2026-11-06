@@ -7,7 +7,7 @@ import { useTranslation } from 'react-i18next'
 import { i18next } from '../../shared/i18n'
 import { canWrite, renderEmbed, type Embed } from './embed'
 import s from './EmbedEditor.module.css'
-import { sameNote, writeEmbed } from './livePreview'
+import { besideBlock, sameNote, writeEmbed } from './livePreview'
 import o from './Orphans.module.css'
 import { useUi } from './store'
 
@@ -20,14 +20,16 @@ export function EmbedEditor() {
   return req.at ? <Inline key={req.id} req={req} /> : <Editor key={req.id} req={req} />
 }
 
-// 关闭后焦点回到正文，光标放在嵌入块之后；块级的放到下一行开头，免得接着输入的字写进结尾的 `$$` / 围栏。
-// 已打开了下一个（同一批更新里）就不关它；视图已换成别的笔记时不动光标
+// 关闭后（保存或取消）焦点回到正文，光标放在嵌入块之后：块级的放到下一行开头（文末时补一个换行，besideBlock），
+// 免得接着输入的字写进结尾的 `$$` / 围栏。已打开了下一个（同一批更新里）就不关它；视图已换成别的笔记时不动光标
 function done(req: Req, e: Embed) {
   if (useUi.getState().embed?.id === req.id) useUi.getState().setEmbed(null)
   if (!sameNote(req.view, req.note)) return
-  const len = req.view.state.doc.length
-  req.view.dispatch({ selection: { anchor: Math.min(!e.block || e.to >= len ? e.to : e.to + 1, len) } })
-  req.view.focus()
+  const { view } = req
+  const there = e.text !== '' && view.state.sliceDoc(e.from, e.to) === e.text // 新建后取消的还没写进正文
+  if (e.block && there) besideBlock(view, e, true)
+  else view.dispatch({ selection: { anchor: Math.min(e.to, view.state.doc.length) } })
+  view.focus()
 }
 
 // 写不进去（换了笔记、正文那段已经变了）：报错并关掉

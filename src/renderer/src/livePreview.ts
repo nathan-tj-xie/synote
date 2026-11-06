@@ -553,6 +553,17 @@ function createOnEnter(view: EditorView): boolean {
   return true
 }
 
+// 光标移到块级嵌入块旁边能接着输入的位置：下一行行首 / 上一行行尾，不贴在 `$$`、围栏上（贴着输入会破坏闭合）。
+// 块在文末 / 文首、没有相邻行时补一个换行
+export function besideBlock(view: EditorView, e: Embed, fwd: boolean) {
+  const len = view.state.doc.length
+  const edge = fwd ? e.to >= len : e.from <= 0
+  if (edge && !view.state.readOnly) {
+    const at = fwd ? len : 0
+    view.dispatch({ changes: { from: at, insert: '\n' }, selection: { anchor: fwd ? len + 1 : 0 }, scrollIntoView: true, userEvent: 'input' })
+  } else view.dispatch({ selection: { anchor: edge ? (fwd ? len : 0) : fwd ? e.to + 1 : e.from - 1 }, scrollIntoView: true })
+}
+
 // 方向键把嵌入块当成一个整体：先停在它上面（选中），再按一次越过；停在上面时 Enter 打开编辑
 function arrow(dir: 'left' | 'right' | 'up' | 'down') {
   return (view: EditorView): boolean => {
@@ -561,9 +572,9 @@ function arrow(dir: 'left' | 'right' | 'up' | 'down') {
     const sel = selectedEmbed(state)
     const set = (anchor: number, head = anchor) => (view.dispatch({ selection: { anchor, head }, scrollIntoView: true }), true)
     if (sel) {
-      if (dir === 'left' || dir === 'right') return set(fwd ? sel.to : sel.from)
-      if (!sel.block) return false
-      return set(fwd ? Math.min(sel.to + 1, state.doc.length) : Math.max(sel.from - 1, 0))
+      if (!sel.block) return dir === 'left' || dir === 'right' ? set(fwd ? sel.to : sel.from) : false
+      besideBlock(view, sel, fwd)
+      return true
     }
     const r = state.selection.main
     if (!r.empty) return false
