@@ -124,29 +124,32 @@ test('LFS installed: pointer placeholder downloads in place, dedupe by oid, hist
   const placeholder = win.locator('.monaco-hover').filter({ hasText: 'LFS 内容未下载' })
   const thumb = win.locator('.monaco-hover img')
   // diff 刚算完时行还在重排，悬停可能落空；下载后的自动重弹也不保证（CI 上慢）：移开再悬停，直到弹出期望的内容
-  const hoverUntil = (alt: string, shown: typeof placeholder) =>
+  // 悬停弹出后，任何落在编辑器外的 mousemove / mouseleave 都会让 Monaco 收起它（DOM 还在，只是 display: none），
+  // Windows CI 上窗口叠放变化时系统会给窗口补发真实鼠标事件。所以"点悬停里的链接"也要和悬停一起重做：收起了就重新悬停再点
+  const hoverUntil = (alt: string, shown: typeof placeholder, then?: () => Promise<void>) =>
     expect(async () => {
       await win.mouse.move(0, 0)
       await imgLine(alt).hover({ position: { x: 12, y: 8 } })
       await expect(shown).toBeVisible({ timeout: 2000 })
+      await then?.()
     }).toPass({ timeout: 15_000 })
-  const hoverUntilPlaceholder = (alt: string) => hoverUntil(alt, placeholder)
+  const download = () => placeholder.getByRole('link', { name: '下载' }).click({ timeout: 2000 })
   // 恶意文件名：悬停里原样显示文字，只有我们自己的那一个链接；点它也只是下载，正文不变
-  await hoverUntilPlaceholder('坏')
-  const evil = placeholder
-  await expect(evil).toContainText(EVIL)
-  await expect(evil.getByRole('link')).toHaveCount(1)
-  await evil.getByRole('link', { name: '下载' }).click()
+  await hoverUntil('坏', placeholder, async () => {
+    await expect(placeholder).toContainText(EVIL)
+    await expect(placeholder.getByRole('link')).toHaveCount(1)
+    await download()
+  })
   await hoverUntil('坏', thumb)
   await expect(win.locator('.cm-content')).toHaveText(/首行[\s\S]*看 文档/) // 编辑器正文（CM6，diff 右侧以它为准）没被删行
   expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('首行\n\n![图](attachments/p.png)\n\n看 [文档](attachments/d.pdf)\n')
   await win.mouse.move(0, 0)
 
-  await hoverUntilPlaceholder('旧')
-  const hover = placeholder
-  await expect(hover).toContainText('old.png')
-  expect(() => readFileSync(obj)).toThrow() // 悬停没有触发下载
-  await hover.getByRole('link', { name: '下载' }).click()
+  await hoverUntil('旧', placeholder, async () => {
+    await expect(placeholder).toContainText('old.png')
+    expect(() => readFileSync(obj)).toThrow() // 悬停没有触发下载
+    await download()
+  })
   // 对象存进了本地 LFS 存储，之后读历史直接命中
   await expect.poll(() => existsSync(obj) && readFileSync(obj).equals(OLD), { timeout: 10_000 }).toBe(true)
   await hoverUntil('旧', thumb)

@@ -1160,6 +1160,9 @@ test('[[ completion writes a standard relative link', async () => {
   await win.keyboard.type('[[目标')
   const popup = win.locator('.cm-tooltip-autocomplete')
   await expect(popup.getByRole('option').first()).toHaveText('笔记/目标 笔记.md')
+  // CodeMirror 的 interactionDelay（默认 75ms）：补全弹出后这段时间内的 Enter 不接受补全、照常换行（防止用户没看到弹窗就误选），
+  // 弹出的时刻早于选项可见，可见后再等满这段时间
+  await win.waitForTimeout(100)
   await win.keyboard.press('Enter')
   await expect(popup).toHaveCount(0)
   await expect.poll(() => readFileSync(path.join(vault, '日记/今天.md'), 'utf8'), { timeout: 5000 }).toBe('开头\n[目标 笔记](../笔记/目标%20笔记.md)')
