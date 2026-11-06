@@ -187,7 +187,9 @@ function attach(e: Event, files: FileList | undefined, paste: boolean, at?: numb
   if (locked || !vault || !shown || !view) return true
   const id = ++pendingSeq
   const sel = view.state.selection.main
-  view.dispatch({ effects: addPending.of(at != null ? { id, from: at, to: at } : { id, from: sel.from, to: sel.to }) }) // 拖入：链接落在松手处
+  // 拖入：链接落在松手处，光标也移过去（否则与光标同行时插完仍显示源码）
+  if (at != null) view.dispatch({ selection: { anchor: at }, effects: addPending.of({ id, from: at, to: at }) })
+  else view.dispatch({ effects: addPending.of({ id, from: sel.from, to: sel.to }) })
   const v = vault
   const g = vaultGen
   const note = shown

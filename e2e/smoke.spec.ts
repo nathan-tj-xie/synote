@@ -1091,6 +1091,18 @@ test('pasting the same image twice writes one file; dropped files keep their nam
   await app.close()
 })
 
+// 光标在行首、图片拖到同一行行末：光标跟到落点后换行，图片直接渲染
+test('an image dropped on the cursor line renders right away', async () => {
+  const { app, win, vault } = await launch({ 'n.md': '开头' })
+  await win.getByRole('treeitem', { name: 'n.md' }).click()
+  await win.locator('.cm-content').click()
+  await win.keyboard.press('Home')
+  await fire(win, 'drop', 'pic.png', [...PNG], 'image/png')
+  await expect.poll(() => readFileSync(path.join(vault, 'n.md'), 'utf8')).toBe('开头![pic](attachments/pic.png)\n')
+  await expect(win.locator('.cm-lp-image img')).toHaveCount(1)
+  await app.close()
+})
+
 test('a missing attachment shows a placeholder and the reference is kept', async () => {
   const src = '首行\n\n![缺](attachments/gone.png)\n'
   const { app, win, vault } = await launch({ 'a.md': src })
