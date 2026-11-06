@@ -1,6 +1,6 @@
 import { _electron as electron, expect, test, type Page } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -222,12 +222,15 @@ test('git panel: files staged outside a subfolder vault block the commit', async
   const card = win.getByRole('alert').filter({ hasText: '提交失败' })
   await expect(card).toContainText('暂存区里有笔记库之外的文件')
   await expect(card.getByRole('listitem')).toHaveText(["库外 's.md"])
-  const cmd = `git -C '${realpathSync(repo)}' --literal-pathspecs reset -q -- '库外 '\\''s.md'`
+  // 仓库根按 git 自己的写法（macOS 上是 /private/var/…，Windows 上是 C:/…）
+  const cmd = `git -C '${git('rev-parse', '--show-toplevel').trim()}' --literal-pathspecs reset -q -- '库外 '\\''s.md'`
   await expect(card.getByText(cmd, { exact: true })).toBeVisible()
   expect(git('log', '--format=%s')).toBe('init\n')
   expect(git('-c', 'core.quotePath=false', 'status', '--porcelain')).toBe("M  \"库外 's.md\"\n M 笔记/a.md\n")
   // 照卡片上的命令取消暂存后重试：只提交库内
-  execFileSync('/bin/sh', ['-c', cmd])
+  // 命令是 POSIX shell 写法；Windows 上没有 /bin/sh，直接取消暂存
+  if (process.platform === 'win32') git('--literal-pathspecs', 'reset', '-q', '--', "库外 's.md")
+  else execFileSync('/bin/sh', ['-c', cmd])
   await win.getByRole('button', { name: '全部暂存并提交' }).click()
   await expect.poll(() => git('log', '-1', '--format=%s')).toBe('x\n')
   expect(git('-c', 'core.quotePath=false', 'show', '--name-only', '--format=', 'HEAD')).toBe('笔记/a.md\n')

@@ -366,12 +366,12 @@ describe('Git（系统 git）', () => {
     sh('init', '-q', '-b', 'main')
     sh('remote', 'add', 'origin', remote)
     mkdirSync(path.join(repo, '笔记'))
-    writeFileSync(path.join(repo, '笔记', '*.md'), '1\n') // 文件名里的 * 按字面处理
+    writeFileSync(path.join(repo, '笔记', '[x].md'), '1\n') // 文件名里的 [ ] 按字面处理（按通配符会去匹配 x.md）
     writeFileSync(path.join(repo, '笔记', 'b.md'), '1\n')
     writeFileSync(path.join(repo, '库外.md'), '1\n')
     const git = new Git('git', process.env.PATH!, path.join(repo, '笔记'), undefined, env)
     expect((await git.status()).files).toEqual([
-      { path: '*.md', x: '?', y: '?' },
+      { path: '[x].md', x: '?', y: '?' },
       { path: 'b.md', x: '?', y: '?' },
     ])
     expect(await git.log()).toEqual([])
@@ -385,9 +385,9 @@ describe('Git（系统 git）', () => {
     expect(await git.stagedOutside()).toEqual(['库外.md'])
     sh('config', '--unset', 'diff.relative')
     sh('reset', '-q', '--', '库外.md')
-    await git.stage(['*.md'])
+    await git.stage(['[x].md'])
     expect((await git.status()).files.map((f) => f.x + f.y)).toEqual(['A.', '??'])
-    await git.unstage(['*.md']) // 还没有 HEAD：从暂存区移除
+    await git.unstage(['[x].md']) // 还没有 HEAD：从暂存区移除
     expect((await git.status()).files.map((f) => f.x + f.y)).toEqual(['??', '??'])
     await git.stage(['.'])
     // 缺身份：useConfigOnly 让 git 报错，而不是用主机名拼一个
@@ -408,12 +408,12 @@ describe('Git（系统 git）', () => {
     // 另一个克隆推一个新提交：push 被拒，pull 合并后再 push
     const other = path.join(dir, 'other')
     execFileSync('git', ['clone', '-q', remote, other], { env })
-    writeFileSync(path.join(other, '笔记', '*.md'), '远端\n')
+    writeFileSync(path.join(other, '笔记', '[x].md'), '远端\n')
     execFileSync('git', ['commit', '-qam', '远端'], { cwd: other, env })
     execFileSync('git', ['push', '-q'], { cwd: other, env })
     await expect(git.push(true)).rejects.toMatchObject({ kind: 'nonFastForward' })
     await git.pull()
-    expect(readFileSync(path.join(repo, '笔记', '*.md'), 'utf8')).toBe('远端\n')
+    expect(readFileSync(path.join(repo, '笔记', '[x].md'), 'utf8')).toBe('远端\n')
     await git.push(true)
     expect(await git.status()).toMatchObject({ ahead: 0, behind: 0 })
   })
