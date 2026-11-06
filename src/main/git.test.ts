@@ -803,6 +803,10 @@ describe('Git（系统 git）', () => {
     writeFileSync(note('b.md'), '本地\n<<<<<<< 又来\n')
     expect(await git.markersLeft()).toEqual(['b.md'])
     writeFileSync(note('b.md'), '本地\n')
+    // 合并期间新建、还没跟踪的笔记里有标记，也拦下
+    writeFileSync(note('新 笔记.md'), '<<<<<<< 抄来的\n')
+    expect(await git.markersLeft()).toEqual(['新 笔记.md'])
+    rmSync(note('新 笔记.md'))
     writeFileSync(note('远端改.md'), '合并期间顺手改的\n')
     await git.mergeContinue()
     expect(await git.status()).toMatchObject({ merging: false, files: [{ path: '远端改.md', x: '.', y: 'M' }] })

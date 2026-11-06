@@ -300,12 +300,18 @@ export class Git {
   }
 
   // 完成合并前的复查（#9 决定 3）：相对 HEAD 改动过的笔记库文件，暂存区或工作区版本里哪些仍有冲突标记（合并提交的是暂存区；
-  // 工作区也查，免得自动暂存之后又改出标记、合并完了留在笔记里）。HEAD 里本来就有的（如讲冲突标记的笔记）不算；二进制文件跳过
+  // 工作区也查，免得自动暂存之后又改出标记、合并完了留在笔记里；未跟踪的笔记（忽略的除外）一并读盘查）。HEAD 里本来就有的
+  // （如讲冲突标记的笔记）不算；二进制文件跳过
   async markersLeft(): Promise<string[]> {
     // --raw 直接给出暂存区一侧的 oid：常驻 cat-file 进程只读一次 .git/index，按 `:路径` 读会拿到旧的暂存内容
     const diff = (cached: boolean) =>
       this.run(['--literal-pathspecs', 'diff', ...(cached ? ['--cached'] : []), '--raw', '-z', '--no-renames', '--no-abbrev', 'HEAD', '--', '.'])
-    const [staged, worktree, prefix] = await Promise.all([diff(true), diff(false), this.prefix()])
+    const [staged, worktree, untracked, prefix] = await Promise.all([
+      diff(true),
+      diff(false),
+      this.run(['--literal-pathspecs', 'ls-files', '-z', '--others', '--exclude-standard', '--', '.']),
+      this.prefix(),
+    ])
     const marked = (b: Buffer | null) => !!b && !b.includes(0) && hasConflictMarkers(b.toString('utf8'))
     const res = new Set<string>()
     for (const [out, cached] of [[staged, true], [worktree, false]] as const) {
@@ -318,6 +324,8 @@ export class Git {
         if (marked(b)) res.add(rel)
       }
     }
+    // 未跟踪的只查笔记：附件可能很大，整份读进来不值；ls-files 的输出已相对 cwd
+    for (const rel of untracked.split('\0').filter((p) => p.endsWith('.md'))) if (marked(await fs.readFile(path.join(this.cwd, rel)).catch(() => null))) res.add(rel)
     return [...res].sort()
   }
 
