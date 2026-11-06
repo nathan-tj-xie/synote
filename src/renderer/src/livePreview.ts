@@ -11,7 +11,7 @@ import type { Presence } from '../../shared/api'
 import { parseLfsPointer, sizeLabel, type LfsPointer } from '../../shared/lfs'
 import { linkHref, linkRefs as treeRefs, RAW, wikiLinks } from '../../shared/mdLinks'
 import { parseWiki } from '../../shared/url'
-import { embedOf, embedText, renderEmbed, type Embed } from './embed'
+import { canWrite, embedOf, embedText, renderEmbed, type Embed } from './embed'
 import { dataUrl, decodeEntities, imageMime, MAX_IMAGE, resolveImage, resolveLink, unescapeMd } from './diffUtil'
 import { resolveHref, type Href } from './links'
 import { useUi, useVault } from './store'
@@ -520,7 +520,7 @@ export const sameNote = (view: EditorView, owner: Note | null) => view.state.fac
 // 把嵌入块的源码改成 src，返回改后的嵌入块。视图已换成别的笔记、正文里那段已经变了（外部重载等）或只读时不写，返回 null
 export function writeEmbed(view: EditorView, owner: Note | null, e: Embed, src: string): Embed | null {
   const s = view.state
-  if (s.readOnly || !sameNote(view, owner) || s.sliceDoc(e.from, e.to) !== e.text) return null
+  if (s.readOnly || !canWrite(e, src) || !sameNote(view, owner) || s.sliceDoc(e.from, e.to) !== e.text) return null
   const text = embedText(e, src)
   view.dispatch({ changes: { from: e.from, to: e.to, insert: text }, userEvent: 'input' })
   return { ...e, src, text, to: e.from + text.length }

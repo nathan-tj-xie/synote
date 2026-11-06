@@ -207,17 +207,24 @@ test('embeds inside quotes and lists render and keep their prefixes when edited;
   await app.close()
 })
 
-test('$$x$$ written inline opens the dialog; a multi-line source turns it into a block, keeping the newlines', async () => {
+test('$$x$$ written inline opens the dialog; a source with a newline cannot be saved', async () => {
   const { app, win, disk } = await launch('前 $$x$$ 后\n')
   await win.locator('.cm-embed-math .katex').click()
   const dialog = win.getByRole('dialog', { name: '编辑公式' })
   const source = dialog.getByRole('textbox', { name: '源码' })
+  const save = dialog.getByRole('button', { name: '保存' })
   await expect(source).toHaveValue('x')
-  // 换成空格的话 `+y` 会被 % 注释吞掉
+  // 行内公式不能跨行，换成空格又会让 `+y` 被 % 注释吞掉：不让保存
   await source.fill('x% comment\n+y')
-  await dialog.getByRole('button', { name: '保存' }).click()
-  await expect.poll(disk).toBe('前 \n$$\nx% comment\n+y\n$$\n 后\n')
-  await expect(win.locator('.cm-embed-math .katex-html')).toContainText('+y')
+  await expect(save).toBeDisabled()
+  await expect(dialog.getByRole('status')).toHaveText('行内公式不能换行，需要多行请改用块级公式')
+  await source.press('ControlOrMeta+Enter')
+  await expect(dialog).toBeVisible()
+  expect(disk()).toBe('前 $$x$$ 后\n')
+  await source.fill('x + y')
+  await expect(dialog.getByRole('status')).toHaveCount(0)
+  await save.click()
+  await expect.poll(disk).toBe('前 $$x + y$$ 后\n')
   await app.close()
 })
 

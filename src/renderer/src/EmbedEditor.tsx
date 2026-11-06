@@ -5,7 +5,7 @@ import * as Popover from '@radix-ui/react-popover'
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { i18next } from '../../shared/i18n'
-import { renderEmbed, type Embed } from './embed'
+import { canWrite, renderEmbed, type Embed } from './embed'
 import s from './EmbedEditor.module.css'
 import { sameNote, writeEmbed } from './livePreview'
 import o from './Orphans.module.css'
@@ -57,7 +57,9 @@ function Preview({ e, src, className }: { e: Embed; src: string; className: stri
 function Editor({ req }: { req: Req }) {
   const { t } = useTranslation()
   const [src, setSrc] = useState(req.embed.src)
+  const ok = canWrite(req.embed, src)
   const save = () => {
+    if (!ok) return
     const e = write(req, req.embed, src)
     if (e) done(req, e)
   }
@@ -85,8 +87,13 @@ function Editor({ req }: { req: Req }) {
             <Preview e={req.embed} src={src} className={s.preview} />
           </div>
           <div className={o.actions}>
+            {!ok && (
+              <p className={s.hint} role="status">
+                {t('inlineMathNewline')}
+              </p>
+            )}
             <button onClick={() => done(req, req.embed)}>{t('cancel')}</button>
-            <button className={o.primary} onClick={save}>
+            <button className={o.primary} disabled={!ok} onClick={save}>
               {t('save')}
             </button>
           </div>

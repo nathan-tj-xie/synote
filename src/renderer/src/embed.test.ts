@@ -3,7 +3,7 @@ import { ensureSyntaxTree } from '@codemirror/language'
 import { EditorState } from '@codemirror/state'
 import { GFM, parser } from '@lezer/markdown'
 import { describe, expect, it } from 'vitest'
-import { embedOf, embedText, mathSyntax, type Embed } from './embed'
+import { canWrite, embedOf, embedText, mathSyntax, type Embed } from './embed'
 
 const md = parser.configure([GFM, mathSyntax])
 
@@ -108,20 +108,12 @@ describe('块级公式', () => {
     ensureSyntaxTree(state, 10)!.iterate({ enter: (n) => void (e ??= embedOf(state, n.node)) })
     expect(e).toMatchObject({ kind: 'math', block: false, display: true, src: 'x' })
   })
-  it('写在行内的 $$ 改成多行源码时转成块级写法，换行（和 % 注释）原样保留', () => {
-    const at = (doc: string) => {
-      const state = EditorState.create({ doc, extensions: markdown({ base: markdownLanguage, extensions: [mathSyntax] }) })
-      let e: Embed | null = null
-      ensureSyntaxTree(state, doc.length)!.iterate({ enter: (n) => void (e ??= embedOf(state, n.node)) })
-      return e! as Embed
-    }
-    const e = at('前 $$x$$ 后')
-    const text = embedText(e, 'x% comment\n+y')
-    expect(text).toBe('\n$$\nx% comment\n+y\n$$\n')
-    const doc = '前 ' + text + ' 后'
-    expect(srcs(doc)).toEqual(['x% comment\n+y'])
-    expect(embedText(e, 'a')).toBe('$$a$$') // 单行仍写在行内
-    expect(embedText(at('> 前 $$x$$'), 'a\nb')).toBe('\n> $$\n> a\n> b\n> $$')
-    expect(embedText(at('- $$x$$ 后'), 'a\nb')).toBe('$$\n  a\n  b\n  $$\n  ')
+  it('写在行内的 $$ 不能写入换行，块级的可以', () => {
+    const state = EditorState.create({ doc: '前 $$x$$ 后', extensions: markdown({ base: markdownLanguage, extensions: [mathSyntax] }) })
+    let e: Embed | null = null
+    ensureSyntaxTree(state, 10)!.iterate({ enter: (n) => void (e ??= embedOf(state, n.node)) })
+    expect(canWrite(e!, 'x% comment\n+y')).toBe(false)
+    expect(canWrite(e!, 'x + y')).toBe(true)
+    expect(canWrite(blocks('$$x$$')[0], 'a\nb')).toBe(true)
   })
 })

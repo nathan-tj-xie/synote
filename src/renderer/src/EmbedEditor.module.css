@@ -10,3 +10,5 @@
 .popPreview { min-height: 24px; padding: 4px 2px; text-align: center; overflow-x: auto; }
 .preview :global(.cm-embed-error), .popPreview :global(.cm-embed-error) { color: var(--danger); font-family: var(--font-mono); white-space: pre-wrap; }
 .preview :global(.cm-embed-empty), .popPreview :global(.cm-embed-empty) { color: var(--fg-muted); font-style: italic; }
+.hint { margin: 0; flex: 1; align-self: center; color: var(--danger); }
+.dialog button:disabled { opacity: 0.5; cursor: not-allowed; }

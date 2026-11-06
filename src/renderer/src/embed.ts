@@ -22,18 +22,17 @@ export type Embed = {
   prefix: string // 块级源码各行的续行前缀（`> `、列表缩进）
   sep: '\n' | ''
   display: boolean // 公式按块级（display mode）排版
-  // 写在行内的 `$$`：源码改成多行时在原位断开、写成块级公式（行内公式不能跨行，换成空格会让 `%` 注释吞掉下一行）。
-  // 两项是块前、块后要补的换行 + 续行前缀（前面 / 后面没有文字时为空）
-  lift?: [string, string]
 }
 
 export function embedText(e: Embed, src: string): string {
-  const lines = () => src.split('\n').map((l) => (l ? e.prefix + l : e.prefix.trimEnd()))
-  if (!e.block && e.lift && src.includes('\n')) return `${e.lift[0]}$$\n${lines().join('\n')}\n${e.prefix}$$${e.lift[1]}`
-  if (!e.block) return src ? `${e.open}${src}${e.close}` : '' // 清空即删除；浮层的单行输入框里没有换行
+  if (!e.block) return src ? `${e.open}${src}${e.close}` : '' // 清空即删除；不能有换行（canWrite）
   if (!e.sep && !src.includes('\n')) return `${e.open}${src}${e.close}`
-  return [e.open, ...(src ? lines() : []), e.prefix + e.close].join('\n')
+  const lines = src ? src.split('\n').map((l) => (l ? e.prefix + l : e.prefix.trimEnd())) : []
+  return [e.open, ...lines, e.prefix + e.close].join('\n')
 }
+
+// 行内公式不能跨行：换行换成空格会改变含义（`%` 注释会吞掉下一行），所以有换行就不写
+export const canWrite = (e: Embed, src: string) => e.block || !src.includes('\n')
 
 const space = (c: string | undefined) => c === undefined || /\s/.test(c)
 
@@ -173,17 +172,7 @@ export function embedOf(state: EditorState, n: SyntaxNode): Embed | null {
     const d = state.sliceDoc(n.from, n.from + 2) === '$$' ? 2 : 1
     const open = '$'.repeat(d)
     const src = state.sliceDoc(n.from + d, n.to - d)
-    const e: Embed = { kind: d === 2 ? 'math' : 'inline', block: false, from: n.from, to: n.to, text: state.sliceDoc(n.from, n.to), src, open, close: open, prefix: '', sep: '', display: d === 2 }
-    if (d === 2) {
-      // 续行前缀：行首的引用标记、列表标记（换成等宽空格）和缩进；同 blockEmbed，除 `>` 外都换成空格
-      const line = doc.lineAt(n.from)
-      const lead = state.sliceDoc(line.from, n.from)
-      const marks = /^[\s>]*(?:(?:[-*+]|\d+[.)])[ \t]+)?/.exec(lead)![0]
-      e.prefix = marks.replace(/[^>\s]/g, ' ')
-      const br = '\n' + e.prefix
-      e.lift = [lead.slice(marks.length).trim() ? br : '', state.sliceDoc(n.to, line.to).trim() ? br : '']
-    }
-    return e
+    return { kind: d === 2 ? 'math' : 'inline', block: false, from: n.from, to: n.to, text: state.sliceDoc(n.from, n.to), src, open, close: open, prefix: '', sep: '', display: d === 2 }
   }
   if (n.name === 'BlockMath') {
     const marks = n.getChildren('BlockMathMark')

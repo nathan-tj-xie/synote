@@ -111,6 +111,7 @@ export const zhCN = {
     mathEmpty: '空公式，点击编辑',
     mermaidEmpty: '空的 Mermaid 图，点击编辑',
     embedChanged: '正文已有改动，这次修改没有写入',
+    inlineMathNewline: '行内公式不能换行，需要多行请改用块级公式',
     noOrphans: '没有孤儿附件',
     orphansHint: '以下附件没有被任何笔记引用。已跟踪的执行 git rm（进入下次提交，可从历史恢复），其余移到回收站。',
     orphanGitRm: 'git rm',
