@@ -22,13 +22,17 @@ export type Embed = {
   prefix: string // 块级源码各行的续行前缀（`> `、列表缩进）
   sep: '\n' | ''
   display: boolean // 公式按块级（display mode）排版
+  // 写在行内的 `$$`：源码改成多行时在原位断开、写成块级公式（行内公式不能跨行，换成空格会让 `%` 注释吞掉下一行）。
+  // 两项是块前、块后要补的换行 + 续行前缀（前面 / 后面没有文字时为空）
+  lift?: [string, string]
 }
 
 export function embedText(e: Embed, src: string): string {
-  if (!e.block) return src ? `${e.open}${src.replace(/\n/g, ' ')}${e.close}` : '' // 行内的不能换行；清空即删除
+  const lines = () => src.split('\n').map((l) => (l ? e.prefix + l : e.prefix.trimEnd()))
+  if (!e.block && e.lift && src.includes('\n')) return `${e.lift[0]}$$\n${lines().join('\n')}\n${e.prefix}$$${e.lift[1]}`
+  if (!e.block) return src ? `${e.open}${src}${e.close}` : '' // 清空即删除；浮层的单行输入框里没有换行
   if (!e.sep && !src.includes('\n')) return `${e.open}${src}${e.close}`
-  const lines = src ? src.split('\n').map((l) => (l ? e.prefix + l : e.prefix.trimEnd())) : []
-  return [e.open, ...lines, e.prefix + e.close].join('\n')
+  return [e.open, ...(src ? lines() : []), e.prefix + e.close].join('\n')
 }
 
 const space = (c: string | undefined) => c === undefined || /\s/.test(c)
@@ -53,21 +57,33 @@ export function mathEnd(text: string, i: number): number {
 // 块级公式 BlockMath：从以 `$$` 开头的行到以 `$$` 结尾的行（可以是同一行），先于列表、标题等块结构识别（`$$\n- x\n$$` 是公式）。
 // Pandoc 里 `$$` 不跨空行：没有闭合（遇到空行、文末）就不是公式，未闭合的 `$$` 不会吞掉后面的正文
 const isOpen = (line: Line) => line.indent - line.baseIndent < 4 && line.text.startsWith('$$', line.pos)
-const endsMath = (text: string) => text.trimEnd().endsWith('$$')
+// 第一个没被转义的 `$$` 的位置（`\$` 是字面量，`\\` 是转义的反斜杠），没有时 -1
+function mathMark(text: string): number {
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\\') i++
+    else if (text.startsWith('$$', i)) return i
+  }
+  return -1
+}
+// 以没转义的 `$$` 结尾，且前面没有别的 `$$`
+const endsMath = (text: string) => {
+  const i = mathMark(text)
+  return i >= 0 && i === text.trimEnd().length - 2
+}
 
 // 开头这行之后能否闭合。shortcut: 用 BlockContext 的私有 scanLine 读后面的原始行（公开的 peekLine 只能看一行），
 // 续行前缀按 `>`、空白粗略去掉；依赖 @lezer/markdown 1.8.1 的内部实现，升级时核对
 function closes(cx: BlockContext, line: Line): boolean {
   const rest = line.text.slice(line.pos + 2)
-  if (rest.trim().length >= 2 && endsMath(rest)) return !rest.trimEnd().slice(0, -2).includes('$$')
-  if (rest.includes('$$')) return false
+  if (rest.trim().length >= 2 && endsMath(rest)) return true
+  if (mathMark(rest) >= 0) return false
   const scan = (cx as unknown as { scanLine(pos: number): { text: string; end: number } }).scanLine.bind(cx)
   for (let pos = cx.lineStart + line.text.length + 1; ; ) {
     const r = scan(pos)
     const text = r.text.replace(/^[\s>]*/, '')
     if (!text.trim()) return false
-    if (endsMath(text)) return !text.trimEnd().slice(0, -2).includes('$$')
-    if (text.includes('$$') || r.end <= pos) return false
+    if (endsMath(text)) return true
+    if (mathMark(text) >= 0 || r.end <= pos) return false
     pos = r.end + 1
   }
 }
@@ -157,7 +173,17 @@ export function embedOf(state: EditorState, n: SyntaxNode): Embed | null {
     const d = state.sliceDoc(n.from, n.from + 2) === '$$' ? 2 : 1
     const open = '$'.repeat(d)
     const src = state.sliceDoc(n.from + d, n.to - d)
-    return { kind: d === 2 ? 'math' : 'inline', block: false, from: n.from, to: n.to, text: state.sliceDoc(n.from, n.to), src, open, close: open, prefix: '', sep: '', display: d === 2 }
+    const e: Embed = { kind: d === 2 ? 'math' : 'inline', block: false, from: n.from, to: n.to, text: state.sliceDoc(n.from, n.to), src, open, close: open, prefix: '', sep: '', display: d === 2 }
+    if (d === 2) {
+      // 续行前缀：行首的引用标记、列表标记（换成等宽空格）和缩进；同 blockEmbed，除 `>` 外都换成空格
+      const line = doc.lineAt(n.from)
+      const lead = state.sliceDoc(line.from, n.from)
+      const marks = /^[\s>]*(?:(?:[-*+]|\d+[.)])[ \t]+)?/.exec(lead)![0]
+      e.prefix = marks.replace(/[^>\s]/g, ' ')
+      const br = '\n' + e.prefix
+      e.lift = [lead.slice(marks.length).trim() ? br : '', state.sliceDoc(n.to, line.to).trim() ? br : '']
+    }
+    return e
   }
   if (n.name === 'BlockMath') {
     const marks = n.getChildren('BlockMathMark')

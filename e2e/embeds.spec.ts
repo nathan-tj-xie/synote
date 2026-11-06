@@ -207,12 +207,17 @@ test('embeds inside quotes and lists render and keep their prefixes when edited;
   await app.close()
 })
 
-test('$$x$$ written inline opens the dialog, not the popover', async () => {
-  const { app, win } = await launch('前 $$x$$ 后\n')
+test('$$x$$ written inline opens the dialog; a multi-line source turns it into a block, keeping the newlines', async () => {
+  const { app, win, disk } = await launch('前 $$x$$ 后\n')
   await win.locator('.cm-embed-math .katex').click()
   const dialog = win.getByRole('dialog', { name: '编辑公式' })
-  await expect(dialog.getByRole('button', { name: '保存' })).toBeVisible()
-  await expect(dialog.getByRole('textbox', { name: '源码' })).toHaveValue('x')
+  const source = dialog.getByRole('textbox', { name: '源码' })
+  await expect(source).toHaveValue('x')
+  // 换成空格的话 `+y` 会被 % 注释吞掉
+  await source.fill('x% comment\n+y')
+  await dialog.getByRole('button', { name: '保存' }).click()
+  await expect.poll(disk).toBe('前 \n$$\nx% comment\n+y\n$$\n 后\n')
+  await expect(win.locator('.cm-embed-math .katex-html')).toContainText('+y')
   await app.close()
 })
 

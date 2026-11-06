@@ -96,10 +96,32 @@ describe('块级公式', () => {
   it('单行写法改成多行源码时拆成三行', () => {
     expect(embedText(blocks('$$x$$')[0], 'a\nb')).toBe('$$\na\nb\n$$')
   })
+  it('结尾的 \$$ 是转义的美元符号，不是结束符', () => {
+    expect(srcs('$$\nx\\$$\n后文')).toEqual([])
+    expect(srcs('$$\nx\\$$\n$$')).toEqual(['x\\$$'])
+    expect(srcs('$$x\\$$')).toEqual([])
+    expect(srcs('$$\nx\\\\$$')).toEqual(['x\\\\']) // `\\` 是转义的反斜杠，之后的 $$ 照常结束
+  })
   it('写在行内的 $$x$$ 按公式编辑（弹窗），不是行内浮层', () => {
     const state = EditorState.create({ doc: '前 $$x$$ 后', extensions: markdown({ base: markdownLanguage, extensions: [mathSyntax] }) })
     let e: Embed | null = null
     ensureSyntaxTree(state, 10)!.iterate({ enter: (n) => void (e ??= embedOf(state, n.node)) })
     expect(e).toMatchObject({ kind: 'math', block: false, display: true, src: 'x' })
+  })
+  it('写在行内的 $$ 改成多行源码时转成块级写法，换行（和 % 注释）原样保留', () => {
+    const at = (doc: string) => {
+      const state = EditorState.create({ doc, extensions: markdown({ base: markdownLanguage, extensions: [mathSyntax] }) })
+      let e: Embed | null = null
+      ensureSyntaxTree(state, doc.length)!.iterate({ enter: (n) => void (e ??= embedOf(state, n.node)) })
+      return e! as Embed
+    }
+    const e = at('前 $$x$$ 后')
+    const text = embedText(e, 'x% comment\n+y')
+    expect(text).toBe('\n$$\nx% comment\n+y\n$$\n')
+    const doc = '前 ' + text + ' 后'
+    expect(srcs(doc)).toEqual(['x% comment\n+y'])
+    expect(embedText(e, 'a')).toBe('$$a$$') // 单行仍写在行内
+    expect(embedText(at('> 前 $$x$$'), 'a\nb')).toBe('\n> $$\n> a\n> b\n> $$')
+    expect(embedText(at('- $$x$$ 后'), 'a\nb')).toBe('$$\n  a\n  b\n  $$\n  ')
   })
 })
