@@ -11,7 +11,7 @@ import { linkHref, linkRefs as treeRefs, RAW, wikiLinks } from '../../shared/mdL
 import { parseWiki } from '../../shared/url'
 import { dataUrl, decodeEntities, imageMime, MAX_IMAGE, resolveImage, resolveLink, unescapeMd } from './diffUtil'
 import { resolveHref, type Href } from './links'
-import { useVault } from './store'
+import { useUi, useVault } from './store'
 
 // 当前正文属于哪个库的哪篇笔记：图片按笔记目录解析、经现有 readBytes（带库标识校验）读取
 type Note = { vault: string; path: string }
@@ -188,18 +188,45 @@ function broken(state: EditorState, h: Href): boolean {
 }
 const linkClass = (state: EditorState, h: Href) => (broken(state, h) ? 'cm-lp-link cm-lp-broken' : 'cm-lp-link')
 
+// 附件缺失占位的内容：提示 + "从历史恢复"（S15，#9 决定 7）。主进程找最后一个还有它的提交，确认后 git restore 写回工作区；
+// 写回后丢掉存在性和图片缓存，占位随即消失（索引的变化推送也会再丢一次）
+function fillMissing(box: HTMLElement, vault: string, path: string) {
+  box.className = 'cm-lp-image-missing'
+  box.textContent = i18next.t('attachmentMissing', { path })
+  const btn = box.appendChild(document.createElement('button'))
+  btn.className = 'cm-lp-restore'
+  btn.textContent = i18next.t('restoreFromHistory')
+  btn.addEventListener('mousedown', (e) => e.preventDefault()) // 不让光标移进来（那样整行会切成源码）
+  btn.addEventListener('click', async (e) => {
+    e.preventDefault()
+    const fail = (err: unknown) => useUi.getState().setError(String(err))
+    try {
+      const src = await window.synote.restoreSource(vault, path)
+      if (!src) return fail(i18next.t('restoreNotFound', { path }))
+      const date = new Date(src.time * 1000).toLocaleString('zh-CN')
+      if (!confirm(i18next.t('restoreConfirm', { hash: src.hash.slice(0, 7), date, subject: src.subject, path }))) return
+      await window.synote.restoreAttachment(vault, path, src.hash)
+      forgetFiles(vault, [path])
+    } catch (err) {
+      fail(err)
+    }
+  })
+}
+
 // 指向库内附件（attachments/ 下）的普通链接，目标已知不存在时的占位
 class MissingWidget extends WidgetType {
-  constructor(readonly path: string) {
+  constructor(
+    readonly vault: string,
+    readonly path: string,
+  ) {
     super()
   }
   eq(o: MissingWidget) {
-    return o.path === this.path
+    return o.vault === this.vault && o.path === this.path
   }
   toDOM() {
     const el = document.createElement('span')
-    el.className = 'cm-lp-image-missing'
-    el.textContent = i18next.t('attachmentMissing', { path: this.path })
+    fillMissing(el, this.vault, this.path)
     return el
   }
 }
@@ -207,7 +234,7 @@ class MissingWidget extends WidgetType {
 function missingWidget(state: EditorState, target: string): MissingWidget | null {
   const info = state.facet(note)
   const path = info && target ? resolveLink(target, info.path) : null
-  return path?.startsWith('attachments/') && isPresent(info!.vault, path) === false ? new MissingWidget(path) : null
+  return path?.startsWith('attachments/') && isPresent(info!.vault, path) === false ? new MissingWidget(info!.vault, path) : null
 }
 
 class ImageWidget extends WidgetType {
@@ -239,10 +266,11 @@ class ImageWidget extends WidgetType {
       return box
     }
     const path = this.path
-    loadImage(this.vault, path).then(
+    const vault = this.vault
+    loadImage(vault, path).then(
       (url) => {
-        // 附件缺失（#8）：只显示占位，不修复也不改引用
-        if (!url) return fail(i18next.t('attachmentMissing', { path }))
+        // 附件缺失（#8）：只显示占位，不自动修复也不改引用；attachments/ 下的可以手动从历史恢复
+        if (!url) return path.startsWith('attachments/') ? fillMissing(box, vault, path) : fail(i18next.t('attachmentMissing', { path }))
         const img = document.createElement('img')
         img.src = url
         img.alt = this.alt
@@ -780,6 +808,7 @@ const theme = EditorView.theme({
   '.cm-lp-hr': { display: 'inline-block', width: '100%', borderTop: '1px solid var(--border)', verticalAlign: 'middle' },
   '.cm-lp-image img': { maxWidth: '100%', verticalAlign: 'bottom' },
   '.cm-lp-image-missing': { color: 'var(--fg-muted)', border: '1px dashed var(--border)', borderRadius: '3px', padding: '0 4px' },
+  '.cm-lp-restore': { marginLeft: '6px', background: 'none', border: 'none', padding: 0, color: 'var(--accent)', cursor: 'pointer', font: 'inherit' },
   '.cm-lp-table': { padding: '4px 0', overflowX: 'auto', cursor: 'text' },
   '.cm-lp-table table': { borderCollapse: 'collapse' },
   '.cm-lp-table-mark': { flex: 'none', marginRight: '1ch', lineHeight: '2.2' },

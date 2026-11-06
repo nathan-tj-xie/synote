@@ -22,6 +22,7 @@ export const handlers: Record<CommandId, Handler> = {
   commandPalette: { when: vault, run: () => ui().setPalette('commands') },
   save: { when: () => !!ed().active, run: saveCurrent },
   toggleDiff: { when: () => !!ed().active, run: toggleDiff },
+  toggleHistory: { when: vault, run: () => ui().toggleHistory() },
   search: {
     when: vault,
     run: () => {

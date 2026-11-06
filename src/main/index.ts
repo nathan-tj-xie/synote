@@ -7,7 +7,7 @@ import { commands } from '../shared/commands'
 import { indexMethods, type GitState, type OrphanAttachment, type ItemMenuAction, type VaultConfig, type VaultInfo } from '../shared/api'
 import { tokens } from '../shared/tokens'
 import { exec, findGit, Git, GitError, type GitDetectionResult } from './git'
-import { checkOrphans, removeOrphans, trackedOf } from './orphans'
+import { attachmentTarget, checkOrphans, isAttachmentPath, removeOrphans, trackedOf } from './orphans'
 import { commitRename, planRename } from './rename'
 import { attachmentName, isHidden, realInVault, realParentInVault, resolveInVault, saveAttachment, scanEntries, toPosix, uniqueNoteName, writeTarget } from './vault'
 
@@ -256,23 +256,86 @@ ipcMain.handle('file:exists', async (_e, vault: string, rels: string[]) => {
   return Promise.all(rels.map((p) => realInVault(r, p).then(() => true, () => false)))
 })
 ipcMain.handle('file:readBytes', async (_e, vault: string, rel: string) => fs.readFile(await realInVault(checkVault(vault), rel)))
-// 工作区对比的 HEAD 一侧（S14）：经常驻 cat-file 读，HEAD 里没有这个文件时为 null。
-// `HEAD:./` 按 git 的工作目录（即笔记库）解析，笔记库是仓库子目录时也对
-ipcMain.handle('git:readHead', async (_e, vault: string, rel: string) => {
-  const r = checkVault(vault)
-  resolveInVault(r, rel)
+// diff / 历史用的 git：没有可用 git、不是仓库时报错（不像 vaultRepo 那样当作非 git 目录）
+async function diffGit<T>(r: string, f: (g: Git) => Promise<T>): Promise<T> {
   const res = await repoGit()
   if (!('g' in res)) throw new Error(t('gitUnavailable'))
-  if (res.g.cwd !== r) throw new Error(t('vaultSwitched', { vault })) // 等 git 检测期间切了库
+  if (res.g.cwd !== r) throw new Error(t('vaultSwitched', { vault: r })) // 等 git 检测期间切了库
   try {
-    return await res.g.readBlob(`HEAD:./${rel}`)
+    return await f(res.g)
   } catch (e) {
     throw e instanceof GitError && e.kind === 'notRepo' ? new Error(t('gitNotRepo')) : e
   }
+}
+// 渲染进程传来的提交只认完整的 oid（或 HEAD），不会被当成选项或任意 revision 表达式
+const checkRev = (rev: unknown, head = false): string => {
+  if (typeof rev !== 'string' || !(/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(rev) || (head && rev === 'HEAD'))) throw new Error(`invalid revision: ${rev}`)
+  return rev
+}
+// 工作区对比的 HEAD 一侧（S14）、历史对比的旧版本（S15）：经常驻 cat-file 读，那个版本里没有这个文件时为 null。
+// `rev:./` 按 git 的工作目录（即笔记库）解析，笔记库是仓库子目录时也对。只读 git 对象、不碰文件系统，
+// 所以历史里改名前位于库外（../ 开头，来自 git:log）的路径也放行
+ipcMain.handle('git:readRev', (_e, vault: string, rev: string, rel: string) => {
+  const r = checkVault(vault)
+  checkRev(rev, true)
+  if (typeof rel !== 'string' || !rel || rel.includes('\0') || path.posix.isAbsolute(rel) || path.win32.isAbsolute(rel)) throw new Error(`invalid path: ${rel}`)
+  return diffGit(r, (g) => g.readBlob(`${rev}:./${rel}`))
 })
+// 历史栏（S15）：当前笔记的 git log --follow
+ipcMain.handle('git:log', (_e, vault: string, rel: string) => {
+  const r = checkVault(vault)
+  resolveInVault(r, rel)
+  return diffGit(r, (g) => g.fileLog(rel))
+})
+// 从历史恢复缺失的附件（S15，#9 决定 7）：只管 attachments/ 下的，路径必须是规范写法（不含 . / ..、反斜杠、盘符）
+const checkAttachment = (rel: unknown): string => {
+  if (!isAttachmentPath(rel)) throw new Error(`not an attachment: ${rel}`)
+  return rel
+}
+ipcMain.handle('git:restoreSource', (_e, vault: string, rel: string) => {
+  const r = checkVault(vault)
+  checkAttachment(rel)
+  return diffGit(r, (g) => g.restoreSource(rel))
+})
+// 写回前再校验：真实父目录在库的真实 attachments/ 内（与孤儿删除同一个 attachmentTarget）、目标仍不存在
+// （不覆盖任何东西，含悬空链接）、该提交里确实是普通文件。和附件写入、孤儿删除串在同一条链上
+ipcMain.handle('git:restore', (_e, vault: string, rel: string, hash: string) => {
+  const r = checkVault(vault)
+  checkAttachment(rel)
+  checkRev(hash)
+  const job = attaching.then(() =>
+    diffGit(r, async (g) => {
+      await fs.mkdir(await realParentInVault(r, 'attachments'), { recursive: true })
+      const abs = await attachmentTarget(r, rel)
+      if (!abs) throw new Error(`not an attachment: ${rel}`)
+      if (await fs.lstat(abs).then(() => true, () => false)) throw new Error(t('restoreExists', { path: rel }))
+      if (!(await g.isFileAt(hash, rel))) throw new Error(t('restoreNotFound', { path: rel }))
+      await g.restore(hash, rel)
+    }),
+  )
+  attaching = job.catch(() => {})
+  return job
+})
+// 孤儿删除的互斥边界（codex #49）：从最终对账复核到最后一个文件删完，应用内的正文写入（保存、新建、重命名）在边界外排队，
+// 删除看到的引用快照在删完之前不会被应用内写入改变。只推迟落盘，不丢内容（渲染进程 await 保存，dirty 保持）。
+// 外部进程的写入不在范围内
+let deleting: Promise<void> | null = null
+const writing = new Set<Promise<unknown>>() // 已过边界、还没落盘的写入，进入边界前要等它们
+async function noteWrite<T>(f: () => Promise<T>): Promise<T> {
+  while (deleting) await deleting
+  const p = f() // 同步登记：检查边界和登记之间没有 await，删除一侧不会漏等
+  writing.add(p)
+  try {
+    return await p
+  } finally {
+    writing.delete(p)
+  }
+}
+
 // 写入、新建、回收同样按真实路径校验：父目录（或被跟随的链接）被换成指向库外时拒绝
 ipcMain.handle('file:write', async (_e, vault: string, rel: string, content: string) => {
-  await fs.writeFile(await writeTarget(checkVault(vault), rel), content)
+  const r = checkVault(vault)
+  await noteWrite(async () => fs.writeFile(await writeTarget(r, rel), content))
   // 不等 watcher 防抖，写完立即对账：删掉或撤销最后一处引用后，孤儿状态 1 s 内更新（S11）
   callIndex('reconcile').catch((e) => console.error('[index] reconcile failed', e))
 })
@@ -280,7 +343,7 @@ ipcMain.handle('file:createNote', async (_e, vault: string, dir: string) => {
   const r = checkVault(vault)
   const entries = await scanEntries(r)
   const rel = uniqueNoteName(new Set(entries.map((x) => x.path)), dir, t('untitled'))
-  await fs.writeFile(await realParentInVault(r, rel), '', { flag: 'wx' }) // wx：不覆盖已有文件，也不跟随末级链接
+  await noteWrite(async () => fs.writeFile(await realParentInVault(r, rel), '', { flag: 'wx' })) // wx：不覆盖已有文件，也不跟随末级链接
   return rel
 })
 // 粘贴 / 拖入的附件（S10）：串成一条链，并发的两次粘贴不会都没查到对方而写出两份同样的文件
@@ -298,9 +361,16 @@ async function pruneFresh(dir: string): Promise<void> {
   for (const [p, until] of s) if (until <= Date.now()) s.delete(p)
   for (const p of (await callIndex('referenced', [...s.keys()])) as string[]) s.delete(p)
 }
+// 解除保护也排进 attaching 链：不会插进一次孤儿删除的检查中间；解除前先等一次对账，
+// 之后的删除查 referenced / mentioned 时一定能看到刚落盘的正文。对账失败就不解除（到期兜底）
 ipcMain.handle('file:attachmentSettled', (_e, vault: string, paths: string[]) => {
   if (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string')) throw new Error('invalid paths')
-  for (const p of paths) fresh.get(vault)?.delete(p) // 只动内存里的保护表，期间切了库也无妨
+  const job = attaching.then(async () => {
+    await callIndex('reconcile')
+    for (const p of paths) fresh.get(vault)?.delete(p) // 只动内存里的保护表，期间切了库也无妨
+  })
+  attaching = job.catch(() => {})
+  return job
 })
 ipcMain.handle('file:saveAttachment', (_e, vault: string, name: string | null, bytes: Uint8Array) => {
   const r = checkVault(vault)
@@ -345,17 +415,24 @@ ipcMain.handle('orphans:delete', (_e, vault: string, paths: string[]) => {
   const r = checkVault(vault)
   if (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string')) throw new Error('invalid paths')
   const job = attaching.then(async () => {
-    // 开始时还在途的一律不删：渲染进程插链接、落盘、解除保护可能在下面对账期间完成，而这次对账没看到那次落盘
-    const inflight = new Set([...(fresh.get(r)?.keys() ?? [])].filter((p) => isFresh(r, p)))
     const checked = await checkOrphans(r, paths, new Set(await currentOrphans()))
     await pruneFresh(r)
-    const pending = checked.map(([p]) => p).filter((p) => inflight.has(p) || isFresh(r, p))
+    const pending = checked.map(([p]) => p).filter((p) => isFresh(r, p))
     const mentioned = (await callIndex('mentioned', checked.map(([p]) => p).filter((p) => !pending.includes(p)))) as string[]
     const kept = [...pending.map((path) => ({ path, reason: 'pending' as const })), ...mentioned.map((path) => ({ path, reason: 'mentioned' as const }))]
-    const targets = checked.filter(([p]) => !kept.some((k) => k.path === p))
+    const candidates = checked.filter(([p]) => !kept.some((k) => k.path === p))
+    // 进入互斥边界：先等已在途的正文写入落盘，再对账复核，被引用或又成了在途的静默跳过；删完才放行新的写入
+    let open!: () => void
+    deleting = new Promise((res) => (open = res))
     try {
+      await Promise.allSettled([...writing])
+      await callIndex('reconcile')
+      const late = new Set((await callIndex('referenced', candidates.map(([p]) => p))) as string[])
+      const targets = candidates.filter(([p]) => !late.has(p) && !isFresh(r, p))
       return { deleted: await removeOrphans(targets, await vaultRepo(r), (p) => shell.trashItem(p)), kept }
     } finally {
+      deleting = null
+      open()
       callIndex('reconcile').catch((e) => console.error('[index] reconcile failed', e))
     }
   })
@@ -412,7 +489,8 @@ ipcMain.handle('file:planRename', async (_e, vault: string, from: string, to: st
 ipcMain.handle('file:rename', (_e, vault: string, from: string, to: string, files: string[]) => {
   const r = checkVault(vault)
   if (!Array.isArray(files)) throw new Error('invalid files')
-  const job = renaming.then(async () => {
+  // 改写笔记、移动文件同样在孤儿删除的互斥边界外排队（codex #49）
+  const job = renaming.then(() => noteWrite(async () => {
     moving = true
     moves++
     try {
@@ -428,7 +506,7 @@ ipcMain.handle('file:rename', (_e, vault: string, from: string, to: string, file
       moving = false
       callIndex('reconcile').catch((e) => console.error('[index] reconcile failed', e))
     }
-  })
+  }))
   renaming = job.catch(() => {})
   return job
 })

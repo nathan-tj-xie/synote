@@ -41,6 +41,10 @@ export type GitState =
 // 孤儿附件（S11）：tracked 为 git 已跟踪，删除时执行 git rm；否则（含非 git 目录）移到回收站
 export type OrphanAttachment = { path: string; tracked: boolean }
 
+// 历史栏的一条提交（S15）：path 是文件在该提交里的路径，相对笔记库根（改名前位于库外时以 ../ 开头）；
+// status 是该提交对它的改动（A / M / R / D…），time 为秒
+export type LogEntry = { hash: string; time: number; author: string; subject: string; path: string; status: string }
+
 export type ItemMenuAction = Extract<CommandId, 'newNote' | 'rename' | 'trash'> | null
 
 // 重命名 / 移动后改写过的笔记（旧路径）：改写前的正文和改写（偏移按 before），渲染进程据此更新已打开的笔记
@@ -94,8 +98,13 @@ export interface SynoteApi {
   redetectGit(): Promise<GitState>
   // 弹出文件选择框指定 git 可执行文件，取消时为 null
   chooseGit(): Promise<GitState | null>
-  // 工作区对比（S14）：HEAD 里的文件内容，HEAD 里没有时为 null；没有可用 git 或不是仓库时报错
-  readHead(vault: string, path: string): Promise<Uint8Array | null>
+  // 工作区对比（S14）、历史对比（S15）：rev（HEAD 或完整 oid）里的文件内容，那里没有时为 null；没有可用 git 或不是仓库时报错
+  readRev(vault: string, rev: string, path: string): Promise<Uint8Array | null>
+  // 历史栏（S15）：笔记的提交历史（git log --follow），新的在前；还没有提交时为空
+  fileLog(vault: string, path: string): Promise<LogEntry[]>
+  // 从历史恢复缺失附件（S15）：最后一个还有它的提交，历史里从没有过时为 null；restore 只写工作区，已存在时拒绝
+  restoreSource(vault: string, path: string): Promise<LogEntry | null>
+  restoreAttachment(vault: string, path: string, hash: string): Promise<void>
   // 工作区或 .git 有变化后推送最新状态
   onGitChanged(cb: (e: { root: string | null; state: GitState }) => void): () => void
 }

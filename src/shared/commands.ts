@@ -8,6 +8,7 @@ export const commands = {
   save: { title: 'save', key: 'Mod-s' },
   search: { title: 'search', key: 'Mod-Shift-f' },
   toggleDiff: { title: 'toggleDiff', key: 'Mod-Shift-d' },
+  toggleHistory: { title: 'toggleHistory' },
   newNote: { title: 'newNote' },
   rename: { title: 'rename' },
   trash: { title: 'trash' },

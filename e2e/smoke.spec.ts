@@ -55,21 +55,21 @@ async function launchWelcome(dirs: string[]) {
 }
 
 // 主进程下一次写 recent.json（切库 commit 的第一步）时停 ms 毫秒，把“commit 进行中”的窗口拉长；返回是否已停住。
-// match 换成别的路径片段可以拖慢别的写入（如附件）
-async function holdRecentWrite(app: ElectronApplication, ms: number, match = 'recent.json') {
-  await app.evaluate((_m, { ms, match }) => {
-    const fs = process.getBuiltinModule('node:fs').promises
-    const orig = fs.writeFile
+// match 换成别的路径片段可以拖慢别的写入（如附件）；fn 换成 lstat 可以拖慢孤儿删除的逐个检查
+async function holdRecentWrite(app: ElectronApplication, ms: number, match = 'recent.json', fn: 'writeFile' | 'lstat' = 'writeFile') {
+  await app.evaluate((_m, { ms, match, fn }) => {
+    const fs = process.getBuiltinModule('node:fs').promises as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>
+    const orig = fs[fn]
     const g = globalThis as { held?: boolean }
     g.held = false
-    fs.writeFile = (async (file: string, ...rest: unknown[]) => {
+    fs[fn] = async (file: unknown, ...rest: unknown[]) => {
       if (String(file).includes(match) && !g.held) {
         g.held = true
         await new Promise((r) => setTimeout(r, ms))
       }
-      return (orig as (...a: unknown[]) => Promise<void>)(file, ...rest)
-    }) as typeof fs.writeFile
-  }, { ms, match })
+      return orig(file, ...rest)
+    }
+  }, { ms, match, fn })
   return () => app.evaluate(() => (globalThis as { held?: boolean }).held)
 }
 
@@ -1094,7 +1094,7 @@ test('a missing attachment shows a placeholder and the reference is kept', async
   const src = '首行\n\n![缺](attachments/gone.png)\n'
   const { app, win, vault } = await launch({ 'a.md': src })
   await win.getByRole('treeitem', { name: 'a.md' }).click()
-  await expect(win.locator('.cm-lp-image-missing')).toHaveText('附件缺失：attachments/gone.png')
+  await expect(win.locator('.cm-lp-image-missing')).toHaveText('附件缺失：attachments/gone.png从历史恢复')
   await win.keyboard.press(process.platform === 'darwin' ? 'Meta+s' : 'Control+s')
   await win.waitForTimeout(300)
   expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe(src)
@@ -1129,7 +1129,7 @@ test('a link to a missing non-image attachment shows a placeholder until it is b
   // 增删靠索引服务推送：等索引收录了这个附件再删（开库瞬间删掉的话索引从没见过它，不会推送）
   await expect.poll(() => win.evaluate((v) => window.synote.attachmentRefs(v, 'attachments/doc.pdf').catch(() => 0), vault), { timeout: 5000 }).toBe(1)
   rmSync(path.join(vault, 'attachments/doc.pdf'))
-  await expect(missing).toHaveText('附件缺失：attachments/doc.pdf', { timeout: 5000 })
+  await expect(missing).toHaveText('附件缺失：attachments/doc.pdf从历史恢复', { timeout: 5000 })
   writeFileSync(path.join(vault, 'attachments/doc.pdf'), 'pdf')
   await expect(missing).toHaveCount(0, { timeout: 5000 })
   await expect(win.locator('.cm-lp-link')).toHaveText('文档')
@@ -1279,8 +1279,10 @@ test('attachments still being inserted are never cleaned', async () => {
   await expect.poll(held).toBe(true)
   expect(existsSync(path.join(vault, 'attachments/first.pdf'))).toBe(true)
   // 不经过 UI 直接删（模拟没等插入的调用方）：主进程的在途保护拦下
+  // 拦下它的可能是在途保护，也可能是引用复核（链接已插入落盘），不强求是哪一道
   const r = await win.evaluate((v) => window.synote.deleteOrphans(v, ['attachments/first.pdf']), vault)
-  expect(r).toEqual({ deleted: [], kept: [{ path: 'attachments/first.pdf', reason: 'pending' }] })
+  expect(r.deleted).toEqual([])
+  expect(existsSync(path.join(vault, 'attachments/first.pdf'))).toBe(true)
   const dialog = await cleanOrphans(win) // 等插完链接、落盘后才列
   await expect(dialog).toContainText('没有孤儿附件', { timeout: 10_000 })
   await win.keyboard.press('Escape')
@@ -1407,5 +1409,218 @@ test('moving a folder rewrites open notes through the editor and uses git mv', a
   // 撤销只撤掉输入，不把链接改回旧路径
   await win.keyboard.press('ControlOrMeta+z')
   await expect.poll(() => readFileSync(path.join(vault, 'y.md'), 'utf8'), { timeout: 5000 }).toBe('[x](archive/notes/x.md) [[x]]\n')
+  await app.close()
+})
+
+// 测试用的 git：独立的全局配置，提交身份写在命令行上
+function gitIn(vault: string) {
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(vault, '..', 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' }
+  writeFileSync(env.GIT_CONFIG_GLOBAL, '')
+  return (...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: vault, env }).toString()
+}
+
+// 历史栏（S15）：git log --follow 跨重命名列出提交；选中提交看「该版本 ↔ 当前」，块级拣回走同一条保存路径
+test('history panel follows renames, compares with a commit, picks a block back and saves', async () => {
+  const { app, win, vault } = await launch({ 'old name.md': 'A\nB\nC\n' })
+  const git = gitIn(vault)
+  git('init', '-q')
+  git('add', '.')
+  git('commit', '-qm', 'v1')
+  writeFileSync(path.join(vault, 'old name.md'), 'A\nB2\nC\n')
+  git('commit', '-qam', 'v2')
+  git('mv', 'old name.md', 'new.md')
+  git('commit', '-qm', 'rename')
+  writeFileSync(path.join(vault, 'new.md'), 'A\nB3\nC\nD\n')
+  git('commit', '-qam', 'v3')
+
+  await win.getByRole('treeitem', { name: 'new.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('B3')
+  await win.keyboard.press('ControlOrMeta+Shift+p')
+  await win.keyboard.type('历史栏')
+  await win.keyboard.press('Enter')
+  const history = win.getByRole('complementary', { name: '历史' })
+  const items = history.getByRole('button')
+  await expect(items).toHaveCount(4, { timeout: 10_000 })
+  await expect(items.locator('span:first-child')).toHaveText(['v3', 'rename', 'v2', 'v1'])
+  await expect(items.nth(2)).toContainText('old name.md') // 改名前的提交显示当时的路径
+  await expect(items.nth(1)).not.toContainText('old name.md')
+
+  // 选中 v1：左侧是 v1 里 old name.md 的内容，右侧是当前文件
+  await items.nth(3).click()
+  await expect(items.nth(3)).toHaveAttribute('aria-pressed', 'true')
+  const diff = win.locator('.monaco-diff-editor')
+  const original = diff.locator('.editor.original .view-lines')
+  const modified = diff.locator('.editor.modified .view-lines')
+  await expect(original).toContainText('B', { timeout: 10_000 })
+  await expect(original).not.toContainText('B3')
+  await expect(modified).toContainText('B3')
+
+  // 拣回第一个改动块（B3 → B），D 那块不动；⌘S 落盘
+  const revert = diff.locator('.editor.modified .revertButton')
+  await expect(revert).toHaveCount(2)
+  await revert.first().click({ force: true }) // 箭头悬停才显示
+  await expect(modified).not.toContainText('B3')
+  await win.keyboard.press('ControlOrMeta+s')
+  await expect.poll(() => readFileSync(path.join(vault, 'new.md'), 'utf8')).toBe('A\nB\nC\nD\n')
+  await expect(win.locator('[role=tab] [title="未保存"]')).toHaveCount(0)
+
+  // 换一个提交对比：v2 的左侧
+  await items.nth(2).click()
+  await expect(original).toContainText('B2')
+  await expect(items.nth(3)).toHaveAttribute('aria-pressed', 'false')
+  // 再点同一个提交回到正文，内容与磁盘一致
+  await items.nth(2).click()
+  await expect(diff).toBeHidden()
+  await expect(win.locator('.cm-content')).toHaveText('ABCD')
+  await expect(win.getByRole('alert').filter({ hasText: /./ })).toHaveCount(0) // Monaco 自带空的 aria 播报区域
+  await app.close()
+})
+
+// 附件缺失占位上"从历史恢复"（#9 决定 7）：恢复删除前最后一版，写回工作区（未提交），占位随即消失
+test('a missing attachment is restored from history and the placeholder goes away', async () => {
+  const src = '首行\n\n![图](attachments/p.png)\n\n看 [文档](attachments/d.pdf)\n\n![没有](attachments/never.png)\n'
+  const { app, win, vault } = await launch({ 'a.md': src, 'attachments/d.pdf': 'pdf' })
+  writeFileSync(path.join(vault, 'attachments/p.png'), PNG)
+  const git = gitIn(vault)
+  git('init', '-q')
+  git('add', '.')
+  git('commit', '-qm', 'add')
+  git('rm', '-q', 'attachments/p.png', 'attachments/d.pdf')
+  git('commit', '-qm', 'delete')
+  win.on('dialog', (d) => d.accept())
+
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  const missing = win.locator('.cm-lp-image-missing')
+  await expect(missing).toHaveCount(3)
+  await missing.filter({ hasText: 'p.png' }).getByRole('button', { name: '从历史恢复' }).click()
+  await expect(win.locator('.cm-lp-image img')).toBeVisible()
+  expect(readFileSync(path.join(vault, 'attachments/p.png'))).toEqual(PNG)
+  await missing.filter({ hasText: 'd.pdf' }).getByRole('button', { name: '从历史恢复' }).click()
+  await expect(win.locator('.cm-lp-link')).toHaveText('文档')
+  expect(readFileSync(path.join(vault, 'attachments/d.pdf'), 'utf8')).toBe('pdf')
+  await expect(missing).toHaveCount(1)
+  expect(git('status', '--porcelain', '-uall')).toBe('?? attachments/d.pdf\n?? attachments/p.png\n')
+
+  // 越出 attachments/ 的路径（..、./..、反斜杠）在主进程就被拒绝，库根的同名文件不会被恢复
+  const head = git('rev-parse', 'HEAD~1').trim()
+  for (const p of ['attachments/../a.md', 'attachments/./../a.md', 'attachments\\..\\a.md']) {
+    await expect(win.evaluate(([v, p]) => window.synote.restoreSource(v, p), [vault, p])).rejects.toThrow(/not an attachment/)
+    await expect(win.evaluate(([v, p, h]) => window.synote.restoreAttachment(v, p, h), [vault, p, head])).rejects.toThrow(/not an attachment/)
+  }
+
+  // 历史里从没有过：报错，什么都不写
+  await missing.getByRole('button', { name: '从历史恢复' }).click()
+  await expect(win.getByRole('alert')).toContainText('历史里没有 attachments/never.png')
+  expect(existsSync(path.join(vault, 'attachments/never.png'))).toBe(false)
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe(src)
+  await app.close()
+})
+
+// 跨目录改名后看旧版（codex #49）：左侧图片按旧版笔记自己的路径解析、从那个提交读，不按当前路径
+test('history diff resolves images in the old version against the old note path', async () => {
+  const body = '第一段正文，长一些，让 git 认出这是重命名\n第二段正文\n第三段正文\n'
+  const { app, win, vault } = await launch({ 'a.md': `${body}![图](attachments/x.png)\n` })
+  mkdirSync(path.join(vault, 'attachments'))
+  writeFileSync(path.join(vault, 'attachments/x.png'), PNG)
+  const git = gitIn(vault)
+  git('init', '-q')
+  git('add', '.')
+  git('commit', '-qm', 'v1')
+  mkdirSync(path.join(vault, 'notes'))
+  git('mv', 'a.md', 'notes/a.md')
+  writeFileSync(path.join(vault, 'notes/a.md'), `${body}![图](../attachments/x.png)\n改\n`)
+  git('commit', '-qam', 'move')
+  rmSync(path.join(vault, 'attachments/x.png')) // 工作区里没有了：左侧只能从提交里读
+
+  await win.getByRole('treeitem', { name: 'notes' }).click()
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('改')
+  await win.keyboard.press('ControlOrMeta+Shift+p')
+  await win.keyboard.type('历史栏')
+  await win.keyboard.press('Enter')
+  const items = win.getByRole('complementary', { name: '历史' }).getByRole('button')
+  await expect(items).toHaveCount(2, { timeout: 10_000 })
+  await items.nth(1).click()
+  // 窄窗口（CI 屏幕）里这一行会折行：只认以 `![` 开头的那一段
+  const line = win.locator('.monaco-diff-editor .editor.original .view-line', { hasText: /^!\[/ })
+  await expect(line).toBeVisible({ timeout: 10_000 })
+  await line.hover({ position: { x: 12, y: 8 } }) // 停在 `![` 上
+  const hover = win.locator('.monaco-hover img')
+  await expect(hover).toBeVisible({ timeout: 10_000 })
+  await expect(hover).toHaveAttribute('src', /^data:image\/png/)
+  await app.close()
+})
+
+// 孤儿删除检查期间（拖住其中一个文件的 lstat）正文落盘引用了附件、渲染进程报告插入结束：
+// 解除保护排在删除之后，删除前最后一刻再按对账后的索引复核，两个附件都不删（codex #49）
+test('settling and saving during an orphan delete check never deletes the attachment', async () => {
+  const { app, win, vault } = await launch({ 'n.md': '开头', 'attachments/plain.pdf': 'p' })
+  const rel = await win.evaluate(async (v) => (await window.synote.saveAttachment(v, 'race.pdf', new Uint8Array([1, 2]))).path, vault)
+  expect(rel).toBe('attachments/race.pdf')
+  await expect.poll(() => win.evaluate((v) => window.synote.orphans(v).catch(() => []), vault), { timeout: 5000 }).toEqual(['attachments/plain.pdf', 'attachments/race.pdf'])
+
+  const held = await holdRecentWrite(app, 1500, 'plain.pdf', 'lstat')
+  const del = win.evaluate((v) => window.synote.deleteOrphans(v, ['attachments/plain.pdf', 'attachments/race.pdf']), vault)
+  await expect.poll(held).toBe(true)
+  await win.evaluate((v) => window.synote.writeFile(v, 'n.md', '开头 [p](attachments/plain.pdf) [r](attachments/race.pdf)'), vault)
+  const settled = win.evaluate((v) => window.synote.attachmentSettled(v, ['attachments/race.pdf']), vault)
+  const r = await del
+  await settled
+  expect(r.deleted).toEqual([])
+  expect(readdirSync(path.join(vault, 'attachments')).sort()).toEqual(['plain.pdf', 'race.pdf'])
+  // 保护解除后照常可以清理：撤掉引用再删
+  await win.evaluate((v) => window.synote.writeFile(v, 'n.md', '开头'), vault)
+  await expect.poll(() => win.evaluate((v) => window.synote.deleteOrphans(v, ['attachments/race.pdf']).then((x) => x.deleted), vault), { timeout: 5000 }).toEqual(['attachments/race.pdf'])
+  await app.close()
+})
+
+// 孤儿删除的互斥边界（codex #49 第二轮）：删除停在最终复核之后、第一次回收之前（拖住 shell.trashItem），
+// 期间应用内的正文写入、重命名都排在边界外，删完才落盘 / 移动，内容完整
+test('note writes wait until an orphan delete finishes', async () => {
+  const { app, win, vault } = await launch({ 'n.md': '开头', 'm.md': '[n](n.md)', 'attachments/o.pdf': 'o' })
+  await expect.poll(() => win.evaluate((v) => window.synote.orphans(v).catch(() => []), vault), { timeout: 5000 }).toEqual(['attachments/o.pdf'])
+  await app.evaluate(({ shell }) => {
+    const g = globalThis as { trashHeld?: boolean }
+    const orig = shell.trashItem.bind(shell)
+    g.trashHeld = false
+    shell.trashItem = async (p: string) => {
+      if (!g.trashHeld) {
+        g.trashHeld = true
+        await new Promise((r) => setTimeout(r, 1500))
+      }
+      return orig(p)
+    }
+  })
+  type W = { order: string[]; del: Promise<unknown>; wr: Promise<unknown>; mv: Promise<unknown> }
+  await win.evaluate((v) => {
+    const w = window as unknown as W
+    w.order = []
+    w.del = window.synote.deleteOrphans(v, ['attachments/o.pdf']).then((r) => (w.order.push('delete'), r))
+  }, vault)
+  await expect.poll(() => app.evaluate(() => (globalThis as { trashHeld?: boolean }).trashHeld)).toBe(true)
+  const text = '开头 [o](attachments/o.pdf)'
+  await win.evaluate(([v, text]) => {
+    const w = window as unknown as W
+    w.wr = window.synote.writeFile(v, 'n.md', text).then(() => w.order.push('write'))
+  }, [vault, text])
+  await win.evaluate(async (v) => {
+    const w = window as unknown as W
+    const { files } = await window.synote.planRename(v, 'm.md', 'm2.md') // 规划只读，不受边界影响
+    w.mv = window.synote.rename(v, 'm.md', 'm2.md', files).then(() => w.order.push('rename'))
+  }, vault)
+  await win.waitForTimeout(300)
+  expect(readFileSync(path.join(vault, 'n.md'), 'utf8')).toBe('开头') // 还在边界外排队
+  expect(existsSync(path.join(vault, 'm.md'))).toBe(true)
+  const { r, order } = await win.evaluate(async () => {
+    const w = window as unknown as W
+    const r = await w.del
+    await Promise.all([w.wr, w.mv])
+    return { r, order: w.order }
+  })
+  expect(order[0]).toBe('delete')
+  expect(order.slice(1).sort()).toEqual(['rename', 'write'])
+  expect(readFileSync(path.join(vault, 'm2.md'), 'utf8')).toBe('[n](n.md)')
+  expect(r).toEqual({ deleted: ['attachments/o.pdf'], kept: [] }) // 复核时没有引用：照常删，可从回收站 / 历史找回
+  expect(readFileSync(path.join(vault, 'n.md'), 'utf8')).toBe(text)
   await app.close()
 })

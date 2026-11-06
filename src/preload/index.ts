@@ -40,7 +40,10 @@ const api: SynoteApi = {
   gitState: () => ipcRenderer.invoke('git:state'),
   redetectGit: () => ipcRenderer.invoke('git:redetect'),
   chooseGit: () => ipcRenderer.invoke('git:choose'),
-  readHead: (v, p) => ipcRenderer.invoke('git:readHead', v, p),
+  readRev: (v, r, p) => ipcRenderer.invoke('git:readRev', v, r, p),
+  fileLog: (v, p) => ipcRenderer.invoke('git:log', v, p),
+  restoreSource: (v, p) => ipcRenderer.invoke('git:restoreSource', v, p),
+  restoreAttachment: (v, p, h) => ipcRenderer.invoke('git:restore', v, p, h),
   onGitChanged: subscribe('git:changed'),
 }
 

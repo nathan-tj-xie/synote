@@ -73,7 +73,8 @@ function checkKeymap() {
 export type Change = { from: number; to: number; insert: string }
 
 let editor: monaco.editor.IStandaloneDiffEditor | null = null
-let cur: { vault: string; path: string; original: monaco.editor.ITextModel; modified: monaco.editor.ITextModel } | null = null
+// path：当前笔记（右侧）；base：左侧那个版本里笔记的路径（跨目录改名后与 path 不同），两侧的相对链接各按各的解析
+let cur: { vault: string; path: string; rev: string; base: string; original: monaco.editor.ITextModel; modified: monaco.editor.ITextModel } | null = null
 // replace / reset 写入 Monaco 时为 true：这些改动来自 CM6，不能再同步回去
 let applying = false
 // 不变式：CM6 正文 = off 个 BOM + Monaco 文本。Monaco 会把开头的 BOM 藏起来、不算进文本和偏移，藏几个不猜，
@@ -120,6 +121,10 @@ export function create(parent: HTMLElement, onEdit: (changes: Change[]) => void,
     fontSize: parseFloat(body.fontSize),
     lineHeight: 1.7,
     renderOverviewRuler: true,
+    // 块级拣回（#9）：改动块旁的箭头把左侧那块应用到右侧，走 modified 编辑器的编辑，经 onEdit 写回 CM6。
+    // 默认的 gutter 菜单在 standalone 里没有动作，还会顶掉箭头；只读（交接锁）时 Monaco 拒绝这类编辑
+    renderGutterMenu: false,
+    glyphMargin: true, // 箭头画在 glyph margin 里，standalone 默认没开
   })
   checkKeymap()
   editor.getModifiedEditor().onDidChangeModelContent((e) => {
@@ -134,7 +139,8 @@ export function create(parent: HTMLElement, onEdit: (changes: Change[]) => void,
   })
 }
 
-export function show(vault: string, path: string, head: string, doc: string, readOnly: boolean) {
+// rev / base：左侧是哪个版本（HEAD 或历史提交的 oid）、笔记在那个版本里的路径，悬停图片时按它解析、从同一版本读
+export function show(vault: string, path: string, rev: string, base: string, head: string, doc: string, readOnly: boolean) {
   hide()
   // 模型只是 CM6 正文的临时镜像，每次进入重建；EOL 固定为 LF，偏移才和 CM6 对得上（CM6 的 doc 只用 \n）
   const mk = (text: string) => {
@@ -142,7 +148,7 @@ export function show(vault: string, path: string, head: string, doc: string, rea
     m.setEOL(monaco.editor.EndOfLineSequence.LF)
     return m
   }
-  cur = { vault, path, original: mk(head), modified: mk(doc) }
+  cur = { vault, path, rev, base, original: mk(head), modified: mk(doc) }
   editor!.setModel({ original: cur.original, modified: cur.modified })
   if (!align(doc)) reset(doc)
   setReadOnly(readOnly)
@@ -179,21 +185,21 @@ export function replace(doc: string) {
   }
   reset(doc)
 }
-// HEAD 变了（提交、切分支）：更新左侧
+// 左侧版本的内容变了（HEAD 指向了别的提交）：更新左侧
 export const setHead = (head: string) => cur && cur.original.setValue(head)
 export const setReadOnly = (on: boolean) => editor?.getModifiedEditor().updateOptions({ readOnly: on })
 export const focus = () => editor?.getModifiedEditor().focus()
 
 
-// diff 里的图片只显示源码，悬停弹出缩略图（#9 决定 6）：左边读 HEAD 里的 blob（文件已删也能看到），右边读工作区
+// diff 里的图片只显示源码，悬停弹出缩略图（#9 决定 6）：左边读那个版本里的 blob（文件已删也能看到），右边读工作区
 monaco.languages.registerHoverProvider('markdown', {
   async provideHover(model, pos) {
     const c = cur
     if (!c || (model !== c.original && model !== c.modified)) return null
-    const ref = imageAt(model.getLineContent(pos.lineNumber), pos.column - 1, c.path)
+    const ref = imageAt(model.getLineContent(pos.lineNumber), pos.column - 1, model === c.original ? c.base : c.path)
     if (!ref) return null
     const range = new monaco.Range(pos.lineNumber, ref.start + 1, pos.lineNumber, ref.end + 1)
-    const bytes = await (model === c.original ? window.synote.readHead(c.vault, ref.path) : window.synote.readBytes(c.vault, ref.path)).catch(() => null)
+    const bytes = await (model === c.original ? window.synote.readRev(c.vault, c.rev, ref.path) : window.synote.readBytes(c.vault, ref.path)).catch(() => null)
     const text = (value: string) => ({ range, contents: [{ value }] })
     if (!bytes) return text(i18next.t('imageMissing', { path: ref.path }))
     if (bytes.length > MAX_IMAGE) return text(i18next.t('imageTooLarge'))

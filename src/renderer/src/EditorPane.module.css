@@ -5,6 +5,8 @@
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-muted); }
 .close { background: none; border: none; color: var(--fg-muted); cursor: pointer; padding: 0 2px; visibility: hidden; }
 .tab:hover .close, .on .close { visibility: visible; }
-.host { flex: 1; min-height: 0; }
+.body { flex: 1; min-height: 0; display: flex; }
+.body:has(> .host[hidden]) { display: none; }
+.host { flex: 1; min-width: 0; }
 .host[hidden] { display: none; }
 .empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--fg-muted); }
