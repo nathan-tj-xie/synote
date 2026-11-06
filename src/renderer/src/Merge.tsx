@@ -12,6 +12,8 @@ export function MergeBanner() {
   const { t } = useTranslation()
   const root = useVault((st) => st.vault?.root)
   const conflicts = useGit((st) => (st.state?.status === 'ready' && st.state.merging ? st.state.files.filter((f) => f.conflict).length : null))
+  // 缺身份时同提交一样禁用（ADR 0004），引导在 git 面板的身份卡片里
+  const noIdentity = useGit((st) => st.state?.status === 'ready' && (!st.state.name || !st.state.email))
   const [busy, setBusy] = useState(false)
   const [confirm, setConfirm] = useState(false)
   if (conflicts === null || !root) return null
@@ -48,7 +50,7 @@ export function MergeBanner() {
   return (
     <section className={s.banner} aria-label={t('merging')}>
       <span className={s.text}>{conflicts ? t('mergingConflicts', { n: conflicts }) : t('mergingResolved')}</span>
-      <button className={s.primary} disabled={busy || conflicts > 0} onClick={finish}>
+      <button className={s.primary} disabled={busy || conflicts > 0 || noIdentity} title={noIdentity ? t('mergeNoIdentity') : undefined} onClick={finish}>
         {t('mergeFinish')}
       </button>
       <AlertDialog.Root open={confirm} onOpenChange={setConfirm}>

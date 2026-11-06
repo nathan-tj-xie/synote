@@ -14,7 +14,7 @@ import { useEditor, useGit, useUi, useVault } from './store'
 import { baseName } from './tree'
 
 type Ready = Extract<GitState, { status: 'ready' }>
-type Op = 'commit' | 'push' | 'pull' | 'stage' | 'unstage'
+type Op = 'commit' | 'push' | 'pull' | 'stage' | 'unstage' | 'takeSide'
 type Card = Extract<GitOpResult, { ok: false }> & { op: Op }
 
 const fail = (e: unknown) => useUi.getState().setError(String(e))
@@ -113,6 +113,9 @@ function Panel({ root, state }: { root: string; state: Ready }) {
   const pull = () => run('pull', () => withWorktreeLock(t('gitPullUnsaved'), () => window.synote.gitPull(root)))
   const push = () => run('push', () => window.synote.gitPush(root))
   const stage = (paths: string[] | null) => run('stage', () => window.synote.gitStage(root, paths))
+  // 会改写工作区里的这个文件：同 pull，先落盘、期间只读、结束后按磁盘重载
+  const takeSide = (path: string, side: 'ours' | 'theirs') =>
+    run('takeSide', () => withWorktreeLock(t('mergeUnsaved'), () => window.synote.gitTakeSide(root, path, side)))
   // 重命名要连同旧路径一起取消暂存；旧路径在库外时只取消新路径
   const unstage = (f: GitFile) => run('unstage', () => window.synote.gitUnstage(root, [f.path, ...(f.orig && !f.orig.startsWith('../') ? [f.orig] : [])]))
   // 删除的笔记：读 HEAD 里的正文，只读展示
@@ -198,6 +201,7 @@ function Panel({ root, state }: { root: string; state: Ready }) {
         onOpenDeleted={openDeleted}
         onStage={stage}
         onUnstage={unstage}
+        onTakeSide={takeSide}
         onToggle={(p) =>
           setUnchecked((u) => {
             const n = new Set(u)
@@ -298,6 +302,7 @@ function Changes(p: {
   onOpenDeleted: (path: string) => void
   onStage: (paths: string[] | null) => void
   onUnstage: (f: GitFile) => void
+  onTakeSide: (path: string, side: 'ours' | 'theirs') => void
   onToggle: (path: string) => void
 }) {
   const { t } = useTranslation()
@@ -348,12 +353,28 @@ function Changes(p: {
                 className={`${s.row} ${f.path.endsWith('.md') ? s.openable : ''}`}
                 style={style}
                 title={f.path}
-                // 冲突文件打开时直接进冲突视图（editor.ts 按 git 状态判断）；不给暂存按钮，暂存要等标记清空后保存时自动做
+                // 笔记打开时直接进冲突视图（editor.ts 按 git 状态判断）。不给暂存按钮：笔记等标记清空后保存时自动暂存；
+                // 附件、删除 / 修改冲突没有标记可解，整份取一侧
                 onClick={() => f.path.endsWith('.md') && useEditor.getState().open(f.path)}
               >
                 <span className={`${s.st} ${s.stC}`}>!</span>
                 <span className={s.name}>{baseName(f.path)}</span>
                 <span className={s.dir}>{f.path.slice(0, -baseName(f.path).length)}</span>
+                {(['ours', 'theirs'] as const).map((side) => (
+                  <button
+                    key={side}
+                    className={`${s.small} ${s.act}`}
+                    aria-label={t(side === 'ours' ? 'gitTakeOurs' : 'gitTakeTheirs')}
+                    title={t(side === 'ours' ? 'gitTakeOurs' : 'gitTakeTheirs')}
+                    disabled={p.busy}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      p.onTakeSide(f.path, side)
+                    }}
+                  >
+                    {t(side === 'ours' ? 'gitOurs' : 'gitTheirs')}
+                  </button>
+                ))}
               </div>
             )
           const st = r.staged ? f.x : f.y === '?' ? 'U' : f.y

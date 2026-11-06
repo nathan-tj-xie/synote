@@ -589,11 +589,17 @@ ipcMain.handle('git:mergeContinue', (_e, vault: string) =>
   gitOp(checkVault(vault), async (g) => {
     const id = await g.identity()
     if (!id.name || !id.email) throw new GitError('noIdentity', -1, '')
-    const left = [...(await g.status()).files.filter((f) => f.conflict).map((f) => f.path), ...(await g.markersLeft())]
-    if (left.length) throw new UnresolvedError(left)
+    const left = new Set([...(await g.status()).files.filter((f) => f.conflict).map((f) => f.path), ...(await g.markersLeft())])
+    if (left.size) throw new UnresolvedError([...left])
     await g.mergeContinue()
   }),
 )
+ipcMain.handle('git:takeSide', (_e, vault: string, rel: string, side: string) => {
+  const r = checkVault(vault)
+  const [p] = checkPaths([rel])
+  if (side !== 'ours' && side !== 'theirs') throw new Error(`invalid side: ${side}`)
+  return gitOp(r, (g) => g.takeSide(p, side))
+})
 ipcMain.handle('git:mergeAbort', (_e, vault: string) => gitOp(checkVault(vault), (g) => g.mergeAbort()))
 ipcMain.handle('git:repoLog', (_e, vault: string) => {
   const r = checkVault(vault)

@@ -427,6 +427,13 @@ test('merge: restored after restart, abort with confirmation, follows merges sta
   await w.getByRole('treeitem', { name: 'a.md' }).click()
   await expect(w.locator('[data-conflict-view] .monaco-editor .view-lines')).toContainText('<<<<<<< HEAD', { timeout: 10_000 })
 
+  // 整份取一侧（附件、删除 / 修改冲突的解决入口，笔记也能用）
+  const changes = await openGit(w)
+  await row(changes, 'b.md').hover()
+  await row(changes, 'b.md').getByRole('button', { name: '整份用传入（远端）版本' }).click()
+  await expect(banner(w)).toContainText('1 个冲突文件')
+  expect(readFileSync(path.join(vault, 'b.md'), 'utf8')).toBe('远端 b\n')
+
   // 放弃合并要二次确认；取消什么都不做
   await banner(w).getByRole('button', { name: '放弃合并' }).click()
   const confirm = w.getByRole('alertdialog', { name: '放弃这次合并？' })

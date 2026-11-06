@@ -299,20 +299,38 @@ export class Git {
     return { ...parseBranch(out), files, merging }
   }
 
-  // 完成合并前的复查（#9 决定 3）：暂存区里相对 HEAD 改动过的笔记库文件，哪些仍有冲突标记（查暂存区版本，合并提交提交的就是它）。
-  // HEAD 里本来就有的（如讲冲突标记的笔记）不算；二进制文件跳过
+  // 完成合并前的复查（#9 决定 3）：相对 HEAD 改动过的笔记库文件，暂存区或工作区版本里哪些仍有冲突标记（合并提交的是暂存区；
+  // 工作区也查，免得自动暂存之后又改出标记、合并完了留在笔记里）。HEAD 里本来就有的（如讲冲突标记的笔记）不算；二进制文件跳过
   async markersLeft(): Promise<string[]> {
     // --raw 直接给出暂存区一侧的 oid：常驻 cat-file 进程只读一次 .git/index，按 `:路径` 读会拿到旧的暂存内容
-    const [out, prefix] = await Promise.all([this.run(['--literal-pathspecs', 'diff', '--cached', '--raw', '-z', '--no-renames', '--no-abbrev', 'HEAD', '--', '.']), this.prefix()])
-    const t = out.split('\0')
-    const res: string[] = []
-    for (let i = 0; i + 1 < t.length; i += 2) {
-      const oid = t[i].split(' ')[3]
-      // 冲突中的（全零 oid）由调用方按冲突文件拦下；删除的也是全零
-      const b = oid && !/^0+$/.test(oid) ? await this.readBlob(oid) : null
-      if (b && !b.includes(0) && hasConflictMarkers(b.toString('utf8'))) res.push(path.posix.relative(prefix, t[i + 1]))
+    const diff = (cached: boolean) =>
+      this.run(['--literal-pathspecs', 'diff', ...(cached ? ['--cached'] : []), '--raw', '-z', '--no-renames', '--no-abbrev', 'HEAD', '--', '.'])
+    const [staged, worktree, prefix] = await Promise.all([diff(true), diff(false), this.prefix()])
+    const marked = (b: Buffer | null) => !!b && !b.includes(0) && hasConflictMarkers(b.toString('utf8'))
+    const res = new Set<string>()
+    for (const [out, cached] of [[staged, true], [worktree, false]] as const) {
+      const t = out.split('\0')
+      for (let i = 0; i + 1 < t.length; i += 2) {
+        const oid = t[i].split(' ')[3]
+        const rel = path.posix.relative(prefix, t[i + 1])
+        // 暂存区一侧全零：冲突中（由调用方按冲突文件拦下）或已删除；工作区一侧的 oid 总是全零，读盘
+        const b = cached ? (/^0+$/.test(oid) ? null : await this.readBlob(oid)) : await fs.readFile(path.join(this.cwd, rel)).catch(() => null)
+        if (marked(b)) res.add(rel)
+      }
     }
-    return res
+    return [...res].sort()
+  }
+
+  // 非 Markdown 的冲突（附件、删除 / 修改等）没法在冲突视图里逐块解决：整份取一侧（ours 为本地）并暂存；那一侧没有这个文件就删除
+  async takeSide(rel: string, side: 'ours' | 'theirs'): Promise<void> {
+    // 每行 `<mode> <oid> <stage>\t<path>`，stage 2 是 ours、3 是 theirs
+    const out = await this.run(['--literal-pathspecs', 'ls-files', '-u', '-z', '--', rel])
+    const stages = out.split('\0').filter(Boolean).map((l) => l.split('\t')[0].split(' ')[2])
+    if (!stages.length) throw new GitError('unknown', -1, `${rel} is not in conflict`)
+    if (stages.includes(side === 'ours' ? '2' : '3')) {
+      await this.mutate(['--literal-pathspecs', 'checkout', `--${side}`, '--', rel])
+      await this.stage([rel])
+    } else await this.mutate(['--literal-pathspecs', 'rm', '-q', '-f', '--', rel]) // -f：冲突中的工作区文件本来就和暂存区不同
   }
 
   // 用 git 生成的合并信息（MERGE_MSG）提交暂存区；工作区里没暂存的改动不进合并提交

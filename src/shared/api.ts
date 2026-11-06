@@ -159,6 +159,8 @@ export interface SynoteApi {
   // 合并中（S16）：完成合并（先复查冲突文件和残留标记，再用 git 生成的信息提交暂存区）；放弃合并（git merge --abort）
   gitMergeContinue(vault: string): Promise<GitOpResult>
   gitMergeAbort(vault: string): Promise<GitOpResult>
+  // 冲突文件整份取一侧（本地 ours / 传入 theirs）并暂存，那一侧没有这个文件就删除；附件、删除 / 修改冲突靠它解决
+  gitTakeSide(vault: string, path: string, side: 'ours' | 'theirs'): Promise<GitOpResult>
   // 笔记库的提交历史（git 面板底部），新的在前；LogEntry.path 为空
   repoLog(vault: string): Promise<LogEntry[]>
   // 工作区或 .git 有变化后推送最新状态
