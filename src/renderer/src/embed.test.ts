@@ -1,10 +1,10 @@
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { ensureSyntaxTree } from '@codemirror/language'
-import { EditorState } from '@codemirror/state'
+import { EditorSelection, EditorState } from '@codemirror/state'
 import { GFM, parser } from '@lezer/markdown'
 import { describe, expect, it } from 'vitest'
 import { canWrite, embedOf, embedText, mathSyntax, type Embed } from './embed'
-import { livePreview } from './livePreview'
+import { livePreview, openLinesAtBlocks, typeAtBlocks } from './livePreview'
 
 const md = parser.configure([GFM, mathSyntax])
 
@@ -150,5 +150,28 @@ describe('输入不会贴到块级嵌入块的定界符上', () => {
     const s = EditorState.create({ doc: '$$\nx\n$$', extensions: [markdown({ base: markdownLanguage, extensions: [mathSyntax] }), livePreview(null)] })
     ensureSyntaxTree(s, 7)
     expect(s.update({ changes: { from: 7, insert: 'Z' } }).state.doc.toString()).toBe('$$\nx\n$$Z')
+  })
+  const at = (doc: string, ...heads: number[]) => {
+    const s = EditorState.create({
+      doc,
+      selection: EditorSelection.create(heads.map((h) => EditorSelection.cursor(h))),
+      extensions: [EditorState.allowMultipleSelections.of(true), markdown({ base: markdownLanguage, extensions: [mathSyntax] }), livePreview(null)],
+    })
+    ensureSyntaxTree(s, doc.length)
+    return s
+  }
+  it('块边界上的按键输入：每个光标都照常写入，在边界的那个被挤到块外', () => {
+    const s = at('a\n$$\nx\n$$', 1, 9)
+    const t = s.update(typeAtBlocks(s, 'Z')!).state
+    expect(t.doc.toString()).toBe('aZ\n$$\nx\n$$\nZ')
+    expect(t.selection.ranges.map((r) => r.head)).toEqual([2, 12])
+    expect(typeAtBlocks(at('a\n$$\nx\n$$', 1), 'Z')).toBeNull() // 没有光标在边界：交给浏览器
+  })
+  it('输入法组字开始前：贴着定界符的光标先换到块外的新行', () => {
+    const s = at('$$\nx\n$$\nb\n$$\ny\n$$', 7, 10, 9)
+    const t = s.update(openLinesAtBlocks(s)!).state
+    expect(t.doc.toString()).toBe('$$\nx\n$$\n\nb\n\n$$\ny\n$$')
+    expect(t.selection.ranges.map((r) => t.doc.lineAt(r.head).text)).toEqual(['', 'b', ''])
+    expect(openLinesAtBlocks(at('a $$x$$ b', 3))).toBeNull()
   })
 })

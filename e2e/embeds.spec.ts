@@ -331,3 +331,35 @@ test('saving an untouched formula leaves its source byte for byte', async () => 
   await expect.poll(disk).toBe('$$  y  $$\n\n$$ a\nb $$\n')
   await app.close()
 })
+
+// 中文输入法：用 CDP 模拟（先是输入法的按键 keyCode 229，再组字、上屏）。组字开始前光标先换到块外的新行，
+// 上屏的字不会贴在 `$$` 后面，也不会因为块边界在 DOM 里无处组字而丢掉
+test('IME composition next to a block embed lands outside it', async () => {
+  const { app, win, disk } = await launch('$$\nx\n$$')
+  await win.locator('.cm-content').click({ position: { x: 5, y: 5 } })
+  await win.keyboard.press('Escape')
+  await win.keyboard.press('ControlOrMeta+End')
+  await expect(win.locator('.cm-content')).toBeFocused()
+  const cdp = await win.context().newCDPSession(win)
+  await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', windowsVirtualKeyCode: 229, key: 'Process', code: 'KeyZ' })
+  for (const text of ['z', 'zh', 'zhong']) await cdp.send('Input.imeSetComposition', { text, selectionStart: text.length, selectionEnd: text.length })
+  await cdp.send('Input.insertText', { text: '中' })
+  await expect.poll(disk).toBe('$$\nx\n$$\n中')
+  await expect(win.locator('.cm-embed-math .katex')).toBeVisible()
+  await app.close()
+})
+
+test('inserting block math on an indented blank line replaces the blank line', async () => {
+  const { app, win, disk } = await launch('# 标题\n\n    ')
+  await win.locator('.cm-lp-h1').click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.press('ControlOrMeta+Shift+p')
+  await win.getByRole('combobox', { name: '命令面板' }).fill('插入块级公式')
+  await win.keyboard.press('Enter')
+  const dialog = win.getByRole('dialog', { name: '编辑公式' })
+  await dialog.getByRole('textbox', { name: '源码' }).fill('x')
+  await dialog.getByRole('button', { name: '保存' }).click()
+  await expect.poll(disk).toBe('# 标题\n\n$$\nx\n$$')
+  await expect(win.locator('.cm-embed-math .katex')).toBeVisible()
+  await app.close()
+})

@@ -113,7 +113,17 @@ function Inline({ req }: { req: Req }) {
       {/* 锚在公式的框上：Radix 负责放在下方、放不下时翻到上方 */}
       <Popover.Anchor style={{ position: 'fixed', left: at.left, top: at.top, width: at.width, height: at.height, pointerEvents: 'none' }} />
       <Popover.Portal>
-        <Popover.Content className={s.pop} side="bottom" align="start" sideOffset={6} collisionPadding={8} aria-label={t('mathEdit')} onCloseAutoFocus={keepFocus(req)}>
+        <Popover.Content
+          className={s.pop}
+          side="bottom"
+          align="start"
+          sideOffset={6}
+          collisionPadding={8}
+          aria-label={t('mathEdit')}
+          onCloseAutoFocus={keepFocus(req)}
+          // 只按 Esc / 点外部关闭：焦点移出不关（从命令面板打开时，面板关闭会把焦点还给正文）
+          onFocusOutside={(e) => e.preventDefault()}
+        >
           <input
             className={s.inline}
             aria-label={t('embedSource')}

@@ -2,7 +2,7 @@
 // 只打开不编辑时源码字节不变，都依赖这一点。唯一会写正文的是任务列表勾选，它走普通的编辑事务和保存路径。
 // 光标 / 选区碰到的行显示源码，其余行渲染；按行而不是按元素切换，光标在行内移动时装饰不变，输入法组字更稳
 import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/language'
-import { ChangeSet, EditorState, Facet, Prec, StateEffect, StateField, type Extension, type Range, type Transaction } from '@codemirror/state'
+import { ChangeSet, EditorSelection, EditorState, Facet, Prec, StateEffect, StateField, type Extension, type Range, type Transaction, type TransactionSpec } from '@codemirror/state'
 import { Decoration, EditorView, keymap, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view'
 import type { SyntaxNode } from '@lezer/common'
 import { tags as t } from '@lezer/highlight'
@@ -539,13 +539,22 @@ export function insertMath(view: EditorView, display: boolean) {
   let at = head
   let open = (after ? '\n' : '') + d
   let close = d + (before ? '\n' : '')
+  let to = at
+  let text = ''
   if (display && before) close = '$$\n\n'
-  else if (display) {
-    at = line.to
-    open = line.text.trim() ? '\n\n$$' : '$$'
+  else if (display && !line.text.trim()) {
+    // 空白行（含缩进）：整行换成公式，留着缩进的话 `    $$` 会成为缩进代码
+    at = line.from
+    to = line.to
+    text = line.text
+    open = '$$'
+    close = '$$'
+  } else if (display) {
+    at = to = line.to
+    open = '\n\n$$'
     close = '$$'
   }
-  openEmbed(view, { kind: display ? 'math' : 'inline', block: display, from: at, to: at, text: '', src: '', open, close, prefix: '', tight: [false, false], display })
+  openEmbed(view, { kind: display ? 'math' : 'inline', block: display, from: at, to, text, src: '', open, close, prefix: '', tight: [false, false], display })
 }
 
 // 空行输入 `$$` 或 ```mermaid 后按 Enter：补上结尾并打开编辑窗口。行不在代码块等里面（属于顶层段落或从这行开始的围栏）
@@ -567,7 +576,7 @@ function createOnEnter(view: EditorView): boolean {
 
 // 用户输入贴着块级嵌入块的定界符（第一行行首、最后一行行尾）时，在中间补一个换行，把输入挤到块外的新行。
 // 光标停在这些位置（文末的块之后、两个相邻块之间、关闭编辑后）都不会把字写进 `$$` / 围栏，不必逐处安排光标。
-// shortcut: 输入法组字不处理（组字中改正文会打断输入法），贴着定界符组字的情况出现再说
+// 输入法组字不在这里处理（组字中改正文会打断输入法），由 openLinesAtBlocks 在组字开始前让开
 const keepOut = EditorState.transactionFilter.of((tr) => {
   if (!tr.docChanged || !tr.isUserEvent('input') || tr.isUserEvent('input.type.compose')) return tr
   const extra: { from: number; insert: string }[] = []
@@ -613,14 +622,35 @@ function arrow(dir: 'left' | 'right' | 'up' | 'down') {
   }
 }
 
-// 光标正好在块级嵌入块的边界（如文末的块之后）时，DOM 里那个位置没有可编辑的文本，浏览器不产生输入、字会丢：
-// 可打印字符由这里派发成普通输入，再由 keepOut 挤到块外
+const atBlock = (state: EditorState, pos: number) => !!(embedAround(state, pos, -1)?.block || embedAround(state, pos, 1)?.block)
+
+// 有光标正好在块级嵌入块的边界（如文末的块之后）时，DOM 里那个位置没有可编辑的文本，浏览器不产生输入、字会丢：
+// 可打印字符改由这里按普通输入写进每个选区（多光标照常），再由 keepOut 挤到块外。没有光标在边界时返回 null
+export function typeAtBlocks(state: EditorState, text: string): TransactionSpec | null {
+  if (state.readOnly || !state.selection.ranges.some((r) => r.empty && atBlock(state, r.head))) return null
+  return { ...state.replaceSelection(text), scrollIntoView: true, userEvent: 'input.type' }
+}
+
+const imeKey = (e: KeyboardEvent) => e.isComposing || e.keyCode === 229 // 输入法在处理的按键：字由输入法上屏，这里不写
+
 function typeAtBlock(view: EditorView, e: KeyboardEvent): boolean {
-  const r = view.state.selection.main
-  if (e.key.length !== 1 || e.ctrlKey || e.metaKey || !r.empty || view.state.readOnly) return false
-  if (!embedAround(view.state, r.head, -1)?.block && !embedAround(view.state, r.head, 1)?.block) return false
-  view.dispatch({ changes: { from: r.head, insert: e.key }, selection: { anchor: r.head + 1 }, scrollIntoView: true, userEvent: 'input.type' })
-  return true
+  const spec = e.key.length === 1 && !e.ctrlKey && !e.metaKey && !imeKey(e) ? typeAtBlocks(view.state, e.key) : null
+  if (spec) view.dispatch(spec)
+  return !!spec
+}
+
+// 输入法开始组字前（它的第一个按键、compositionstart）：贴着块级嵌入块定界符的光标先换到块外的新行
+// （块之后：下一行；块之前：上一行），再让输入法组字。块边界在 DOM 里没有可编辑的文本，不先让开的话输入法无处组字、字会丢；
+// 组字过程中又不能改正文（会打断输入法），所以 keepOut 不管组字，在这里提前让开
+export function openLinesAtBlocks(state: EditorState): TransactionSpec | null {
+  if (state.readOnly) return null
+  const spec = state.changeByRange((r) => {
+    if (!r.empty) return { range: r }
+    if (embedAround(state, r.head, -1)?.block) return { changes: { from: r.head, insert: '\n' }, range: EditorSelection.cursor(r.head + 1) }
+    if (embedAround(state, r.head, 1)?.block) return { changes: { from: r.head, insert: '\n' }, range: EditorSelection.cursor(r.head) }
+    return { range: r }
+  })
+  return spec.changes.empty ? null : { ...spec, userEvent: 'input' }
 }
 
 const embedKeys = Prec.high(
@@ -1018,7 +1048,14 @@ const inline = ViewPlugin.fromClass(
     decorations: (v) => v.decorations,
     provide: (p) => EditorView.atomicRanges.of((view) => view.plugin(p)?.atomic ?? Decoration.none),
     eventHandlers: {
-      compositionstart() {
+      keydown(e, view) {
+        const spec = imeKey(e) && openLinesAtBlocks(view.state)
+        if (spec) view.dispatch(spec)
+        return false
+      },
+      compositionstart(_e, view) {
+        const spec = openLinesAtBlocks(view.state)
+        if (spec) view.dispatch(spec)
         ime = true
       },
       // 组字结束：补一次重建（组字期间只映射了旧装饰）
