@@ -13,7 +13,8 @@ import { anchorLine, movePath, relativeLink } from '../../shared/url'
 import { imageMime } from './diffUtil'
 import { tableTrailingSpace } from './gfmTable'
 import { noteCompletion, resolveHref, type Href } from './links'
-import { forgetFiles, linkAt, livePreview } from './livePreview'
+import { inlineMath } from './embed'
+import { forgetFiles, insertMath, linkAt, livePreview } from './livePreview'
 import { isMac } from './match'
 import { useEditor, useUi, useVault } from './store'
 
@@ -129,7 +130,7 @@ function makeState(doc: string, path: string): EditorState {
       minimalSetup,
       editable(),
       EditorState.allowMultipleSelections.of(true), // ⌘D、⌥ 点击等多光标键位需要
-      markdown({ base: markdownLanguage, codeLanguages: languages, extensions: [tableTrailingSpace] }), // GFM（表格、任务列表、删除线）；代码块按语言懒加载高亮
+      markdown({ base: markdownLanguage, codeLanguages: languages, extensions: [tableTrailingSpace, inlineMath] }), // GFM（表格、任务列表、删除线）；代码块按语言懒加载高亮
       where.of(atPath(path)),
       EditorView.lineWrapping,
       theme,
@@ -434,6 +435,9 @@ async function followLink(h: Href, from: string) {
   if (line) reveal(t.path, line, 0, 0)
   else useEditor.getState().open(t.path)
 }
+
+// 命令「插入块级公式 / 插入行内公式」（S4）
+export const insertEmbed = (display: boolean) => view && shown && !locked && !diffShown && insertMath(view, display)
 
 // 正文与上次落盘一致（没有未保存改动）时不写盘
 export const saveCurrent = () => !locked && shown && (timers.has(shown) || useEditor.getState().dirty[shown]) && flush(shown)

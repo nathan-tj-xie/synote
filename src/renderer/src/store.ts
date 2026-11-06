@@ -1,6 +1,8 @@
 // 按领域拆 store（ADR 0005）：vault / editor / ui / git
+import type { EditorView } from '@codemirror/view'
 import { create } from 'zustand'
 import type { GitState, OrphanAttachment, VaultInfo } from '../../shared/api'
+import type { Embed } from './embed'
 
 type VaultState = {
   vault: VaultInfo | null
@@ -34,11 +36,14 @@ type UiState = {
   orphans: { root: string; list: OrphanAttachment[] } | null
   // "重命名 / 移动"对话框：要移动的路径和它所在的库
   rename: { root: string; from: string } | null
+  // 正在编辑的嵌入块：块级在弹窗里，行内（at 是浮层位置）在浮层里。带着视图是为了写回时直接派发，不经 React state 持有正文
+  embed: { view: EditorView; embed: Embed; at: { left: number; top: number; bottom: number } | null } | null
   setError: (e: string | null) => void
   setPalette: (p: UiState['palette']) => void
   setSidebar: (v: UiState['sidebar']) => void
   setOrphans: (o: UiState['orphans']) => void
   setRename: (r: UiState['rename']) => void
+  setEmbed: (e: UiState['embed']) => void
   toggleHistory: () => void
 }
 
@@ -95,12 +100,14 @@ export const useUi = create<UiState>((set) => ({
   sidebar: 'files',
   orphans: null,
   rename: null,
+  embed: null,
   history: false,
   setError: (error) => set({ error }),
   setPalette: (palette) => set({ palette }),
   setSidebar: (sidebar) => set({ sidebar }),
   setOrphans: (orphans) => set({ orphans }),
   setRename: (rename) => set({ rename }),
+  setEmbed: (embed) => set({ embed }),
   toggleHistory: () => set((s) => ({ history: !s.history })),
 }))
 

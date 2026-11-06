@@ -3,8 +3,8 @@
 import type { SyntaxNode, Tree } from '@lezer/common'
 import { destination, WIKI } from './url'
 
-// 内容不按 Markdown 渲染的节点：里面的 `[..](..)`、`[[..]]` 不是链接。引用定义本身也不算链接（地址算在使用处）
-export const RAW = new Set(['FencedCode', 'CodeBlock', 'InlineCode', 'HTMLBlock', 'HTMLTag', 'CommentBlock', 'Comment', 'ProcessingInstructionBlock', 'LinkReference'])
+// 内容不按 Markdown 渲染的节点（InlineMath 只有编辑器的语法树里有）：里面的 `[..](..)`、`[[..]]` 不是链接。引用定义本身也不算链接（地址算在使用处）
+export const RAW = new Set(['FencedCode', 'CodeBlock', 'InlineCode', 'HTMLBlock', 'HTMLTag', 'CommentBlock', 'Comment', 'ProcessingInstructionBlock', 'LinkReference', 'InlineMath'])
 // 引用定义所在的块级容器（linkRefs 只往这些节点里走）
 const CONTAINERS = new Set(['Document', 'Blockquote', 'BulletList', 'OrderedList', 'ListItem'])
 

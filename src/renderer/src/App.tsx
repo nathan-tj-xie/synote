@@ -4,6 +4,7 @@ import { Group, Panel, Separator } from 'react-resizable-panels'
 import s from './App.module.css'
 import { installShortcuts, run } from './commands'
 import { EditorPane } from './EditorPane'
+import { EmbedEditor } from './EmbedEditor'
 import { reloadIfClean } from './editor'
 import { FileTree } from './FileTree'
 import { GitView } from './GitView'
@@ -68,6 +69,7 @@ export function App() {
       <Palette />
       <Orphans />
       <Rename />
+      <EmbedEditor />
       {error && (
         <div className={s.error} role="alert" onClick={() => useUi.getState().setError(null)}>
           {error}

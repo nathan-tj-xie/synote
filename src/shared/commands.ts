@@ -14,6 +14,8 @@ export const commands = {
   trash: { title: 'trash' },
   rebuildIndex: { title: 'rebuildIndex' },
   cleanOrphans: { title: 'cleanOrphans' },
+  insertMath: { title: 'insertMath' },
+  insertInlineMath: { title: 'insertInlineMath' },
 } as const satisfies Record<string, { title: keyof typeof zhCN.common; key?: string }>
 
 export type CommandId = keyof typeof commands
