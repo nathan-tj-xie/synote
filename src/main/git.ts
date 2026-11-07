@@ -557,6 +557,9 @@ export class Git {
   async lfsPull(rel: string): Promise<void> {
     const pattern = (await this.prefix()) + rel
     await this.mutate(['lfs', 'pull', `--include=${pattern.replace(/[\\*?[\]]/g, '\\$&').replace(/,/g, '?')}`, '--exclude='])
+    // Windows 上 pull 后索引里的 stat 没跟上，status（--no-optional-locks 不刷新）会显示假的 M（#53）；
+    // 刷新失败（如 index.lock 被占）不影响已下载的内容，不当作下载失败
+    await this.run(['update-index', '-q', '--refresh']).catch(() => {})
     const after = await fs.readFile(path.join(this.cwd, rel)).catch(() => null)
     if (after) stillPointer(after, 'git lfs pull', rel)
   }
