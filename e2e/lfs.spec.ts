@@ -103,12 +103,8 @@ test('LFS installed: pointer placeholder downloads in place, dedupe by oid, hist
   await expect(win.locator('.cm-lp-link')).toHaveText('文档', { timeout: 10_000 })
   await expect(ph).toHaveCount(0)
   expect(readFileSync(path.join(vault, 'attachments/d.pdf'))).toEqual(PDF)
-  const status = execFileSync('git', ['status', '--porcelain'], { cwd: vault, env: appEnv }).toString()
-  // shortcut: Windows CI 上 lfs pull 之后 d.pdf 偶尔显示为已修改，原因未查明（Windows 推迟到 MVP 后整体验证）；先打印诊断，不判失败
-  if (process.platform === 'win32' && status) {
-    const run = (...a: string[]) => execFileSync('git', a, { cwd: vault, env: appEnv }).toString()
-    console.log('[lfs e2e] dirty after pull on Windows:\n', status, run('diff', '--stat', '--', 'attachments'), run('lfs', 'status'), run('config', '--show-origin', '--get-regexp', 'core\\.|filter\\.'))
-  } else expect(status).toBe('')
+  // 和 git 面板一样不刷新索引地看：下载过的文件不显示为改动（#53，Windows 上曾显示 M）
+  expect(execFileSync('git', ['--no-optional-locks', 'status', '--porcelain'], { cwd: vault, env: appEnv }).toString()).toBe('')
 
   // 历史里删掉的 old.png：本地没有对象，悬停只显示占位（不下载），点"下载"才 smudge，随后悬停显示图片
   const oid = /oid sha256:([0-9a-f]{64})/.exec(execFileSync('git', ['show', 'HEAD~1:attachments/old.png'], { cwd: vault }).toString())![1]

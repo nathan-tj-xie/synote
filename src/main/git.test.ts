@@ -667,6 +667,8 @@ describe('Git（系统 git）', () => {
     expect(readFileSync(att('x.png'))).toEqual(files['x.png'])
     expect(readFileSync(att(SPECIAL)).length).toBeLessThan(200)
     expect(changed).toHaveBeenCalled()
+    // 索引的 stat 缓存已刷新：不刷新索引的 diff-files 也不把下载过的文件当成改动（#53，Windows 上曾显示 M）
+    expect(g(vault, 'diff-files', '--name-only')).toBe('')
     // 对象已在本地：历史读取直接换成真实内容
     expect(await git.readFileAt('HEAD:./attachments/x.png')).toEqual(files['x.png'])
 
