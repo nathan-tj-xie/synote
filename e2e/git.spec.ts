@@ -413,6 +413,34 @@ test('merge: pull conflict → resolve each file in the conflict view → finish
   await app.close()
 })
 
+test('merge: existing marker examples allow finishing, newly added markers block it', async () => {
+  const example = 'Git 示例\n<<<<<<< HEAD\n本地\n=======\n远端\n>>>>>>> example\n'
+  const { app, win, vault, git, pushFromOther } = await launchRepo({ 'a.md': 'base\n', 'guide.md': example })
+  pushFromOther('a.md', 'remote\n')
+  writeFileSync(path.join(vault, 'a.md'), 'local\n')
+  git('commit', '-qam', 'local')
+  await openGit(win)
+  await win.getByRole('button', { name: 'pull' }).click()
+  await expect(banner(win)).toContainText('1 个冲突文件', { timeout: 10_000 })
+  writeFileSync(path.join(vault, 'a.md'), 'resolved\n')
+  git('add', 'a.md')
+  const updated = '新增说明\n' + example
+  writeFileSync(path.join(vault, 'guide.md'), updated + '<<<<<<< newly added\n')
+  git('add', 'guide.md')
+  await expect(banner(win)).toContainText('冲突已全部解决', { timeout: 10_000 })
+  const finish = banner(win).getByRole('button', { name: '完成合并' })
+  await finish.click()
+  await expect(win.getByRole('alert')).toContainText('guide.md')
+  expect(git('rev-parse', '--verify', 'MERGE_HEAD').trim()).not.toBe('')
+  writeFileSync(path.join(vault, 'guide.md'), updated)
+  git('add', 'guide.md')
+  await finish.click()
+  await expect(banner(win)).toHaveCount(0)
+  expect(git('show', 'HEAD:guide.md')).toBe(updated)
+  expect(git('log', '-1', '--format=%P').trim().split(' ')).toHaveLength(2)
+  await app.close()
+})
+
 test('merge: restored after restart, abort with confirmation, follows merges started / aborted outside', async () => {
   const { app, win, vault, git, relaunch } = await launchConflict()
   await openGit(win)
