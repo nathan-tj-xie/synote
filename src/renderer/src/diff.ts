@@ -35,6 +35,7 @@ import { fromMonacoLabel, monacoKeyName, parity } from './keymap'
 import { isMac } from './match'
 import { useUi } from './store'
 import { monacoColors, monacoRules } from './tokens'
+import { tokens } from '../../shared/tokens'
 import { bomOffset, dataUrl, escapeMd, imageAt, imageMime, lfsHoverMarkdown, MAX_IMAGE, minimalEdit } from './diffUtil'
 
 // diff 计算放在 worker 里，不卡输入
@@ -116,7 +117,6 @@ function reset(doc: string, unexpected = true) {
 
 // docNow：CM6 视图里的最新正文，写回前后用来核对对齐
 export function create(parent: HTMLElement, onEdit: (changes: Change[]) => void, docNow: () => string) {
-  const body = getComputedStyle(document.body)
   diffDiv = parent.appendChild(document.createElement('div'))
   conflictDiv = parent.appendChild(document.createElement('div'))
   diffDiv.style.height = conflictDiv.style.height = '100%'
@@ -132,10 +132,10 @@ export function create(parent: HTMLElement, onEdit: (changes: Change[]) => void,
     diffWordWrap: 'on',
     minimap: { enabled: false },
     scrollBeyondLastLine: false,
-    // 字体与 CM6 共用（ADR 0003）：都取 body 上的那一份
-    fontFamily: body.fontFamily,
-    fontSize: parseFloat(body.fontSize),
-    lineHeight: 1.7,
+    // 字体、字号和行距与 CM6 共用 token（ADR 0003）
+    fontFamily: tokens.fontUi,
+    fontSize: parseFloat(tokens.fontSizeEditor),
+    lineHeight: parseFloat(tokens.lineHeightEditor),
     renderOverviewRuler: true,
     // 块级拣回（#9）：改动块旁的箭头把左侧那块应用到右侧，走 modified 编辑器的编辑，经 onEdit 写回 CM6。
     // 默认的 gutter 菜单在 standalone 里没有动作，还会顶掉箭头；只读（交接锁）时 Monaco 拒绝这类编辑
@@ -148,9 +148,9 @@ export function create(parent: HTMLElement, onEdit: (changes: Change[]) => void,
     wordWrap: 'on',
     minimap: { enabled: false },
     scrollBeyondLastLine: false,
-    fontFamily: body.fontFamily,
-    fontSize: parseFloat(body.fontSize),
-    lineHeight: 1.7,
+    fontFamily: tokens.fontUi,
+    fontSize: parseFloat(tokens.fontSizeEditor),
+    lineHeight: parseFloat(tokens.lineHeightEditor),
     codeLens: true,
   })
   checkKeymap()
@@ -207,7 +207,6 @@ monaco.editor.registerCommand('synote.acceptConflict', (_acc, start: number, tak
 
 // 删除的笔记（S13）：工作区里已没有它，不进 CM6 / 标签页，单独开一个只读 diff：左 HEAD 正文、右空。返回销毁函数
 export function showDeleted(parent: HTMLElement, head: string): () => void {
-  const body = getComputedStyle(document.body)
   const ed = monaco.editor.createDiffEditor(parent, {
     theme: 'synote',
     automaticLayout: true,
@@ -219,9 +218,9 @@ export function showDeleted(parent: HTMLElement, head: string): () => void {
     diffWordWrap: 'on',
     minimap: { enabled: false },
     scrollBeyondLastLine: false,
-    fontFamily: body.fontFamily,
-    fontSize: parseFloat(body.fontSize),
-    lineHeight: 1.7,
+    fontFamily: tokens.fontUi,
+    fontSize: parseFloat(tokens.fontSizeEditor),
+    lineHeight: parseFloat(tokens.lineHeightEditor),
     renderGutterMenu: false,
   })
   const original = monaco.editor.createModel(head, 'markdown')

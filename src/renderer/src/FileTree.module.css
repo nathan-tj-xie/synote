@@ -1,7 +1,7 @@
 .wrap { height: 100%; display: flex; flex-direction: column; }
-.header { display: flex; align-items: center; padding: 6px 8px 6px 12px; }
-.title { flex: 1; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.icon { background: none; border: none; color: var(--fg-muted); cursor: pointer; padding: 0 6px; }
+.header { display: flex; align-items: center; min-height: var(--tab-height); box-sizing: border-box; gap: var(--space2); padding: 0 var(--space3) 0 var(--space4); }
+.title { flex: 1; font-size: var(--font-size-small); font-weight: 600;   color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.icon { background: none; border: none; color: var(--fg-muted); cursor: pointer; padding: var(--space1) var(--space2); border-radius: var(--radius-small); }
 .icon:hover { color: var(--fg); }
 .scroll { flex: 1; overflow: auto; }
 .row { position: absolute; top: 0; left: 0; right: 0; height: 24px; display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; outline: none; }
