@@ -67,7 +67,7 @@ test('embeds render; a broken one shows red source and the rest still renders', 
   await expect(errors).toHaveCount(3)
   await expect(errors.nth(0)).toHaveText('$$\n\\frac{1}{\n$$')
   await expect(errors.nth(0)).toHaveAttribute('title', /KaTeX parse error/)
-  await expect(errors.nth(0)).toHaveCSS('color', 'rgb(239, 91, 91)')
+  await expect(errors.nth(0)).toHaveCSS('color', 'rgb(237, 155, 155)')
   await expect(errors.nth(1)).toContainText('A -->> -->')
   await expect(errors.nth(2)).toHaveText('$\\nope$')
   // 失败的后面照常渲染

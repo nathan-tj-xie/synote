@@ -3,7 +3,7 @@ export const tokens = {
   bg: '#1b232b',
   bgRaised: '#232e38',
   bgHover: '#2b3944',
-  bgSelected: '#334c50',
+  bgSelected: '#30464a',
   bgChrome: '#182027',
   border: '#3d4c58',
   borderSubtle: '#2d3a45',
