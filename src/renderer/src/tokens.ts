@@ -9,7 +9,7 @@ export const monacoColors = (): Record<string, string> => ({
   'editor.background': tokens.bg,
   'editor.foreground': tokens.fg,
   'editorGutter.background': tokens.bg,
-  'editorCursor.foreground': tokens.fg,
+  'editorCursor.foreground': tokens.accent,
   'editor.selectionBackground': tokens.bgSelected,
   'editor.lineHighlightBackground': tokens.bgRaised,
   'editorLineNumber.foreground': tokens.fgMuted,
@@ -26,6 +26,19 @@ export const monacoColors = (): Record<string, string> => ({
   'diffEditor.removedTextBackground': tokens.diffRemoved,
   'diffEditor.border': tokens.border,
   'editorCodeLens.foreground': tokens.accent,
+  'editorLink.activeForeground': tokens.accent,
+  'editorSuggestWidget.background': tokens.bgRaised,
+  'editorSuggestWidget.border': tokens.border,
+  'editorSuggestWidget.foreground': tokens.fg,
+  'editorSuggestWidget.selectedBackground': tokens.bgSelected,
+  'input.background': tokens.bg,
+  'input.foreground': tokens.fg,
+  'input.border': tokens.border,
+  'button.background': tokens.accent,
+  'button.foreground': tokens.onAccent,
+  'list.activeSelectionBackground': tokens.bgSelected,
+  'list.activeSelectionForeground': tokens.fg,
+  'list.hoverBackground': tokens.bgHover,
 })
 
 // 语法高亮色同样取这份 token（与 CM6 实时预览的代码块一致）；Monaco 规则的颜色不带 #

@@ -1,7 +1,7 @@
 .wrap { height: 100%; display: flex; flex-direction: column; }
-.input { margin: 8px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font: inherit; outline: none; }
+.input { margin: var(--space3); background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: var(--radius-control); padding: var(--space2) var(--space3); font: inherit; outline: none; }
 .input:focus { border-color: var(--accent); }
-.summary { padding: 0 12px 4px; font-size: 12px; color: var(--fg-muted); }
+.summary { padding: 0 var(--space4) var(--space2); font-size: var(--font-size-small); color: var(--fg-muted); }
 .scroll { flex: 1; overflow: auto; }
 .row { position: absolute; top: 0; left: 0; right: 0; height: 22px; display: flex; align-items: center; gap: 6px; background: none; border: none; color: var(--fg); font: inherit; text-align: left; white-space: nowrap; cursor: pointer; outline: none; }
 .row:hover { background: var(--bg-hover); }
@@ -10,5 +10,5 @@
 .match { padding: 0 8px 0 28px; color: var(--fg-muted); }
 .text { overflow: hidden; text-overflow: ellipsis; }
 .text mark { background: none; color: var(--accent); font-weight: 600; }
-.dir { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 12px; font-weight: normal; color: var(--fg-muted); }
-.count { font-size: 11px; font-weight: normal; color: var(--fg-muted); }
+.dir { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: var(--font-size-small); font-weight: normal; color: var(--fg-muted); }
+.count { font-size: var(--font-size-small); font-weight: normal; color: var(--fg-muted); }

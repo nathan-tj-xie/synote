@@ -1,6 +1,8 @@
-.welcome { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
-.welcome h1 { margin: 0; font-weight: 600; }
-.welcome h2 { margin: 24px 0 4px; font-size: 12px; color: var(--fg-muted); font-weight: 600; }
-.muted { color: var(--fg-muted); margin: 0 0 12px; }
-.primary { background: var(--accent); border: none; color: var(--on-accent); padding: 6px 16px; border-radius: 4px; cursor: pointer; }
-.recent { background: none; border: none; color: var(--accent); cursor: pointer; }
+.welcome { height: 100%; box-sizing: border-box; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; width: min(440px, calc(100% - 64px)); margin: 0 auto; gap: var(--space3); }
+.welcome h1 { margin: 0; font-size: var(--font-size-display); line-height: 1.2; font-weight: 650; letter-spacing: -2px; }
+.welcome h1::after { content: ''; display: block; width: 40px; height: 3px; margin: var(--space5) 0 var(--space2); background: var(--accent); border-radius: var(--radius-small); }
+.welcome h2 { margin: var(--space5) 0 0; font-size: var(--font-size-small); color: var(--fg-muted); font-weight: 600; }
+.muted { color: var(--fg-muted); margin: 0 0 var(--space4); font-size: var(--font-size-title); }
+.primary { background: var(--accent); border: 1px solid var(--accent); color: var(--on-accent); padding: 10px 22px; border-radius: var(--radius-control); font-weight: 600; }
+.primary:hover { filter: brightness(1.08); }
+.recent { background: none; border: none; color: var(--accent); padding: var(--space1) 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; text-align: left; }

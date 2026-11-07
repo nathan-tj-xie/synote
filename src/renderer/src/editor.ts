@@ -59,10 +59,12 @@ let diffBox: HTMLElement | null = null
 const theme = EditorView.theme(
   {
     '&': { height: '100%', color: 'var(--fg)', backgroundColor: 'var(--bg)' },
-    '.cm-content': { fontFamily: 'inherit', padding: '24px 0', caretColor: 'var(--fg)', maxWidth: '760px', margin: '0 auto' },
-    '.cm-scroller': { lineHeight: '1.7', fontFamily: 'inherit' },
+    '.cm-content': { fontFamily: 'var(--font-ui)', padding: 'var(--space6) clamp(16px, 3vw, 40px)', boxSizing: 'border-box', caretColor: 'var(--accent)', maxWidth: 'var(--editor-width)', margin: '0 auto' },
+    '.cm-scroller': { lineHeight: 'var(--line-height-editor)', fontSize: 'var(--font-size-editor)', fontFamily: 'var(--font-ui)' },
+    '.cm-tooltip': { backgroundColor: 'var(--bg-raised)', color: 'var(--fg)', border: '1px solid var(--border)', borderRadius: 'var(--radius-control)', boxShadow: 'var(--shadow)', fontSize: 'var(--font-size-ui)' },
+    '.cm-tooltip-autocomplete > ul > li[aria-selected]': { backgroundColor: 'var(--bg-selected)', color: 'var(--fg)' },
     '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': { backgroundColor: 'var(--bg-selected)' },
-    '.cm-cursor': { borderLeftColor: 'var(--fg)' },
+    '.cm-cursor': { borderLeftColor: 'var(--accent)' },
   },
   { dark: true },
 )

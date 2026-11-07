@@ -8,6 +8,7 @@ import { EmbedEditor } from './EmbedEditor'
 import { reloadIfClean } from './editor'
 import { FileTree } from './FileTree'
 import { GitView } from './GitView'
+import { Icon } from './Icon'
 import { MergeBanner } from './Merge'
 import { Orphans } from './Orphans'
 import { Palette } from './Palette'
@@ -42,13 +43,13 @@ export function App() {
       <div className={s.app}>
         <nav className={s.activity}>
           <button className={sidebar === 'files' ? s.activityOn : ''} title={t('files')} aria-label={t('files')} onClick={() => useUi.getState().setSidebar('files')}>
-            ▤
+            <Icon name="files" />
           </button>
           <button className={sidebar === 'search' ? s.activityOn : ''} title={t('search')} aria-label={t('search')} onClick={() => run('search')}>
-            ⌕
+            <Icon name="search" />
           </button>
           <button className={sidebar === 'git' ? s.activityOn : ''} title={t('git')} aria-label={t('git')} onClick={() => useUi.getState().setSidebar('git')}>
-            ⑂{changes > 0 && <span className={s.badge}>{changes > 999 ? '999+' : changes}</span>}
+            <Icon name="git" />{changes > 0 && <span className={s.badge}>{changes > 999 ? '999+' : changes}</span>}
           </button>
         </nav>
         <Group orientation="horizontal" className={s.main}>
