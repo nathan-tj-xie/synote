@@ -291,6 +291,35 @@ describe('Git（系统 git）', () => {
     git.close()
   })
 
+  // 合并编辑器（#70）：常驻 cat-file 在合并前就启动过，三个 stage 仍要按合并后的索引读到；没有共同祖先时 base 为 null
+  it('readStages 读冲突文件的三个 stage（子目录笔记库、cat-file 早于合并启动）', async () => {
+    const { repo, env, sh } = setup()
+    sh('init', '-q', '-b', 'main')
+    mkdirSync(path.join(repo, '笔记'))
+    writeFileSync(path.join(repo, '笔记', 'a.md'), '共同\n')
+    sh('add', '.')
+    sh('commit', '-qm', '1')
+    sh('checkout', '-qb', 'other')
+    writeFileSync(path.join(repo, '笔记', 'a.md'), '传入\n')
+    writeFileSync(path.join(repo, '笔记', 'new.md'), '传入新增\n')
+    sh('add', '.')
+    sh('commit', '-qm', 'other')
+    sh('checkout', '-q', 'main')
+    writeFileSync(path.join(repo, '笔记', 'a.md'), '当前\n')
+    writeFileSync(path.join(repo, '笔记', 'new.md'), '当前新增\n')
+    sh('add', '.')
+    sh('commit', '-qm', 'main')
+
+    const git = new Git('git', process.env.PATH!, path.join(repo, '笔记'), undefined, env)
+    expect((await git.readBlob('HEAD:./a.md'))?.toString()).toBe('当前\n') // 先把常驻 cat-file 起起来
+    expect(() => sh('merge', '-q', 'other')).toThrow()
+    const text = (bs: (Buffer | null)[]) => bs.map((b) => b?.toString() ?? null)
+    expect(text(await git.readStages('a.md'))).toEqual(['共同\n', '当前\n', '传入\n'])
+    expect(text(await git.readStages('new.md'))).toEqual([null, '当前新增\n', '传入新增\n'])
+    await expect(git.readStages('nope.md')).rejects.toThrow('not in conflict')
+    git.close()
+  })
+
   // 按行协议传不了换行：走 rev-parse 换 oid，不能让后面的请求错位
   it.skipIf(process.platform === 'win32')('路径含换行', async () => {
     const { repo, env, sh } = setup()

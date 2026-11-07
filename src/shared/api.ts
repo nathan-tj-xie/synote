@@ -139,7 +139,10 @@ export interface SynoteApi {
   chooseGit(): Promise<GitState | null>
   // 工作区对比（S14）、历史对比（S15）：rev（HEAD 或完整 oid）里的文件内容，那里没有时为 null；没有可用 git 或不是仓库时报错
   // LFS（S17）：对象已在本地时给真实内容，否则原样给指针（不联网）
+  // 合并编辑器（#70）的传入一侧按 MERGE_HEAD 读图片
   readRev(vault: string, rev: string, path: string): Promise<Uint8Array | null>
+  // 合并编辑器（#70）：冲突笔记的共同祖先 / 当前 / 传入三个 stage，没有那一侧时为 null
+  readStages(vault: string, path: string): Promise<[Uint8Array | null, Uint8Array | null, Uint8Array | null]>
   // 用户点了"下载"：历史版本里的 LFS 指针经 git lfs smudge 换成真实内容（会联网）
   lfsSmudge(vault: string, rev: string, path: string): Promise<Uint8Array | null>
   // 工作区里是 LFS 指针的文件：git lfs pull 下载真实内容写回工作区；不是指针时什么都不做

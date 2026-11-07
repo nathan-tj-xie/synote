@@ -50,7 +50,8 @@ const diffMode = new Map<string, Source>() // 处于 diff 形态的已打开文�
 let diffWant: string | null = null // 应该显示的 diff：`文件\0版本`（加载中或已显示）
 let diffShown: string | null = null // Monaco 里实际是哪个文件
 let diffSeq = 0
-// 合并中还没解决的冲突文件（S16）：打开时直接进冲突视图，优先于 diff 形态；解决（自动 git add）后回到正文
+// 合并中还没解决的冲突文件（S16）：打开时直接进冲突视图（#70 的合并编辑器），优先于 diff 形态；
+// 在合并编辑器里"完成此文件合并"（git add）后回到正文
 let conflicted = new Set<string>()
 const fromDiff = Annotation.define<boolean>()
 let cmBox: HTMLElement | null = null
@@ -319,13 +320,19 @@ function syncDiff() {
   const p = shown!
   const v = vault!
   ;(async () => {
-    const [mod, head] = await Promise.all([diff ?? import('./diff'), src ? window.synote.readRev(v, src.rev, src.path) : null])
+    // 冲突视图（#70）读三个 stage：共同祖先 :1、当前 :2、传入 :3
+    const [mod, head, stages] = await Promise.all([
+      diff ?? import('./diff'),
+      src ? window.synote.readRev(v, src.rev, src.path) : null,
+      conflict ? window.synote.readStages(v, p) : null,
+    ])
     diff = mod
     if (my !== diffSeq || !view) return // 期间又切了文件 / 形态，或换了库
-    if (!diffBox!.childElementCount) mod.create(diffBox!, applyFromDiff, () => view!.state.doc.toString())
+    if (!diffBox!.childElementCount) mod.create(diffBox!, applyFromDiff, () => view!.state.doc.toString(), requestComplete)
     diffBox!.hidden = false
     cmBox!.hidden = true
-    mod.show(v, p, src?.rev ?? '', src?.path ?? p, decode(head), view.state.doc.toString(), locked, conflict)
+    const three = stages && { base: decode(stages[0]), ours: decode(stages[1]), theirs: decode(stages[2]) }
+    mod.show(v, p, src?.rev ?? '', src?.path ?? p, decode(head), view.state.doc.toString(), locked, three)
     diffShown = p
     mod.focus()
   })().catch((e) => {
@@ -334,6 +341,34 @@ function syncDiff() {
     diffWant = null
     useUi.getState().setError(String(e))
   })
+}
+
+// 合并编辑器的"完成此文件合并"（#70）：还有未处理的冲突时先确认（照 VS Code 的 Complete Merge），确认框在 Merge.tsx
+function requestComplete(path: string, unhandled: number) {
+  if (locked) return
+  if (unhandled > 0) useUi.getState().setMergeConfirm({ path, n: unhandled })
+  else completeMerge(path)
+}
+
+// 结果栏一直同步在 CM6 里、照常自动保存（切走再回来、关掉再打开都从工作区正文恢复）：这里先把它落盘，再 git add 移出冲突组
+export async function completeMerge(path: string) {
+  const v = vault
+  if (locked || !v) return
+  try {
+    if (docOf(path) === undefined) return // 标签页已关
+    await flush(path)
+    await writes.get(path)
+    if (vault !== v || useEditor.getState().dirty[path]) throw new Error(i18next.t('mergeCompleteUnsaved'))
+    const res = await window.synote.gitStage(v, [path])
+    if (!res.ok) {
+      const reason = [i18next.t(`gitErr_${res.kind}`), ...(res.paths ?? (res.raw ? [res.raw] : []))].join('\n')
+      useUi.getState().setError(i18next.t('mergeFailed', { op: i18next.t('mergeComplete'), reason }))
+    }
+  } catch (e) {
+    useUi.getState().setError(String(e))
+  } finally {
+    window.synote.gitState().then((st) => vault === v && useGit.setState({ state: st }), () => {})
+  }
 }
 
 function applyFromDiff(changes: ChangeSpec[]) {

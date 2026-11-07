@@ -348,6 +348,15 @@ export class Git {
     } else await this.mutate(['--literal-pathspecs', 'rm', '-q', '-f', '--', rel]) // -f：冲突中的工作区文件本来就和暂存区不同
   }
 
+  // 冲突文件的三个 stage（1 共同祖先、2 ours、3 theirs），那一侧没有时为 null。oid 从 ls-files 现查：
+  // 常驻 cat-file 只读一次 .git/index，按 `:2:路径` 读会拿到进程启动时的旧索引
+  async readStages(rel: string): Promise<[Buffer | null, Buffer | null, Buffer | null]> {
+    const out = await this.run(['--literal-pathspecs', 'ls-files', '-u', '-z', '--', rel])
+    const oids = new Map(out.split('\0').filter(Boolean).map((l) => l.split('\t')[0].split(' ')).map(([, oid, stage]) => [stage, oid]))
+    if (!oids.size) throw new GitError('unknown', -1, `${rel} is not in conflict`)
+    return Promise.all((['1', '2', '3'] as const).map((n) => (oids.has(n) ? this.readBlob(oids.get(n)!) : null))) as Promise<[Buffer | null, Buffer | null, Buffer | null]>
+  }
+
   // 用 git 生成的合并信息（MERGE_MSG）提交暂存区；工作区里没暂存的改动不进合并提交
   mergeContinue(): Promise<string> {
     return this.mutate(['-c', 'user.useConfigOnly=true', 'commit', '-q', '--no-edit'])

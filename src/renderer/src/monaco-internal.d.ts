@@ -173,3 +173,6 @@ declare module 'monaco-editor/editor/common/diff/legacyLinesDiffComputer.js' {
   import type { DefaultLinesDiffComputer } from 'monaco-editor/editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.js'
   export class LegacyLinesDiffComputer extends DefaultLinesDiffComputer {}
 }
+declare module 'monaco-editor/editor/common/services/editorWorker.js' {
+  export const IEditorWorkerService: unknown
+}

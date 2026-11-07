@@ -7,7 +7,6 @@ import { commands } from '../shared/commands'
 import { indexMethods, type GitDone, type GitOpResult, type GitState, type OrphanAttachment, type ItemMenuAction, type Presence, type VaultConfig, type VaultInfo } from '../shared/api'
 import { parseLfsPointer } from '../shared/lfs'
 import { tokens } from '../shared/tokens'
-import { hasConflictMarkers } from '../shared/conflicts'
 import { exec, findGit, Git, GitError, StagedOutsideError, UnresolvedError, type GitDetectionResult } from './git'
 import { attachmentTarget, checkOrphans, isAttachmentPath, removeOrphans, trackedOf } from './orphans'
 import { commitRename, planRename } from './rename'
@@ -222,7 +221,6 @@ async function queryGit(g: Git, version: string): Promise<GitState> {
   if (!(await g.isRepo())) return { status: 'notRepo', version }
   await watchGitDir(g)
   const [identity, st, lfs] = await Promise.all([g.identity(), lfsStatus(g), g.lfsInstalled()])
-  merging = st.merging
   return { status: 'ready', version, ...identity, ...st, lfs, lfsUsed: !lfs && (await lfsUsedOf(g)) }
 }
 
@@ -327,9 +325,9 @@ async function diffGit<T>(r: string, f: (g: Git) => Promise<T>): Promise<T> {
     throw e instanceof GitError && e.kind === 'notRepo' ? new Error(t('gitNotRepo')) : e
   }
 }
-// 渲染进程传来的提交只认完整的 oid（或 HEAD），不会被当成选项或任意 revision 表达式
+// 渲染进程传来的提交只认完整的 oid（或 HEAD；合并编辑器的传入一侧是 MERGE_HEAD，#70），不会被当成选项或任意 revision 表达式
 const checkRev = (rev: unknown, head = false): string => {
-  if (typeof rev !== 'string' || !(/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(rev) || (head && rev === 'HEAD'))) throw new Error(`invalid revision: ${rev}`)
+  if (typeof rev !== 'string' || !(/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(rev) || (head && (rev === 'HEAD' || rev === 'MERGE_HEAD')))) throw new Error(`invalid revision: ${rev}`)
   return rev
 }
 const checkRevPath = (rel: unknown): string => {
@@ -345,6 +343,12 @@ ipcMain.handle('git:readRev', (_e, vault: string, rev: string, rel: string) => {
   checkRev(rev, true)
   checkRevPath(rel)
   return diffGit(r, (g) => g.readFileAt(`${rev}:./${rel}`))
+})
+// 合并编辑器（#70）：冲突笔记的三个 stage（共同祖先 :1、当前 :2、传入 :3），没有那一侧时为 null。不在冲突中时报错
+ipcMain.handle('git:readStages', (_e, vault: string, rel: string) => {
+  const r = checkVault(vault)
+  resolveInVault(r, rel)
+  return diffGit(r, (g) => g.readStages(rel))
 })
 // LFS 操作的失败经 IPC 只剩一段文本：前面加上按分类的说明（如缺 git-lfs、下载失败），渲染进程原样显示
 const explain = (e: unknown): never => {
@@ -431,17 +435,7 @@ ipcMain.handle('file:write', async (_e, vault: string, rel: string, content: str
   await noteWrite(async () => fs.writeFile(await writeTarget(r, rel), content))
   // 不等 watcher 防抖，写完立即对账：删掉或撤销最后一处引用后，孤儿状态 1 s 内更新（S11）
   callIndex('reconcile').catch((e) => console.error('[index] reconcile failed', e))
-  if (merging && !hasConflictMarkers(content)) await autoResolve(r, rel).catch((e) => console.error('[git] auto add failed', e))
 })
-// 合并中（S16）：最近一次查到的 git 状态是否有 MERGE_HEAD。只用来决定保存后要不要查冲突，避免每次保存都起 git 子进程
-let merging = false
-// 冲突文件保存后已没有冲突标记：自动 git add，移出冲突组（#9 决定 3）。失败只记日志，保存本身已成功
-async function autoResolve(r: string, rel: string) {
-  const g = await vaultRepo(r)
-  if (!g || !(await g.run(['--literal-pathspecs', 'ls-files', '-u', '-z', '--', rel]))) return
-  await g.stage([rel])
-  pushGitState()
-}
 ipcMain.handle('file:createNote', async (_e, vault: string, dir: string) => {
   const r = checkVault(vault)
   const entries = await scanEntries(r)

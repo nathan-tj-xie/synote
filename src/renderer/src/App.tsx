@@ -9,7 +9,7 @@ import { reloadIfClean } from './editor'
 import { FileTree } from './FileTree'
 import { GitView } from './GitView'
 import { Icon } from './Icon'
-import { MergeBanner } from './Merge'
+import { MergeBanner, MergeConfirm } from './Merge'
 import { Orphans } from './Orphans'
 import { Palette } from './Palette'
 import { Rename } from './Rename'
@@ -73,6 +73,7 @@ export function App() {
         <Palette />
         <Orphans />
         <Rename />
+        <MergeConfirm />
         <EmbedEditor />
         {error && (
           <div className={s.error} role="alert" onClick={() => useUi.getState().setError(null)}>

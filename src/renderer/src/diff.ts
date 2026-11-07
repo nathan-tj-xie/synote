@@ -8,7 +8,6 @@ import 'monaco-editor/editor/contrib/bracketMatching/browser/bracketMatching.js'
 import 'monaco-editor/editor/contrib/caretOperations/browser/caretOperations.js'
 import 'monaco-editor/editor/contrib/caretOperations/browser/transpose.js'
 import 'monaco-editor/editor/contrib/clipboard/browser/clipboard.js'
-import 'monaco-editor/editor/contrib/codelens/browser/codelensController.js'
 import 'monaco-editor/editor/contrib/comment/browser/comment.js'
 import 'monaco-editor/editor/contrib/contextmenu/browser/contextmenu.js'
 import 'monaco-editor/editor/contrib/cursorUndo/browser/cursorUndo.js'
@@ -27,8 +26,9 @@ import { StandaloneServices } from 'monaco-editor/editor/standalone/browser/stan
 import { CommandsRegistry } from 'monaco-editor/platform/commands/common/commands.js'
 import { IKeybindingService } from 'monaco-editor/platform/keybinding/common/keybinding.js'
 import 'monaco-editor/languages/definitions/markdown/register.js'
+import { IUndoRedoService } from 'monaco-editor/platform/undoRedo/common/undoRedo.js'
+import { IEditorWorkerService } from 'monaco-editor/editor/common/services/editorWorker.js'
 import EditorWorker from 'monaco-editor/editor/editor.worker.js?worker'
-import { parseConflicts, resolveConflict } from '../../shared/conflicts'
 import { i18next } from '../../shared/i18n'
 import { parseLfsPointer, sizeLabel } from '../../shared/lfs'
 import { fromMonacoLabel, monacoKeyName, parity } from './keymap'
@@ -37,6 +37,9 @@ import { useUi } from './store'
 import { monacoColors, monacoRules } from './tokens'
 import { tokens } from '../../shared/tokens'
 import { bomOffset, dataUrl, escapeMd, imageAt, imageMime, lfsHoverMarkdown, MAX_IMAGE, minimalEdit } from './diffUtil'
+import { type IEditorWorkerService as WorkerService, MergeDiffComputer } from './merge/model/diffComputer'
+import { type IUndoRedoService as UndoService, MergeEditorModel } from './merge/model/mergeEditorModel'
+import { MergeEditor } from './merge/view/mergeEditor'
 
 // diff 计算放在 worker 里，不卡输入
 self.MonacoEnvironment = { getWorker: () => new EditorWorker() }
@@ -78,15 +81,19 @@ function checkKeymap() {
 export type Change = { from: number; to: number; insert: string }
 
 let editor: monaco.editor.IStandaloneDiffEditor | null = null
-// 冲突视图（S16，#9 决定 1）：单个编辑器显示冲突标记，和 diff 共用 modified 一侧的同步（cur.modified 就是它的模型）
-let conflictEd: monaco.editor.IStandaloneCodeEditor | null = null
+// 冲突视图（#70）：移植自 VS Code 的三栏合并编辑器，结果栏和 diff 共用 modified 一侧的同步（cur.modified 就是结果栏的模型）
+let mergeEd: MergeEditor | null = null
 let diffDiv: HTMLElement | null = null
 let conflictDiv: HTMLElement | null = null
+// 合并编辑器上方工具条里切换共同祖先栏的三个按钮
+let layoutButtons: HTMLButtonElement[] = []
+// 冲突视图的三个输入（共同祖先 / 当前 / 传入）和由它们建起的合并模型
+type Conflict = { base: monaco.editor.ITextModel; ours: monaco.editor.ITextModel; theirs: monaco.editor.ITextModel; model: MergeEditorModel }
 // path：当前笔记（右侧）；base：左侧那个版本里笔记的路径（跨目录改名后与 path 不同），两侧的相对链接各按各的解析；
 // conflict：显示的是冲突视图（original 不用）
-let cur: { vault: string; path: string; rev: string; base: string; original: monaco.editor.ITextModel; modified: monaco.editor.ITextModel; conflict: boolean } | null = null
+let cur: { vault: string; path: string; rev: string; base: string; original: monaco.editor.ITextModel; modified: monaco.editor.ITextModel; conflict: Conflict | null } | null = null
 // 冲突视图里正在编辑的那一侧编辑器
-const modifiedEd = () => (cur?.conflict ? conflictEd! : editor!.getModifiedEditor())
+const modifiedEd = () => (cur?.conflict ? mergeEd!.resultEditor : editor!.getModifiedEditor())
 // replace / reset 写入 Monaco 时为 true：这些改动来自 CM6，不能再同步回去
 let applying = false
 // 不变式：CM6 正文 = off 个 BOM + Monaco 文本。Monaco 会把开头的 BOM 藏起来、不算进文本和偏移，藏几个不猜，
@@ -115,8 +122,11 @@ function reset(doc: string, unexpected = true) {
   if (!align(doc)) console.error('[diff] cannot align modified side with CM6, edits are not written back', { path: cur!.path })
 }
 
-// docNow：CM6 视图里的最新正文，写回前后用来核对对齐
-export function create(parent: HTMLElement, onEdit: (changes: Change[]) => void, docNow: () => string) {
+let edits: { onEdit: (changes: Change[]) => void; docNow: () => string } | null = null
+// docNow：CM6 视图里的最新正文，写回前后用来核对对齐；
+// onComplete：点了"完成此文件合并"，unhandled 是还没处理的冲突数（大于 0 时调用方先确认）
+export function create(parent: HTMLElement, onEdit: (changes: Change[]) => void, docNow: () => string, onComplete: (path: string, unhandled: number) => void) {
+  edits = { onEdit, docNow }
   diffDiv = parent.appendChild(document.createElement('div'))
   conflictDiv = parent.appendChild(document.createElement('div'))
   diffDiv.style.height = conflictDiv.style.height = '100%'
@@ -142,24 +152,77 @@ export function create(parent: HTMLElement, onEdit: (changes: Change[]) => void,
     renderGutterMenu: false,
     glyphMargin: true, // 箭头画在 glyph margin 里，standalone 默认没开
   })
-  conflictEd = monaco.editor.create(conflictDiv, {
+  const options: monaco.editor.IStandaloneEditorConstructionOptions = {
     theme: 'synote',
-    automaticLayout: true,
     wordWrap: 'on',
     minimap: { enabled: false },
     scrollBeyondLastLine: false,
     fontFamily: tokens.fontUi,
     fontSize: parseFloat(tokens.fontSizeEditor),
     lineHeight: parseFloat(tokens.lineHeightEditor),
-    codeLens: true,
+  }
+  const t = i18next.t.bind(i18next)
+  const bar = conflictDiv.appendChild(document.createElement('div'))
+  bar.className = 'merge-toolbar'
+  bar.setAttribute('role', 'toolbar')
+  bar.setAttribute('aria-label', t('mergeEditor'))
+  const body = conflictDiv.appendChild(document.createElement('div'))
+  body.className = 'merge-body'
+  mergeEd = new MergeEditor(body, options, {
+    result: { title: t('mergeResult'), remaining: (n) => (n ? t('mergeRemaining', { n }) : t('mergeNoneRemaining')), next: t('mergeNextConflict'), allHandled: t('mergeAllHandled') },
+    base: { title: t('mergeBase'), compareWith: (title) => t('mergeCompareWith', { title }), compareWithTooltip: t('mergeCompareWithTooltip') },
+    actions: (key, title = '') => t(`merge_${key}` as `merge_accept`, { title }),
   })
+  const button = (label: string, className: string, onClick: () => void, title = label) => {
+    const b = bar.appendChild(document.createElement('button'))
+    b.textContent = label
+    b.title = title
+    b.className = className
+    b.onclick = onClick
+    return b
+  }
+  // 上一个 / 下一个未处理的冲突（上游的 GoToPreviousUnhandledConflict / GoToNextUnhandledConflict 命令）
+  const unhandled = (m: Parameters<MergeEditorModel['isHandled']>[0]) => !cur!.conflict!.model.isHandled(m).get()
+  button('↑', 'merge-nav', () => cur?.conflict && mergeEd!.viewModel.get()?.goToPreviousModifiedBaseRange(unhandled), t('mergePrevConflict')).setAttribute('aria-label', t('mergePrevConflict'))
+  button('↓', 'merge-nav', () => cur?.conflict && mergeEd!.viewModel.get()?.goToNextModifiedBaseRange(unhandled), t('mergeNextConflict')).setAttribute('aria-label', t('mergeNextConflict'))
+  const group = bar.appendChild(document.createElement('div'))
+  group.className = 'merge-layout'
+  group.setAttribute('role', 'group')
+  group.setAttribute('aria-label', t('mergeBase'))
+  group.append(Object.assign(document.createElement('span'), { textContent: t('mergeBase') }))
+  // 共同祖先栏：隐藏 / 顶部 / 中间（上游的 Show Base / Show Base Top / Show Base Center）
+  const layouts = [
+    [t('mergeBaseHidden'), () => mergeEd!.setLayout({ ...mergeEd!.layout, showBase: false })],
+    [t('mergeBaseTop'), () => mergeEd!.toggleShowBaseTop()],
+    [t('mergeBaseCenter'), () => mergeEd!.toggleShowBaseCenter()],
+  ] as const
+  layoutButtons = layouts.map(([label, apply]) => {
+    const b = group.appendChild(document.createElement('button'))
+    b.textContent = label
+    b.onclick = () => {
+      apply()
+      syncBar()
+    }
+    return b
+  })
+  bar.appendChild(document.createElement('span')).className = 'merge-spacer'
+  button(t('mergeComplete'), 'merge-complete', () => cur?.conflict && onComplete(cur.path, cur.conflict.model.unhandledConflictsCount.get()))
+  syncBar()
   checkKeymap()
-  const blocks = conflictEd.createDecorationsCollection()
-  const mark = () => blocks.set(cur?.conflict ? conflictDecorations(cur.modified) : [])
-  conflictEd.onDidChangeModel(mark)
-  conflictEd.onDidChangeModelContent(mark)
-  const sync = (ed: monaco.editor.ICodeEditor, conflict: boolean) => ed.onDidChangeModelContent((e) => {
-    if (applying || !cur || cur.conflict !== conflict) return
+}
+
+// 工具条的按下状态跟着当前布局
+function syncBar() {
+  const l = mergeEd!.layout
+  const on = [!l.showBase, l.showBase && l.showBaseAtTop, l.showBase && !l.showBaseAtTop]
+  layoutButtons.forEach((b, i) => b.setAttribute('aria-pressed', String(on[i])))
+}
+
+// 结果栏（或 diff 的工作区一侧）模型的改动写回 CM6。听模型而不是编辑器：合并模型直接改结果模型（初始化合入非冲突改动、
+// 接受某侧），那时编辑器可能还没挂上这个模型
+function syncBack(m: monaco.editor.ITextModel, docNow: () => string, onEdit: (changes: Change[]) => void) {
+  return m.onDidChangeContent((e) => {
+    if (applying || cur?.modified !== m) return
     const doc = docNow()
     // 改动前两边必须对齐（mirror 就是这次改动前的 Monaco 文本），否则这次输入不写回
     if (mirror === null || bomOffset(doc, mirror) !== off) return reset(doc)
@@ -168,42 +231,7 @@ export function create(parent: HTMLElement, onEdit: (changes: Change[]) => void,
     const now = docNow()
     if (!align(now)) reset(now)
   })
-  sync(editor.getModifiedEditor(), false)
-  sync(conflictEd, true)
 }
-
-// 两侧各染一层底色，看得出哪段是本地、哪段是传入的；标记行本身不染
-function conflictDecorations(m: monaco.editor.ITextModel): monaco.editor.IModelDeltaDecoration[] {
-  const span = (from: number, to: number, className: string) =>
-    to > from ? [{ range: new monaco.Range(from, 1, to - 1, 1), options: { isWholeLine: true, className } }] : []
-  return parseConflicts(m.getValue()).flatMap((c) => [...span(c.start + 1, c.base ?? c.mid, 'synote-ours'), ...span(c.mid + 1, c.end, 'synote-theirs')])
-}
-
-// 冲突块上方的行内按钮（#9 决定 1）。按块起始行定位：点的时候按当前内容重新解析，内容变过、块已不在就什么都不做
-monaco.languages.registerCodeLensProvider('markdown', {
-  provideCodeLenses(model) {
-    const lenses = cur?.conflict && model === cur.modified
-      ? parseConflicts(model.getValue()).flatMap((c) =>
-          (['ours', 'theirs', 'both'] as const).map((take) => ({
-            range: new monaco.Range(c.start, 1, c.start, 1),
-            command: { id: 'synote.acceptConflict', title: i18next.t(`conflictAccept_${take}`), arguments: [c.start, take] },
-          })),
-        )
-      : []
-    return { lenses, dispose() {} }
-  },
-})
-monaco.editor.registerCommand('synote.acceptConflict', (_acc, start: number, take: 'ours' | 'theirs' | 'both') => {
-  if (!cur?.conflict || conflictEd!.getOption(monaco.editor.EditorOption.readOnly)) return
-  const m = cur.modified
-  const text = m.getValue()
-  const c = parseConflicts(text).find((x) => x.start === start)
-  const e = c && minimalEdit(text, resolveConflict(text, c, take))
-  if (!e) return
-  // 走编辑器的编辑：和手改一样同步回 CM6、进撤销栈
-  conflictEd!.executeEdits('conflict', [{ range: monaco.Range.fromPositions(m.getPositionAt(e.from), m.getPositionAt(e.to)), text: e.insert }])
-  conflictEd!.focus()
-})
 
 // 删除的笔记（S13）：工作区里已没有它，不进 CM6 / 标签页，单独开一个只读 diff：左 HEAD 正文、右空。返回销毁函数
 export function showDeleted(parent: HTMLElement, head: string): () => void {
@@ -234,8 +262,8 @@ export function showDeleted(parent: HTMLElement, head: string): () => void {
 }
 
 // rev / base：左侧是哪个版本（HEAD 或历史提交的 oid）、笔记在那个版本里的路径，悬停图片时按它解析、从同一版本读。
-// conflict：改为显示冲突视图（S16），rev / base / head 不用
-export function show(vault: string, path: string, rev: string, base: string, head: string, doc: string, readOnly: boolean, conflict = false) {
+// conflict：改为显示冲突视图（#70），给出共同祖先 / 当前 / 传入三个 stage 的正文，rev / base / head 不用
+export function show(vault: string, path: string, rev: string, base: string, head: string, doc: string, readOnly: boolean, conflict: { base: string; ours: string; theirs: string } | null = null) {
   hide()
   // 模型只是 CM6 正文的临时镜像，每次进入重建；EOL 固定为 LF，偏移才和 CM6 对得上（CM6 的 doc 只用 \n）
   const mk = (text: string) => {
@@ -243,27 +271,50 @@ export function show(vault: string, path: string, rev: string, base: string, hea
     m.setEOL(monaco.editor.EndOfLineSequence.LF)
     return m
   }
-  cur = { vault, path, rev, base, original: mk(head), modified: mk(doc), conflict }
-  diffDiv!.hidden = conflict
-  conflictDiv!.hidden = !conflict
-  if (conflict) conflictEd!.setModel(cur.modified)
-  else editor!.setModel({ original: cur.original, modified: cur.modified })
+  const modified = mk(doc)
+  cur = { vault, path, rev, base, original: mk(head), modified, conflict: null }
+  syncBack(modified, edits!.docNow, edits!.onEdit)
   if (!align(doc)) reset(doc)
+  diffDiv!.hidden = !!conflict
+  conflictDiv!.hidden = !conflict
+  if (conflict) {
+    const [b, ours, theirs] = [mk(conflict.base), mk(conflict.ours), mk(conflict.theirs)]
+    const input = (textModel: monaco.editor.ITextModel, side: 'Ours' | 'Theirs') =>
+      ({ textModel, title: i18next.t(`merge${side}`), description: i18next.t(`merge${side}Hint`), detail: undefined })
+    // 照 VS Code 打开工作区里的冲突文件：结果就是工作区正文，里面还有冲突标记时按合并结果重新初始化（非冲突改动合入、冲突块放共同祖先）
+    const model = new MergeEditorModel(b, input(ours, 'Ours'), input(theirs, 'Theirs'), modified,
+      new MergeDiffComputer(StandaloneServices.get<WorkerService>(IEditorWorkerService)),
+      { resetResult: /^<{7}/m.test(doc) }, StandaloneServices.get<UndoService>(IUndoRedoService))
+    cur.conflict = { base: b, ours, theirs, model }
+    mergeEd!.setModel(model)
+  } else editor!.setModel({ original: cur.original, modified: cur.modified })
   setReadOnly(readOnly)
 }
 
 export function hide() {
   if (!cur) return
   editor!.setModel(null)
-  conflictEd!.setModel(null)
+  mergeEd!.clearModel()
+  if (cur.conflict) {
+    cur.conflict.model.dispose()
+    for (const m of [cur.conflict.base, cur.conflict.ours, cur.conflict.theirs]) m.dispose()
+  }
   cur.original.dispose()
   cur.modified.dispose()
   cur = null
 }
 
 // CM6 那边的改动（外部重载）：按 CM6 坐标求最小替换，换算成 Monaco 坐标推过去，保住光标和撤销栈。
-// 改动碰到 Monaco 藏起来的 BOM、或之前没对齐，就整体重设
+// 改动碰到 Monaco 藏起来的 BOM、或之前没对齐，就整体重设。
+// 冲突视图里重载进来的正文带冲突标记（如笔记开着时 pull 出了冲突）：照打开带标记文件时的规则重新初始化结果栏
 export function replace(doc: string) {
+  if (!cur) return
+  const c = cur.conflict
+  if (c && /^<{7}/m.test(doc)) queueMicrotask(() => cur?.conflict === c && c.model.reset())
+  replaceText(doc)
+}
+
+function replaceText(doc: string) {
   if (!cur) return
   const m = cur.modified
   if (mirror !== null && m.getValue() === mirror) {
@@ -288,10 +339,23 @@ export function replace(doc: string) {
 export const setHead = (head: string) => cur && cur.original.setValue(head)
 export const setReadOnly = (on: boolean) => {
   editor?.getModifiedEditor().updateOptions({ readOnly: on })
-  conflictEd?.updateOptions({ readOnly: on })
+  mergeEd?.setReadOnly(on)
 }
 export const focus = () => cur && modifiedEd().focus()
 
+
+// 能悬停看图的各栏：rev 是从哪个版本读图片（null 为工作区），note 是相对链接按哪篇笔记的路径解析。
+// 冲突视图（#70）里当前一侧读 HEAD、传入一侧读 MERGE_HEAD，结果栏读工作区；共同祖先栏不悬停
+type Side = 'original' | 'modified' | 'ours' | 'theirs'
+function sideInfo(c: NonNullable<typeof cur>, side: Side): { model: monaco.editor.ITextModel; rev: string | null; note: string; editor: () => monaco.editor.ICodeEditor } | null {
+  if (side === 'modified') return { model: c.modified, rev: null, note: c.path, editor: modifiedEd }
+  if (!c.conflict) return side === 'original' ? { model: c.original, rev: c.rev, note: c.base, editor: () => editor!.getOriginalEditor() } : null
+  if (side === 'ours') return { model: c.conflict.ours, rev: 'HEAD', note: c.path, editor: () => mergeEd!.input1Editor }
+  if (side === 'theirs') return { model: c.conflict.theirs, rev: 'MERGE_HEAD', note: c.path, editor: () => mergeEd!.input2Editor }
+  return null
+}
+const sideOf = (c: NonNullable<typeof cur>, model: monaco.editor.ITextModel) =>
+  (['original', 'modified', 'ours', 'theirs'] as const).find((k) => sideInfo(c, k)?.model === model)
 
 // 用户在悬停里点了"下载"的 LFS 图片（S17）：左侧按版本 smudge（对象顺带存进本地 LFS 存储，readRev 下次就能直接读到），
 // 右侧（工作区）git lfs pull。下好后在原处重新弹出悬停。smudge 的结果也记一份，自定义了 lfs.storage 的仓库靠它
@@ -299,23 +363,23 @@ export const focus = () => cur && modifiedEd().focus()
 // 只按完整 oid 记：HEAD 会指向别的提交，按字符串 HEAD 记会把旧版本的图当成新的（HEAD 一侧下载后对象已在本地，readRev 直接命中）
 const smudged = new Map<string, Uint8Array>()
 const smudgeKey = (vault: string, rev: string, path: string) => (/^[0-9a-f]{40,64}$/.test(rev) ? `${vault}\0${rev}\0${path}` : null)
-monaco.editor.registerCommand('synote.lfsDownload', async (_acc, side: 'original' | 'modified', line: number, column: number) => {
+monaco.editor.registerCommand('synote.lfsDownload', async (_acc, side: Side, line: number, column: number) => {
   const c = cur
-  if (!c) return
-  const model = side === 'original' ? c.original : c.modified
-  const ref = imageAt(model.getLineContent(line), column - 1, side === 'original' ? c.base : c.path)
+  const info = c && sideInfo(c, side)
+  if (!c || !info) return
+  const ref = imageAt(info.model.getLineContent(line), column - 1, info.note)
   if (!ref) return
   try {
-    if (side === 'original') {
-      const b = await window.synote.lfsSmudge(c.vault, c.rev, ref.path)
-      const key = smudgeKey(c.vault, c.rev, ref.path)
+    if (info.rev) {
+      const b = await window.synote.lfsSmudge(c.vault, info.rev, ref.path)
+      const key = smudgeKey(c.vault, info.rev, ref.path)
       if (b && key) smudged.set(key, b)
     } else await window.synote.lfsPull(c.vault, ref.path)
   } catch (e) {
     return useUi.getState().setError(String(e))
   }
   if (cur !== c) return
-  const ed = side === 'original' ? editor!.getOriginalEditor() : modifiedEd()
+  const ed = info.editor()
   ed.focus()
   ed.setPosition({ lineNumber: line, column })
   // 原来的悬停还开着时 showHover 只会聚焦它、不重新取内容，先关掉
@@ -328,14 +392,16 @@ monaco.editor.registerCommand('synote.lfsDownload', async (_acc, side: 'original
 monaco.languages.registerHoverProvider('markdown', {
   async provideHover(model, pos) {
     const c = cur
-    if (!c || (model !== c.original && model !== c.modified)) return null
-    const ref = imageAt(model.getLineContent(pos.lineNumber), pos.column - 1, model === c.original ? c.base : c.path)
+    const side = c && sideOf(c, model)
+    const info = side && sideInfo(c, side)
+    if (!c || !side || !info) return null
+    const ref = imageAt(model.getLineContent(pos.lineNumber), pos.column - 1, info.note)
     if (!ref) return null
     const range = new monaco.Range(pos.lineNumber, ref.start + 1, pos.lineNumber, ref.end + 1)
-    const side = model === c.original ? 'original' : 'modified'
+    const rev = info.rev
     const bytes =
-      (side === 'original' && smudged.get(smudgeKey(c.vault, c.rev, ref.path) ?? '')) ||
-      (await (side === 'original' ? window.synote.readRev(c.vault, c.rev, ref.path) : window.synote.readBytes(c.vault, ref.path)).catch(() => null))
+      (rev && smudged.get(smudgeKey(c.vault, rev, ref.path) ?? '')) ||
+      (await (rev ? window.synote.readRev(c.vault, rev, ref.path) : window.synote.readBytes(c.vault, ref.path)).catch(() => null))
     // 文字一律转义：路径来自笔记正文，不能被渲染成链接或 HTML
     const text = (value: string) => ({ range, contents: [{ value: escapeMd(value) }] })
     if (!bytes) return text(i18next.t('imageMissing', { path: ref.path }))

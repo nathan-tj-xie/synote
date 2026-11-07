@@ -1,9 +1,10 @@
-// 合并中横幅（S16，#9 决定 2）：窗口顶部，冲突清空前"完成合并"不可点；"放弃合并"二次确认后 git merge --abort
+// 合并中横幅（S16，#9 决定 2）：窗口顶部，冲突清空前"完成合并"不可点；"放弃合并"二次确认后 git merge --abort。
+// 另有合并编辑器（#70）里"完成此文件合并"的确认框
 import * as AlertDialog from '@radix-ui/react-alert-dialog'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { GitOpResult } from '../../shared/api'
-import { attachmentsSettled, flushAll, withWorktreeLock } from './editor'
+import { attachmentsSettled, completeMerge, flushAll, withWorktreeLock } from './editor'
 import s from './Merge.module.css'
 import d from './Orphans.module.css'
 import { useGit, useUi, useVault } from './store'
@@ -34,7 +35,7 @@ export function MergeBanner() {
       window.synote.gitState().then((v) => useVault.getState().vault?.root === root && useGit.setState({ state: v }), () => {})
     }
   }
-  // 先让最后的输入落盘：冲突文件靠保存触发自动 git add
+  // 先让最后的输入落盘：提交前确认没有没写进去的改动
   const finish = () =>
     run('mergeFinish', async () => {
       await attachmentsSettled()
@@ -72,5 +73,35 @@ export function MergeBanner() {
         </AlertDialog.Portal>
       </AlertDialog.Root>
     </section>
+  )
+}
+
+// 合并编辑器里还有冲突没处理时点"完成此文件合并"（#70，照 VS Code 的 Complete Merge）：确认后照样写盘并暂存
+export function MergeConfirm() {
+  const { t } = useTranslation()
+  const c = useUi((st) => st.mergeConfirm)
+  const close = () => useUi.getState().setMergeConfirm(null)
+  return (
+    <AlertDialog.Root open={c !== null} onOpenChange={(o) => !o && close()}>
+      <AlertDialog.Portal>
+        <AlertDialog.Overlay className={d.overlay} />
+        <AlertDialog.Content className={d.content}>
+          <AlertDialog.Title className={d.title}>{c && t('mergeCompleteTitle', { n: c.n })}</AlertDialog.Title>
+          <AlertDialog.Description className={d.muted}>{t('mergeCompleteHint')}</AlertDialog.Description>
+          <div className={d.actions}>
+            <AlertDialog.Cancel>{t('cancel')}</AlertDialog.Cancel>
+            <AlertDialog.Action
+              className={d.primary}
+              onClick={() => {
+                if (c) completeMerge(c.path)
+                close()
+              }}
+            >
+              {t('mergeCompleteAnyway')}
+            </AlertDialog.Action>
+          </div>
+        </AlertDialog.Content>
+      </AlertDialog.Portal>
+    </AlertDialog.Root>
   )
 }
