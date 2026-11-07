@@ -842,6 +842,18 @@ describe('Git（系统 git）', () => {
     git.close()
   })
 
+  it('完成合并：禁用文本 diff 的属性不能隐藏文本笔记中的新增标记', async () => {
+    const { git, note } = await conflicted()
+    await git.takeSide('b.md', 'ours')
+    await git.takeSide('冲突 a.md', 'theirs')
+    writeFileSync(note('.gitattributes'), '*.md -diff\n')
+    writeFileSync(note('b.md'), '本地\n<<<<<<< new\n')
+    expect(await git.markersLeft()).toEqual(['b.md'])
+    await git.stage(['b.md'])
+    expect(await git.markersLeft()).toEqual(['b.md'])
+    git.close()
+  })
+
   it('放弃合并：回到合并前，合并期间改的别的笔记保留', async () => {
     const { git, note } = await conflicted()
     writeFileSync(note('冲突 a.md'), '解了一半\n')

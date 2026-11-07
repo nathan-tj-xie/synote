@@ -323,9 +323,9 @@ export class Git {
         const b = cached ? (/^0+$/.test(oid) ? null : await this.readBlob(oid)) : await fs.readFile(path.join(this.cwd, rel)).catch(() => null)
         if (marked(b)) {
           // 全文只用于跳过二进制 / 无标记的文件；真正拦截的是相对 HEAD 新增的标记行。
-          // 按文件取 patch，路径无需从带转义的 diff 标题反解；禁用外部 diff、textconv 和颜色。
+          // 按文件取 patch，路径无需从带转义的 diff 标题反解；已确认无 NUL，强制文本以免 -diff 属性隐藏新增行。
           const patch = await this.run(['--literal-pathspecs', 'diff', ...(cached ? ['--cached'] : []),
-            '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--unified=0',
+            '--text', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--unified=0',
             '--output-indicator-new=+', 'HEAD', '--', rel])
           if (patch.split('\n').some((line) => line.startsWith('+') && hasConflictMarkers(line.slice(1)))) res.add(rel)
         }
