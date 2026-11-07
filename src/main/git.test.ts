@@ -813,6 +813,47 @@ describe('Git（系统 git）', () => {
     expect(sh('log', '-1', '--format=%P%n%s').toString()).toMatch(/^\w+ \w+\nMerge branch 'main' of /)
   })
 
+  it('完成合并：改动笔记的其他段落不把 HEAD 已有的标记示例算作残留', async () => {
+    const { git, note } = await conflicted()
+    await git.takeSide('b.md', 'ours')
+    await git.takeSide('冲突 a.md', 'theirs')
+    const example = readFileSync(note('不动.md'), 'utf8')
+    writeFileSync(note('不动.md'), '新增说明\n' + example + '\n改了其他段落\n')
+    expect(await git.markersLeft()).toEqual([])
+    await git.stage(['不动.md'])
+    expect(await git.markersLeft()).toEqual([])
+    await git.mergeContinue()
+    expect(await git.status()).toMatchObject({ merging: false, files: [] })
+  })
+
+  it('完成合并：已有示例不能掩盖工作区或暂存区新增的同样标记', async () => {
+    const { git, note } = await conflicted()
+    await git.takeSide('b.md', 'ours')
+    await git.takeSide('冲突 a.md', 'theirs')
+    const example = readFileSync(note('不动.md'), 'utf8')
+    writeFileSync(note('不动.md'), example + '\n第二个示例\n' + example)
+    expect(await git.markersLeft()).toEqual(['不动.md'])
+    await git.stage(['不动.md'])
+    // 工作区恢复原文仍应拦截暂存区的新增标记。
+    writeFileSync(note('不动.md'), example)
+    expect(await git.markersLeft()).toEqual(['不动.md'])
+    await git.stage(['不动.md'])
+    expect(await git.markersLeft()).toEqual([])
+    git.close()
+  })
+
+  it('完成合并：禁用文本 diff 的属性不能隐藏文本笔记中的新增标记', async () => {
+    const { git, note } = await conflicted()
+    await git.takeSide('b.md', 'ours')
+    await git.takeSide('冲突 a.md', 'theirs')
+    writeFileSync(note('.gitattributes'), '*.md -diff\n')
+    writeFileSync(note('b.md'), '本地\n<<<<<<< new\n')
+    expect(await git.markersLeft()).toEqual(['b.md'])
+    await git.stage(['b.md'])
+    expect(await git.markersLeft()).toEqual(['b.md'])
+    git.close()
+  })
+
   it('放弃合并：回到合并前，合并期间改的别的笔记保留', async () => {
     const { git, note } = await conflicted()
     writeFileSync(note('冲突 a.md'), '解了一半\n')
