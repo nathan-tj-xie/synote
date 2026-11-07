@@ -2,7 +2,7 @@
 
 macOS 深色主题，1280×800 CSS 像素；窄窗 900×650。使用真实 Electron、独立临时 userData 和确定性的中文笔记/Git fixture。所有截图已实际查看，未用 DOM 注入伪造界面。
 
-改前：`532fd05`（合并 #65 后的 main，与此前 `1ad8309` 的文件树完全相同）。改后：`86dba9a`。这里只提交 15 组主要界面，完整 21 组保留在本机 `/tmp/synote-58-visual`。
+改前：`532fd05`（合并 #65 后的 main，与此前 `1ad8309` 的文件树完全相同）。改后：`aa9fcf471ce5b103656d5ddc98437330d2547800`。这里只提交 15 组主要界面，完整 21 组保留在本机 `/tmp/synote-58-visual`。
 
 欢迎页为没有最近笔记库的真实空状态。Git 错误来自无 remote 的临时仓库 push；冲突来自真实本地分支合并。合并截图先等待 Git 状态就绪，再从冲突列表打开笔记并等待三个 CodeLens 操作可见。未改任何产品行为来制造截图。
 
@@ -15,6 +15,10 @@ SYNOTE_WORKTREE="$PWD" SYNOTE_CAPTURE_PHASE=recapture node docs/visual/58/captur
 ```
 
 输出位于脚本旁的 `recapture/`，默认不会覆盖提交的 before/after。脚本从目标 worktree 读取 Playwright，临时数据留在 `/tmp/synote-58-fixture-*`。它不在 e2e 测试发现目录，不访问真实笔记库，不运行项目测试。
+
+选中行强调文字对比度为 4.60:1；正文、次级文字和操作按钮文字对比度均超过 6.4:1。
+
+最终本机验证：typecheck/build 通过，Vitest 663 passed / 1 skipped，Electron e2e 单 worker 81 passed / 1 skipped。首次 e2e 仅因固定旧错误色的断言失败，已同步新色值并全量重跑。
 
 ## 验证边界
 
