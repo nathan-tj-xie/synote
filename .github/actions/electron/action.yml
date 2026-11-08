@@ -1,0 +1,21 @@
+name: Electron binary
+description: 从缓存恢复 Electron 二进制，未命中再从 GitHub release 下载（带重试）
+# 三个 workflow 共用这一份：跨 workflow 共用缓存要求 path 和 key 完全一致
+runs:
+  using: composite
+  steps:
+    # Electron 二进制在首次运行时才从 GitHub release 下载（常 504），缓存 @electron/get 的默认缓存目录（electron-builder 也用它）
+    - uses: actions/cache@v4
+      with:
+        path: |
+          ~/Library/Caches/electron
+          ~/AppData/Local/electron/Cache
+        key: electron-${{ runner.os }}-${{ hashFiles('node_modules/electron/package.json') }}
+    # 命中缓存时只解压不联网；未命中时下载，失败重试，DEBUG 日志里能看出走的哪条路
+    - run: for i in 1 2 3; do node node_modules/electron/install.js && exit 0; [ $i -lt 3 ] && sleep 30; done; exit 1
+      shell: bash
+      env:
+        DEBUG: '@electron/get*'
+    # electron-builder 不传 checksums，命中缓存也会去 GitHub 拉 SHASUMS256.txt；把 electron 包自带的 checksums 写到缓存根目录，让它离线校验
+    - run: node "$GITHUB_ACTION_PATH/seed-checksums.js"
+      shell: bash

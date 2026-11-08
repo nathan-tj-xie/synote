@@ -1,0 +1,24 @@
+name: Electron cache
+# PR 上存的缓存只有该 PR 自己能读；在 main 上预热，所有 PR 和 release（tag）都能读到
+on:
+  push:
+    branches: [main]
+    paths: [pnpm-lock.yaml, .github/workflows/electron-cache.yml]
+  workflow_dispatch:
+
+jobs:
+  warm:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: ./.github/actions/electron

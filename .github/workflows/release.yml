@@ -20,6 +20,7 @@ jobs:
           node-version: lts/*
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - uses: ./.github/actions/electron
       - run: pnpm build
       # 未签名安装包（MVP 不做签名与公证）
       - run: pnpm exec electron-builder --publish always
