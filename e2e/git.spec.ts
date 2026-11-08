@@ -648,6 +648,38 @@ test('merge: the complete confirmation closes when the merge is aborted outside'
   await app.close()
 })
 
+test('merge: after the note leaves the conflict outside, input is rejected until it reloads from disk', async () => {
+  const { app, win, vault, git, pushFromOther } = await launchRepo({ 'a.md': 'base\n' })
+  pushFromOther('a.md', 'remote\n')
+  writeFileSync(path.join(vault, 'a.md'), 'local\n')
+  git('commit', '-qam', 'local')
+  await openGit(win)
+  await win.getByRole('button', { name: 'pull' }).click()
+  await expect(banner(win)).toContainText('1 个冲突文件', { timeout: 10_000 })
+  await win.getByRole('button', { name: '文件', exact: true }).click()
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(pane(win, 'result').locator('.header .remaining')).toHaveText('还有 1 处冲突', { timeout: 30_000 })
+  // 读盘慢 3 s，拉开"已切回正文、还没按磁盘重载"的窗口
+  await app.evaluate(({ ipcMain }) => {
+    const fs = process.getBuiltinModule('node:fs/promises')
+    ipcMain.removeHandler('file:read')
+    ipcMain.handle('file:read', async (_e, vault: string, rel: string) => {
+      await new Promise((r) => setTimeout(r, 3000))
+      return fs.readFile(`${vault}/${rel}`, 'utf8')
+    })
+  })
+  git('merge', '--abort')
+  const editor = win.locator('.cm-content')
+  await expect(editor).toBeVisible({ timeout: 10_000 })
+  await editor.click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('X')
+  await expect(editor).toHaveText('local', { timeout: 10_000 })
+  await win.waitForTimeout(1000) // 自动保存是 500 ms 防抖
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('local\n')
+  await app.close()
+})
+
 test('merge: input while completing is rejected until the note reloads', async () => {
   // 应用用的 git 在 add 时慢 2 s，留出"写盘之后、暂存返回之前"的窗口
   const bin = mkdtempSync(path.join(tmpdir(), 'synote-slow-git-'))

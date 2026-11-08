@@ -366,7 +366,7 @@ export async function completeMerge(path: string) {
   setLocked(true)
   try {
     const ok = await flush(path, true).catch((e) => {
-      throw new Error(`${i18next.t('mergeCompleteUnsaved')}\n${e}`)
+      throw new Error(`${i18next.t('mergeCompleteUnsaved')}\n${e instanceof Error ? e.message : e}`)
     })
     await writes.get(path) // flush 等的是它自己那次写；期间又排进的写也要落盘，下面的 dirty 判断才准
     if (!ok || vault !== v || useEditor.getState().dirty[path]) throw new Error(i18next.t('mergeCompleteUnsaved'))
@@ -520,7 +520,7 @@ export function setLocked(on: boolean) {
   holds += on ? 1 : -1
   locked = holds > 0
   view?.dispatch({ effects: lock.reconfigure(lockExt()) })
-  diff?.setReadOnly(on)
+  diff?.setReadOnly(locked)
 }
 
 export function forget(path: string) {
