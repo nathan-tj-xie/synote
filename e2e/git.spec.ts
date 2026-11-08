@@ -1,6 +1,6 @@
 import { _electron as electron, expect, test, type Page } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -363,53 +363,263 @@ async function launchConflict() {
   return r
 }
 const banner = (win: Page) => win.getByRole('region', { name: '合并中' })
-const lens = (win: Page, name: string) => win.locator('.codelens-decoration a', { hasText: name }).first()
+// 合并编辑器（#70）的三栏和冲突块上的操作（在各栏的 view zone 里，样式同 CodeLens）
+const pane = (win: Page, which: 'i1' | 'i2' | 'result' | 'base') => win.locator(`[data-conflict-view] .code-view.${which}`)
+const action = (win: Page, which: 'i1' | 'i2' | 'result', name: string, nth = 0) =>
+  pane(win, which).locator('.merge-editor-conflict-actions a', { hasText: new RegExp(`^${name}$`) }).nth(nth)
+const lines = (win: Page, which: 'i1' | 'i2' | 'result' | 'base') => pane(win, which).locator('.view-lines')
 
-test('merge: pull conflict → resolve each file in the conflict view → finish merge', async () => {
-  const { app, win, vault, git } = await launchConflict()
+// 两处冲突：第 2 行两边都改了（单侧 / 两侧 / 取消勾选），第 6 行两边改了同一行的不同词（可以接受组合）；
+// 第 4 行只有本地改、第 8 行只有远端改，打开时就已合入结果
+const base = '标题\n第一段 共同\n中间 1\n中间 2\n中间 3\nhello world\n尾部 1\n尾部 2\n'
+const ours = '标题\n第一段 本地\n中间 1\n中间 2 本地改\n中间 3\nhallo world\n尾部 1\n尾部 2\n'
+const theirs = '标题\n第一段 远端\n中间 1\n中间 2\n中间 3\nhello welt\n尾部 1\n尾部 2 远端改\n'
+const merged = (l2: string, l6: string) => `标题\n${l2}中间 1\n中间 2 本地改\n中间 3\n${l6}尾部 1\n尾部 2 远端改\n`
+
+test('merge: three-way merge editor — accept, combine, reset, base pane, manual edit, complete merge, finish', async () => {
+  const r = await launchRepo({ 'a.md': base, 'b.md': 'b\n', 'c.md': 'c\n' })
+  r.pushFromOther('a.md', theirs)
+  r.pushFromOther('b.md', '远端 b\n')
+  writeFileSync(path.join(r.vault, 'a.md'), ours)
+  writeFileSync(path.join(r.vault, 'b.md'), '本地 b\n')
+  r.git('commit', '-qam', '本地')
+  const { app, win, vault, git } = r
+  const disk = (f: string) => readFileSync(path.join(vault, f), 'utf8')
   const changes = await openGit(win)
   await win.getByRole('button', { name: 'pull' }).click()
   await expect(banner(win)).toContainText('2 个冲突文件', { timeout: 10_000 })
   const finish = banner(win).getByRole('button', { name: '完成合并' })
   await expect(finish).toBeDisabled()
   await expect(changes.getByText(/^冲突 2$/)).toBeVisible()
-  await win.getByLabel('提交信息（⌘Enter 提交）').fill('不该能提交')
-  await expect(win.getByRole('button', { name: '全部暂存并提交' })).toBeDisabled()
   await expect(win.getByRole('alert').filter({ hasText: 'pull失败' })).toHaveCount(0) // 由横幅接管，不再弹错误卡片
 
-  // 从 git 面板打开冲突文件：直接进冲突视图，点"接受当前"
+  // 从 git 面板打开：三栏，左当前（本地）、中结果、右传入（远端）；非冲突改动已合入，冲突块显示共同祖先
   await row(changes, 'a.md').click({ position: { x: 30, y: 10 } })
-  const conflict = win.locator('[data-conflict-view] .monaco-editor')
-  await expect(conflict).toBeVisible({ timeout: 10_000 })
-  await expect(conflict.locator('.view-lines')).toContainText('<<<<<<< HEAD')
-  await lens(win, '接受当前').click()
-  // 标记清空，保存后自动 git add，移出冲突组，回到实时预览
-  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('本地 a\n共同\n')
-  await expect.poll(() => git('ls-files', '-u', '--', 'a.md')).toBe('')
-  await expect(banner(win)).toContainText('1 个冲突文件')
-  await expect(win.locator('.cm-content')).toContainText('本地 a')
-  await expect(conflict).toBeHidden()
+  await expect(pane(win, 'i1')).toBeVisible({ timeout: 10_000 })
+  await expect(pane(win, 'i1').locator('.header .title')).toHaveText('当前')
+  await expect(pane(win, 'result').locator('.header .title')).toHaveText('结果')
+  await expect(pane(win, 'i2').locator('.header .title')).toHaveText('传入')
+  await expect(lines(win, 'i1')).toContainText('第一段 本地')
+  await expect(lines(win, 'i2')).toContainText('第一段 远端')
+  const boxes = await Promise.all((['i1', 'result', 'i2'] as const).map((w) => pane(win, w).boundingBox()))
+  expect(boxes[0]!.x).toBeLessThan(boxes[1]!.x)
+  expect(boxes[1]!.x).toBeLessThan(boxes[2]!.x)
+  await expect(lines(win, 'result')).toContainText('中间 2 本地改')
+  await expect(lines(win, 'result')).toContainText('尾部 2 远端改')
+  // 重新初始化出来的结果只在编辑器里：用户动手之前工作区仍是 git 写的冲突标记（全库残留标记检查拦得住）
+  expect(disk('a.md')).toContain('<<<<<<<')
+  const remaining = pane(win, 'result').locator('.header .remaining')
+  await expect(remaining).toHaveText('还有 2 处冲突')
 
-  // 合并期间其他笔记照常编辑（这处改动不进合并提交）
+  // 第一处：接受当前 → 再接受传入（两者都要，按勾选顺序）→ 在结果栏移除当前（取消勾选）
+  await action(win, 'i1', '接受当前').click()
+  await expect.poll(() => disk('a.md')).toBe(merged('第一段 本地\n', 'hello world\n'))
+  await expect(remaining).toHaveText('还有 1 处冲突')
+  await action(win, 'i2', '接受传入').click()
+  await expect.poll(() => disk('a.md')).toBe(merged('第一段 本地\n第一段 远端\n', 'hello world\n'))
+  await expect(pane(win, 'result').locator('.merge-editor-conflict-actions').first()).toContainText('当前 + 传入')
+  await action(win, 'result', '移除当前').click()
+  await expect.poll(() => disk('a.md')).toBe(merged('第一段 远端\n', 'hello world\n'))
+
+  // 第二处：接受组合（两侧改了同一行的不同词）
+  await action(win, 'i1', '接受组合').click()
+  await expect.poll(() => disk('a.md')).toBe(merged('第一段 远端\n', 'hallo welt\n'))
+  await expect(remaining).toHaveText('冲突已全部处理')
+
+  // 手改结果：这一块显示为手动解决，可以重置为共同祖先
+  await lines(win, 'result').getByText('hallo welt').click()
+  await win.keyboard.press('End')
+  await win.keyboard.type('！')
+  await expect.poll(() => disk('a.md')).toBe(merged('第一段 远端\n', 'hallo welt！\n'))
+  await expect(action(win, 'result', '重置为共同祖先')).toBeVisible()
+  await expect(pane(win, 'result').locator('.merge-editor-conflict-actions').nth(1)).toContainText('手动解决')
+  await action(win, 'result', '重置为共同祖先').click()
+  await expect.poll(() => disk('a.md')).toBe(merged('第一段 远端\n', 'hello world\n'))
+  // 照 VS Code：重置为共同祖先也是一种处理（setState 总把这一块标为已处理）
+  await expect(remaining).toHaveText('冲突已全部处理')
+  await expect(pane(win, 'result').locator('.merge-editor-conflict-actions').nth(1)).toContainText('未接受任何改动')
+  await action(win, 'i2', '接受传入').click()
+  await expect.poll(() => disk('a.md')).toBe(merged('第一段 远端\n', 'hello welt\n'))
+
+  // 共同祖先栏：默认隐藏；放顶部（在三栏上方）、放中间（当前和结果之间）、再隐藏
+  const bar = win.getByRole('toolbar', { name: '合并编辑器' })
+  await expect(pane(win, 'base')).toHaveCount(0)
+  await expect(bar.getByRole('button', { name: '隐藏' })).toHaveAttribute('aria-pressed', 'true')
+  await bar.getByRole('button', { name: '顶部' }).click()
+  await expect(lines(win, 'base')).toContainText('第一段 共同')
+  const top = (await pane(win, 'base').boundingBox())!
+  expect(top.y + top.height).toBeLessThanOrEqual((await pane(win, 'i1').boundingBox())!.y + 1)
+  await bar.getByRole('button', { name: '中间' }).click()
+  await expect(lines(win, 'base')).toContainText('第一段 共同')
+  const mid = (await pane(win, 'base').boundingBox())!
+  expect(mid.x).toBeGreaterThan((await pane(win, 'i1').boundingBox())!.x)
+  expect(mid.x).toBeLessThan((await pane(win, 'result').boundingBox())!.x)
+  await bar.getByRole('button', { name: '隐藏' }).click()
+  await expect(pane(win, 'base')).toHaveCount(0)
+
+  // 结果栏的编辑在完成之前不丢：切到别的笔记再回来、关掉标签页再打开都还在
   await win.getByRole('button', { name: '文件', exact: true }).click()
   await win.getByRole('treeitem', { name: 'c.md' }).click()
-  await win.locator('.cm-content').click()
-  await win.keyboard.press('ControlOrMeta+End')
-  await win.keyboard.type('改')
-  await expect.poll(() => readFileSync(path.join(vault, 'c.md'), 'utf8')).toBe('c\n改')
+  await expect(win.locator('.cm-content')).toContainText('c')
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(lines(win, 'result')).toContainText('第一段 远端')
+  await expect(remaining).toHaveText('冲突已全部处理')
+  await win.getByRole('tab', { name: /^a/ }).getByRole('button', { name: '关闭' }).click()
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(lines(win, 'result')).toContainText('hello welt')
+  expect(git('ls-files', '-u', '--', 'a.md')).not.toBe('') // 只写盘，没有自动暂存
 
-  // 从文件树打开另一个冲突文件，也直接进冲突视图；"两者都要"
+  // 全部处理：完成此文件合并直接写盘并暂存，移出冲突组，回到正文
+  await bar.getByRole('button', { name: '完成此文件合并' }).click()
+  await expect.poll(() => git('ls-files', '-u', '--', 'a.md')).toBe('')
+  expect(git('show', ':a.md')).toBe(merged('第一段 远端\n', 'hello welt\n'))
+  await expect(banner(win)).toContainText('1 个冲突文件')
+  await expect(pane(win, 'result')).toBeHidden()
+  await expect(win.locator('.cm-content')).toContainText('hello welt')
+
+  // 还有冲突没处理时完成要先确认：取消什么都不做，确认后照样写盘暂存（冲突块保留共同祖先）
   await win.getByRole('treeitem', { name: 'b.md' }).click()
-  await expect(conflict.locator('.view-lines')).toContainText('>>>>>>>')
-  await lens(win, '两者都要').click()
-  await expect.poll(() => readFileSync(path.join(vault, 'b.md'), 'utf8')).toBe('本地 b\n远端 b\n')
+  await expect(lines(win, 'i2')).toContainText('远端 b', { timeout: 10_000 })
+  await bar.getByRole('button', { name: '完成此文件合并' }).click()
+  const confirm = win.getByRole('alertdialog', { name: '还有 1 处冲突没处理，仍然完成此文件合并？' })
+  await confirm.getByRole('button', { name: '取消' }).click()
+  await expect(confirm).toHaveCount(0)
+  expect(git('ls-files', '-u', '--', 'b.md')).not.toBe('')
+  await bar.getByRole('button', { name: '完成此文件合并' }).click()
+  await confirm.getByRole('button', { name: '仍然完成' }).click()
+  await expect.poll(() => git('ls-files', '-u', '--', 'b.md')).toBe('')
+  expect(disk('b.md')).toBe('b\n')
   await expect(banner(win)).toContainText('冲突已全部解决')
+
+  // 全部解决后完成合并
   await finish.click()
   await expect(banner(win)).toHaveCount(0)
   expect(git('log', '-1', '--format=%P').trim().split(' ')).toHaveLength(2)
-  expect(git('status', '--porcelain')).toBe(' M c.md\n')
+  expect(git('show', 'HEAD:a.md')).toBe(merged('第一段 远端\n', 'hello welt\n'))
+  expect(git('status', '--porcelain')).toBe('')
+  await app.close()
+})
+
+// 笔记开着时 pull 出冲突：按磁盘重载进来的是带冲突标记的正文，结果栏照 VS Code 打开带标记文件的规则重新初始化
+// （冲突块放共同祖先、算未处理），不能把标记当成手改
+test('merge: a note open during the conflicting pull opens the merge editor with a fresh result', async () => {
+  const { app, win, vault, git } = await launchConflict()
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('本地 a')
   await openGit(win)
-  await expect(win.getByRole('button', { name: '全部暂存并提交' })).toBeEnabled()
+  await win.getByRole('button', { name: 'pull' }).click()
+  await expect(banner(win)).toContainText('2 个冲突文件', { timeout: 10_000 })
+  await expect(lines(win, 'i2')).toContainText('远端 a', { timeout: 10_000 })
+  await expect(pane(win, 'result').locator('.header .remaining')).toHaveText('还有 1 处冲突')
+  await expect(pane(win, 'result').locator('.merge-editor-conflict-actions').first()).toContainText('未接受任何改动')
+  await expect(lines(win, 'result')).toContainText('共同')
+  // 只打开、没动手：工作区还是带冲突标记的正文。在外面 git add 之后点"完成合并"，残留标记检查照样拦下
+  await win.waitForTimeout(1000) // 超过自动保存的防抖，确认没有写盘
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toContain('<<<<<<<')
+  git('add', 'a.md', 'b.md')
+  await expect(banner(win)).toContainText('冲突已全部解决', { timeout: 10_000 })
+  // 外部解决后退出合并编辑器：正文按磁盘显示（带标记），不留没写盘的重新初始化结果
+  await expect(pane(win, 'result')).toBeHidden()
+  await expect(win.locator('.cm-content')).toContainText('<<<<<<<')
+  await banner(win).getByRole('button', { name: '完成合并' }).click()
+  await expect(win.getByRole('alert').filter({ hasText: '完成合并失败' })).toContainText('a.md')
+  expect(git('rev-parse', '--verify', 'MERGE_HEAD').trim()).not.toBe('')
+  await app.close()
+})
+
+// 审查第 5 轮的回归：结果栏静默重置过、没动手的笔记放在后台标签页时，外部 git add 后切回去要按磁盘显示，
+// 不能留着没写盘的重置结果、一输入就把两侧内容覆盖成共同祖先
+test('merge: a background tab reloads from disk after its conflict is resolved outside', async () => {
+  const { app, win, vault, git } = await launchConflict()
+  await openGit(win)
+  await win.getByRole('button', { name: 'pull' }).click()
+  await expect(banner(win)).toContainText('2 个冲突文件', { timeout: 10_000 })
+  await win.getByRole('button', { name: '文件', exact: true }).click()
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(pane(win, 'result').locator('.header .remaining')).toHaveText('还有 1 处冲突', { timeout: 30_000 })
+  await win.getByRole('treeitem', { name: 'c.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('c')
+  const file = path.join(vault, 'a.md')
+  expect(readFileSync(file, 'utf8')).toContain('<<<<<<<')
+  git('add', 'a.md')
+  await expect(banner(win)).toContainText('1 个冲突文件', { timeout: 10_000 })
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('<<<<<<<')
+  await expect(win.locator('.cm-content')).toContainText('远端 a')
+  await win.locator('.cm-content').click()
+  await win.keyboard.press(process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End')
+  await win.keyboard.type('x')
+  await expect.poll(() => readFileSync(file, 'utf8'), { timeout: 10_000 }).toMatch(/x$/)
+  const disk = readFileSync(file, 'utf8')
+  expect(disk).toContain('本地 a')
+  expect(disk).toContain('远端 a')
+  await app.close()
+})
+
+// 审查第 1 轮的两个回归：差异还没算完就点完成，要等算完、按未处理数确认，不能直接暂存带标记的正文；
+// 笔记里本来就有冲突标记示例时，处理过的结果关掉再打开不能被当成 git 的标记整篇重置
+test('merge: complete waits for the diff, and a note with marker examples keeps its result on reopen', async () => {
+  const example = '说明\n<<<<<<< 示例\n本地\n=======\n远端\n>>>>>>> 示例\n'
+  const { app, win, vault, git, pushFromOther } = await launchRepo({ 'a.md': example + '原来\n' })
+  pushFromOther('a.md', example + '远端改\n')
+  writeFileSync(path.join(vault, 'a.md'), example + '本地改\n')
+  git('commit', '-qam', '本地')
+  const disk = () => readFileSync(path.join(vault, 'a.md'), 'utf8')
+  await openGit(win)
+  await win.getByRole('button', { name: 'pull' }).click()
+  await expect(banner(win)).toContainText('1 个冲突文件', { timeout: 10_000 })
+  // 让 Monaco 的 worker（差异计算）每条消息都晚到
+  await win.evaluate(() => {
+    const W = window.Worker
+    window.Worker = class extends W {
+      postMessage(message: unknown, transfer?: Transferable[] | StructuredSerializeOptions) {
+        setTimeout(() => super.postMessage(message, transfer as Transferable[]), 800)
+      }
+    } as typeof Worker
+  })
+  await win.getByRole('button', { name: '文件', exact: true }).click()
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  const bar = win.getByRole('toolbar', { name: '合并编辑器' })
+  await bar.getByRole('button', { name: '完成此文件合并' }).click()
+  const confirm = win.getByRole('alertdialog', { name: '还有 1 处冲突没处理，仍然完成此文件合并？' })
+  await expect(confirm).toBeVisible({ timeout: 30_000 })
+  await confirm.getByRole('button', { name: '取消' }).click()
+  expect(git('ls-files', '-u', '--', 'a.md')).not.toBe('')
+
+  await action(win, 'i1', '接受当前').click()
+  await expect.poll(() => disk(), { timeout: 15_000 }).toBe(example + '本地改\n')
+  await win.getByRole('tab', { name: /^a/ }).getByRole('button', { name: '关闭' }).click()
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(pane(win, 'result').locator('.header .remaining')).toHaveText('冲突已全部处理', { timeout: 30_000 })
+  await expect(lines(win, 'result')).toContainText('本地改')
+  expect(disk()).toBe(example + '本地改\n')
+  await app.close()
+})
+
+test('merge: complete does not stage when writing the untouched result fails', async () => {
+  test.skip(process.platform === 'win32', 'chmod')
+  const { app, win, vault, git, pushFromOther } = await launchRepo({ 'a.md': 'base\n' })
+  pushFromOther('a.md', 'remote\n')
+  writeFileSync(path.join(vault, 'a.md'), 'local\n')
+  git('commit', '-qam', 'local')
+  await openGit(win)
+  await win.getByRole('button', { name: 'pull' }).click()
+  await expect(banner(win)).toContainText('1 个冲突文件', { timeout: 10_000 })
+  await win.getByRole('button', { name: '文件', exact: true }).click()
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(pane(win, 'result').locator('.header .remaining')).toHaveText('还有 1 处冲突', { timeout: 30_000 })
+  // 不动手：结果栏是静默重置出来的、不在 dirty 里；让写盘失败
+  const file = path.join(vault, 'a.md')
+  chmodSync(file, 0o444)
+  try {
+    await win.getByRole('toolbar', { name: '合并编辑器' }).getByRole('button', { name: '完成此文件合并' }).click()
+    await win.getByRole('alertdialog').getByRole('button', { name: '仍然完成' }).click()
+    await expect(win.getByRole('alert').filter({ hasText: '结果没能写入' })).toBeVisible({ timeout: 10_000 })
+    expect(git('ls-files', '-u', '--', 'a.md')).not.toBe('') // 仍是冲突，没把带标记的正文暂存
+    await expect(banner(win)).toContainText('1 个冲突文件')
+  } finally {
+    chmodSync(file, 0o644)
+  }
   await app.close()
 })
 
@@ -453,7 +663,8 @@ test('merge: restored after restart, abort with confirmation, follows merges sta
   const w = again.win
   await expect(banner(w)).toContainText('2 个冲突文件', { timeout: 10_000 })
   await w.getByRole('treeitem', { name: 'a.md' }).click()
-  await expect(w.locator('[data-conflict-view] .monaco-editor .view-lines')).toContainText('<<<<<<< HEAD', { timeout: 10_000 })
+  await expect(lines(w, 'i1')).toContainText('本地 a', { timeout: 10_000 })
+  await expect(lines(w, 'i2')).toContainText('远端 a')
 
   // "+ 全部"只暂存普通改动，冲突文件留在冲突组
   writeFileSync(path.join(vault, 'c.md'), 'c 改\n')
@@ -483,7 +694,8 @@ test('merge: restored after restart, abort with confirmation, follows merges sta
   await expect(banner(w)).toHaveCount(0)
   expect(git('status', '--porcelain')).toBe('')
   expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('本地 a\n共同\n')
-  await expect(w.locator('.cm-content')).toContainText('本地 a') // 退出冲突视图，按磁盘重载
+  await expect(w.locator('.cm-content')).toContainText('本地 a') // 退出合并编辑器，按磁盘重载
+  await expect(pane(w, 'result')).toBeHidden()
 
   // 外部 git 进入 / 退出合并状态，界面跟着变
   expect(() => git('merge', '--no-edit', 'origin/main')).toThrow()

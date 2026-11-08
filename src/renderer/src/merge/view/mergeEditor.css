@@ -1,0 +1,142 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+/* 照 microsoft/vscode@31c3885f65f041e5a000cee1a15716b12b0797a4 src/vs/workbench/contrib/mergeEditor/browser/view/media/mergeEditor.css
+   改写（MIT，见 merge/LICENSE.txt）：颜色换成设计 token（ADR 0003），本地 / 传入两侧用不同底色（沿用旧冲突视图的 ours / theirs 色）；
+   去掉勾选框 gutter 的样式；补上 Grid 负责的分栏布局 */
+
+.merge-editor { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--bg); }
+.merge-editor-top { flex: 0 0 38%; display: flex; min-height: 0; border-bottom: 1px solid var(--border); }
+.merge-editor-top[hidden] { display: none; }
+.merge-editor-columns { flex: 1; display: flex; min-height: 0; }
+.merge-editor .code-view { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; }
+.merge-editor-columns > .code-view + .code-view { border-left: 1px solid var(--border); }
+
+.merge-editor .code-view > .header {
+	flex: none;
+	padding: 0 var(--space3);
+	height: 30px;
+	display: flex;
+	align-items: center;
+	gap: var(--space2);
+	overflow: hidden;
+	background: var(--bg-chrome);
+	border-bottom: 1px solid var(--border-subtle);
+	font-size: var(--font-size-ui);
+}
+
+.merge-editor .code-view > .header > span {
+	text-overflow: ellipsis;
+	overflow: hidden;
+	white-space: nowrap;
+}
+
+.merge-editor .code-view > .header > .title { flex-shrink: 0; font-weight: 600; }
+/* 两侧标题前的色块：和块底色一致，看得出哪栏是本地、哪栏是传入 */
+.merge-editor .code-view.input > .header > .title::before { content: ''; display: inline-block; width: 8px; height: 8px; margin-right: var(--space2); border-radius: 2px; vertical-align: 1px; }
+.merge-editor .code-view.input.i1 > .header > .title::before { background: var(--merge-ours); }
+.merge-editor .code-view.input.i2 > .header > .title::before { background: var(--merge-theirs); }
+.merge-editor .code-view > .header > .description { color: var(--fg-muted); font-size: var(--font-size-small); }
+.merge-editor .code-view > .header > .detail { margin-left: auto; flex-shrink: 0; font-size: var(--font-size-small); color: var(--fg-muted); }
+
+.merge-editor .code-view > .header .remaining {
+	background: none;
+	border: 1px solid transparent;
+	border-radius: var(--radius-small);
+	padding: 0 var(--space2);
+	color: var(--merging);
+	font-size: var(--font-size-small);
+}
+.merge-editor .code-view > .header .remaining:hover:not(:disabled) { border-color: var(--border); }
+.merge-editor .code-view > .header .remaining:disabled { color: var(--success); }
+
+.merge-editor .code-view > .container { flex: 1; min-height: 0; display: flex; }
+.merge-editor .code-view > .container > .editor { flex: 1; min-width: 0; }
+
+/* 两侧的块底色：本地偏蓝、传入偏绿；结果栏里的改动用强调色 */
+.merge-editor { --merge-ours: var(--renamed); --merge-theirs: var(--success); }
+.merge-editor .merge-editor-diff.input.i1 { background-color: var(--conflict-ours); }
+.merge-editor .merge-editor-diff.input.i2 { background-color: var(--conflict-theirs); }
+.merge-editor .merge-editor-diff-word.input.i1 { background-color: color-mix(in srgb, var(--merge-ours) 30%, transparent); }
+.merge-editor .merge-editor-diff-word.input.i2 { background-color: color-mix(in srgb, var(--merge-theirs) 30%, transparent); }
+.merge-editor .merge-editor-diff.result { background-color: color-mix(in srgb, var(--accent) 12%, transparent); }
+.merge-editor .merge-editor-diff-word.result { background-color: color-mix(in srgb, var(--accent) 24%, transparent); }
+
+/* BEGIN: .merge-editor-block */
+
+.merge-editor .merge-editor-block:not(.handled):not(.focused) {
+	border: 1px solid color-mix(in srgb, var(--merging) 55%, transparent);
+}
+
+.merge-editor .merge-editor-block:not(.handled).focused {
+	border: 2px solid var(--merging);
+}
+
+.merge-editor .merge-editor-block.handled:not(.focused) {
+	border: 1px solid var(--border);
+}
+
+.merge-editor .merge-editor-block.handled.focused {
+	border: 1px solid var(--fg-muted);
+}
+
+/* END: .merge-editor-block */
+
+.merge-editor-conflict-actions {
+	margin: 0px 3px;
+	overflow: hidden;
+	display: inline-block;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--fg-muted);
+}
+
+.merge-editor-conflict-actions > span,
+.merge-editor-conflict-actions > a {
+	user-select: none;
+	-webkit-user-select: none;
+	white-space: nowrap;
+}
+
+.merge-editor-conflict-actions > a {
+	text-decoration: none;
+	color: var(--accent);
+}
+
+.merge-editor.read-only .merge-editor-conflict-actions > a {
+	pointer-events: none;
+	opacity: .5;
+}
+
+.merge-editor-conflict-actions > a:hover {
+	cursor: pointer;
+	text-decoration: underline;
+}
+
+.fixed-zone-widget {
+	width: 100%;
+}
+
+.merge-editor-diff-empty-word.base {
+	margin-left: 3px;
+	border-left: solid var(--danger) 3px;
+}
+
+.merge-editor-diff-empty-word.input.i1 {
+	margin-left: 3px;
+	border-left: solid var(--merge-ours) 3px;
+}
+
+.merge-editor-diff-empty-word.input.i2 {
+	margin-left: 3px;
+	border-left: solid var(--merge-theirs) 3px;
+}
+
+.merge-editor-diff-word.base {
+	background-color: color-mix(in srgb, var(--danger) 30%, transparent);
+}
+
+.merge-editor-diff.base {
+	background-color: var(--diff-removed);
+}

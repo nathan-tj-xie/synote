@@ -41,6 +41,7 @@ const api: SynoteApi = {
   redetectGit: () => ipcRenderer.invoke('git:redetect'),
   chooseGit: () => ipcRenderer.invoke('git:choose'),
   readRev: (v, r, p) => ipcRenderer.invoke('git:readRev', v, r, p),
+  readStages: (v, p) => ipcRenderer.invoke('git:readStages', v, p),
   lfsSmudge: (v, r, p) => ipcRenderer.invoke('git:lfsSmudge', v, r, p),
   lfsPull: (v, p) => ipcRenderer.invoke('git:lfsPull', v, p),
   fileLog: (v, p) => ipcRenderer.invoke('git:log', v, p),

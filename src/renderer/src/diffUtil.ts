@@ -22,6 +22,16 @@ export function minimalEdit(a: string, b: string): { from: number; to: number; i
   return { from: p, to: a.length - q, insert: b.slice(p, b.length - q) }
 }
 
+// 合并编辑器（#70）是否要按合并结果重新初始化结果栏：照 VS Code，结果里有冲突起始标记就重置。但笔记本身可能写着
+// 冲突标记的示例（三个 stage 里都有），只认三个输入里都没有的那种行，那是 git 合并时写进去的；
+// 否则已处理过、写回工作区的结果在重新打开时会被整篇重置
+// shortcut: 示例行恰好和 git 写的标记一字不差（如 `<<<<<<< HEAD`）时认不出是示例；有人这样写时再按 MERGE_HEAD 记住已初始化过
+export function needsMergeReset(doc: string, inputs: string[]): boolean {
+  const known = new Set(inputs.flatMap((t) => t.split(/\r?\n/)))
+  // 起始标记的写法同 hasConflictMarkers（7 个起、后面是空格或行尾）
+  return doc.split(/\r?\n/).some((l) => /^<{7,}(?: |$)/.test(l) && !known.has(l))
+}
+
 // doc 是否恰好等于「若干个 BOM + visible」，是的话返回 BOM 的个数（Monaco 藏起来的那部分），否则 null
 export function bomOffset(doc: string, visible: string): number | null {
   const n = doc.length - visible.length

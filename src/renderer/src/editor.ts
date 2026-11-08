@@ -50,7 +50,8 @@ const diffMode = new Map<string, Source>() // 处于 diff 形态的已打开文�
 let diffWant: string | null = null // 应该显示的 diff：`文件\0版本`（加载中或已显示）
 let diffShown: string | null = null // Monaco 里实际是哪个文件
 let diffSeq = 0
-// 合并中还没解决的冲突文件（S16）：打开时直接进冲突视图，优先于 diff 形态；解决（自动 git add）后回到正文
+// 合并中还没解决的冲突文件（S16）：打开时直接进冲突视图（#70 的合并编辑器），优先于 diff 形态；
+// 在合并编辑器里"完成此文件合并"（git add）后回到正文
 let conflicted = new Set<string>()
 const fromDiff = Annotation.define<boolean>()
 let cmBox: HTMLElement | null = null
@@ -161,22 +162,25 @@ function scheduleSave(path: string) {
   timers.set(path, setTimeout(() => flush(path), 500))
 }
 
-async function flush(path: string) {
+// 返回这次是否写进了磁盘：没在 dirty 里的内容（如合并编辑器静默重置出的结果）写失败时，调用方只能靠它知道
+async function flush(path: string): Promise<boolean> {
   clearTimeout(timers.get(path))
   timers.delete(path)
   const text = docOf(path)
-  if (text === undefined || !vault) return
+  if (text === undefined || !vault) return false
   const v = vault // 按发起时所在的库写；之后换了库，主进程会拒绝并报错
   const g = vaultGen
   const write = (writes.get(path) ?? Promise.resolve()).then(() => window.synote.writeFile(v, path, text))
   writes.set(path, write.catch(() => {}))
   try {
     await write
-    if (g !== vaultGen) return // 已换库：回执不属于当前库
+    if (g !== vaultGen) return false // 已换库：回执不属于当前库
     const now = docOf(path)
     if (now === undefined || now === text) useEditor.getState().setDirty(path, false) // undefined：标签页已关
+    return true
   } catch (e) {
     useUi.getState().setError(String(e))
+    return false
   }
 }
 
@@ -319,13 +323,19 @@ function syncDiff() {
   const p = shown!
   const v = vault!
   ;(async () => {
-    const [mod, head] = await Promise.all([diff ?? import('./diff'), src ? window.synote.readRev(v, src.rev, src.path) : null])
+    // 冲突视图（#70）读三个 stage：共同祖先 :1、当前 :2、传入 :3
+    const [mod, head, stages] = await Promise.all([
+      diff ?? import('./diff'),
+      src ? window.synote.readRev(v, src.rev, src.path) : null,
+      conflict ? window.synote.readStages(v, p) : null,
+    ])
     diff = mod
     if (my !== diffSeq || !view) return // 期间又切了文件 / 形态，或换了库
-    if (!diffBox!.childElementCount) mod.create(diffBox!, applyFromDiff, () => view!.state.doc.toString())
+    if (!diffBox!.childElementCount) mod.create(diffBox!, applyFromDiff, () => view!.state.doc.toString(), requestComplete)
     diffBox!.hidden = false
     cmBox!.hidden = true
-    mod.show(v, p, src?.rev ?? '', src?.path ?? p, decode(head), view.state.doc.toString(), locked, conflict)
+    const three = stages && { base: decode(stages[0]), ours: decode(stages[1]), theirs: decode(stages[2]) }
+    mod.show(v, p, src?.rev ?? '', src?.path ?? p, decode(head), view.state.doc.toString(), locked, three)
     diffShown = p
     mod.focus()
   })().catch((e) => {
@@ -336,8 +346,37 @@ function syncDiff() {
   })
 }
 
-function applyFromDiff(changes: ChangeSpec[]) {
-  if (view && diffShown === shown) view.dispatch({ changes, annotations: fromDiff.of(true) })
+// 合并编辑器的"完成此文件合并"（#70）：还有未处理的冲突时先确认（照 VS Code 的 Complete Merge），确认框在 Merge.tsx
+function requestComplete(path: string, unhandled: number) {
+  if (locked) return
+  if (unhandled > 0) useUi.getState().setMergeConfirm({ path, n: unhandled })
+  else completeMerge(path)
+}
+
+// 结果栏一直同步在 CM6 里、照常自动保存（切走再回来、关掉再打开都从工作区正文恢复）：这里先把它落盘，再 git add 移出冲突组
+export async function completeMerge(path: string) {
+  const v = vault
+  if (locked || !v) return
+  try {
+    if (docOf(path) === undefined) return // 标签页已关
+    const ok = await flush(path)
+    await writes.get(path)
+    if (!ok || vault !== v || useEditor.getState().dirty[path]) throw new Error(i18next.t('mergeCompleteUnsaved'))
+    const res = await window.synote.gitStage(v, [path])
+    if (!res.ok) {
+      const reason = [i18next.t(`gitErr_${res.kind}`), ...(res.paths ?? (res.raw ? [res.raw] : []))].join('\n')
+      useUi.getState().setError(i18next.t('mergeFailed', { op: i18next.t('mergeComplete'), reason }))
+    }
+  } catch (e) {
+    useUi.getState().setError(String(e))
+  } finally {
+    window.synote.gitState().then((st) => vault === v && useGit.setState({ state: st }), () => {})
+  }
+}
+
+// quiet：合并编辑器重新初始化结果栏的改动（#70），标成 remote 不触发保存，等用户真正改了再随整篇写盘
+function applyFromDiff(changes: ChangeSpec[], quiet: boolean) {
+  if (view && diffShown === shown) view.dispatch({ changes, annotations: [fromDiff.of(true), ...(quiet ? [Transaction.remote.of(true)] : [])] })
 }
 
 // ⌘⇧D：当前笔记在正文和 HEAD ↔ 工作区对比之间原地切换
@@ -368,7 +407,12 @@ export function compareWith(path: string, e: LogEntry) {
 
 useGit.subscribe((s) => {
   const st = s.state
+  const before = conflicted
   conflicted = new Set(st?.status === 'ready' && st.merging ? st.files.filter((f) => f.conflict).map((f) => f.path) : [])
+  // 笔记不再冲突（完成此文件合并、外部 git add / merge --abort）：不论是当前笔记还是后台标签页，正文里都可能只有
+  // 合并编辑器静默重置出的结果、没写盘（#70），按磁盘重载一次。有未保存的改动时 reloadIfClean 不动它；
+  // 用户动过手的结果已经写盘，重载是空操作
+  if (vault) for (const p of before) if (!conflicted.has(p)) reloadIfClean(p)
   if (view) syncDiff()
 })
 

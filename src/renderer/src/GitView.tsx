@@ -354,7 +354,7 @@ function Changes(p: {
                 className={`${s.row} ${f.path.endsWith('.md') ? s.openable : ''}`}
                 style={style}
                 title={f.path}
-                // 笔记打开时直接进冲突视图（editor.ts 按 git 状态判断）。不给暂存按钮：笔记等标记清空后保存时自动暂存；
+                // 笔记打开时直接进冲突视图（editor.ts 按 git 状态判断）。不给暂存按钮：笔记在合并编辑器里"完成此文件合并"时暂存（#70）；
                 // 附件、删除 / 修改冲突没有标记可解，整份取一侧
                 onClick={() => f.path.endsWith('.md') && useEditor.getState().open(f.path)}
               >

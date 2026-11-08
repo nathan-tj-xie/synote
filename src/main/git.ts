@@ -300,7 +300,7 @@ export class Git {
   }
 
   // 完成合并前的复查（#9 决定 3）：相对 HEAD 改动过的笔记库文件，暂存区或工作区版本里哪些仍有冲突标记（合并提交的是暂存区；
-  // 工作区也查，免得自动暂存之后又改出标记、合并完了留在笔记里；未跟踪的笔记（忽略的除外）一并读盘查）。HEAD 里本来就有的
+  // 工作区也查，免得暂存之后又改出标记、合并完了留在笔记里；未跟踪的笔记（忽略的除外）一并读盘查）。HEAD 里本来就有的
   // （如讲冲突标记的笔记）不算；二进制文件跳过
   async markersLeft(): Promise<string[]> {
     // --raw 直接给出暂存区一侧的 oid：常驻 cat-file 进程只读一次 .git/index，按 `:路径` 读会拿到旧的暂存内容
@@ -346,6 +346,18 @@ export class Git {
       await this.mutate(['--literal-pathspecs', 'checkout', `--${side}`, '--', rel])
       await this.stage([rel])
     } else await this.mutate(['--literal-pathspecs', 'rm', '-q', '-f', '--', rel]) // -f：冲突中的工作区文件本来就和暂存区不同
+  }
+
+  // 冲突文件的三个 stage（1 共同祖先、2 ours、3 theirs），那一侧没有时为 null。oid 从 ls-files 现查：
+  // 常驻 cat-file 只读一次 .git/index，按 `:2:路径` 读会拿到进程启动时的旧索引
+  async readStages(rel: string): Promise<[Buffer | null, Buffer | null, Buffer | null]> {
+    const out = await this.run(['--literal-pathspecs', 'ls-files', '-u', '-z', '--', rel])
+    const entries = out.split('\0').filter(Boolean).map((l) => l.split('\t'))
+    if (!entries.length) throw new GitError('unknown', -1, `${rel} is not in conflict`)
+    // rel 是目录时会列出底下所有冲突文件，各自的 stage 不能混在一起
+    if (new Set(entries.map(([, p]) => p)).size > 1) throw new GitError('unknown', -1, `${rel} is not a single file`)
+    const oids = new Map(entries.map(([info]) => info.split(' ')).map(([, oid, stage]) => [stage, oid]))
+    return Promise.all((['1', '2', '3'] as const).map((n) => (oids.has(n) ? this.readBlob(oids.get(n)!) : null))) as Promise<[Buffer | null, Buffer | null, Buffer | null]>
   }
 
   // 用 git 生成的合并信息（MERGE_MSG）提交暂存区；工作区里没暂存的改动不进合并提交
