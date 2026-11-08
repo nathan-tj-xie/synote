@@ -36,7 +36,7 @@ import { isMac } from './match'
 import { useUi } from './store'
 import { monacoColors, monacoRules } from './tokens'
 import { tokens } from '../../shared/tokens'
-import { bomOffset, dataUrl, escapeMd, imageAt, imageMime, lfsHoverMarkdown, MAX_IMAGE, minimalEdit } from './diffUtil'
+import { bomOffset, dataUrl, escapeMd, imageAt, imageMime, lfsHoverMarkdown, MAX_IMAGE, minimalEdit, needsMergeReset } from './diffUtil'
 import { type IEditorWorkerService as WorkerService, MergeDiffComputer } from './merge/model/diffComputer'
 import { type IUndoRedoService as UndoService, MergeEditorModel } from './merge/model/mergeEditorModel'
 import { MergeEditor } from './merge/view/mergeEditor'
@@ -206,7 +206,13 @@ export function create(parent: HTMLElement, onEdit: (changes: Change[]) => void,
     return b
   })
   bar.appendChild(document.createElement('span')).className = 'merge-spacer'
-  button(t('mergeComplete'), 'merge-complete', () => cur?.conflict && onComplete(cur.path, cur.conflict.model.unhandledConflictsCount.get()))
+  // 差异还没算完时未处理数还是 0：等模型初始化完再取，否则会不经确认就暂存带冲突标记的正文
+  button(t('mergeComplete'), 'merge-complete', async () => {
+    const c = cur
+    if (!c?.conflict) return
+    await c.conflict.model.onInitialized
+    if (cur === c) onComplete(c.path, c.conflict.model.unhandledConflictsCount.get())
+  })
   syncBar()
   checkKeymap()
 }
@@ -281,10 +287,10 @@ export function show(vault: string, path: string, rev: string, base: string, hea
     const [b, ours, theirs] = [mk(conflict.base), mk(conflict.ours), mk(conflict.theirs)]
     const input = (textModel: monaco.editor.ITextModel, side: 'Ours' | 'Theirs') =>
       ({ textModel, title: i18next.t(`merge${side}`), description: i18next.t(`merge${side}Hint`), detail: undefined })
-    // 照 VS Code 打开工作区里的冲突文件：结果就是工作区正文，里面还有冲突标记时按合并结果重新初始化（非冲突改动合入、冲突块放共同祖先）
+    // 照 VS Code 打开工作区里的冲突文件：结果就是工作区正文，里面还有 git 写的冲突标记时按合并结果重新初始化（非冲突改动合入、冲突块放共同祖先）
     const model = new MergeEditorModel(b, input(ours, 'Ours'), input(theirs, 'Theirs'), modified,
       new MergeDiffComputer(StandaloneServices.get<WorkerService>(IEditorWorkerService)),
-      { resetResult: /^<{7}/m.test(doc) }, StandaloneServices.get<UndoService>(IUndoRedoService))
+      { resetResult: needsMergeReset(doc, [conflict.base, conflict.ours, conflict.theirs]) }, StandaloneServices.get<UndoService>(IUndoRedoService))
     cur.conflict = { base: b, ours, theirs, model }
     mergeEd!.setModel(model)
   } else editor!.setModel({ original: cur.original, modified: cur.modified })
@@ -310,7 +316,7 @@ export function hide() {
 export function replace(doc: string) {
   if (!cur) return
   const c = cur.conflict
-  if (c && /^<{7}/m.test(doc)) queueMicrotask(() => cur?.conflict === c && c.model.reset())
+  if (c && needsMergeReset(doc, [c.base.getValue(), c.ours.getValue(), c.theirs.getValue()])) queueMicrotask(() => cur?.conflict === c && c.model.reset())
   replaceText(doc)
 }
 

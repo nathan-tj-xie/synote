@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { relativeLink } from '../../shared/url'
 import { parser } from '@lezer/markdown'
-import { bomOffset, decodeEntities, destination, escapeMd, imageAt, lfsHoverMarkdown, minimalEdit, normalizeLabel, resolveImage, unescapeMd } from './diffUtil'
+import { bomOffset, decodeEntities, destination, escapeMd, imageAt, lfsHoverMarkdown, minimalEdit, needsMergeReset, normalizeLabel, resolveImage, unescapeMd } from './diffUtil'
 
 const apply = (a: string, e: ReturnType<typeof minimalEdit>) => (e ? a.slice(0, e.from) + e.insert + a.slice(e.to) : a)
 
@@ -139,5 +139,17 @@ describe('escapeMd / lfsHoverMarkdown', () => {
     expect(url[0]).toMatch(/^command:synote\.lfsDownload\?/)
     expect(JSON.parse(decodeURIComponent(url[0].split('?')[1]))).toEqual(['original', 3, 4])
     expect(md).not.toMatch(/\]\(command:editor/)
+  })
+})
+
+describe('needsMergeReset', () => {
+  const example = '说明\n<<<<<<< 示例\n本地\n=======\n远端\n>>>>>>> 示例\n'
+  it('git 写进去的标记要重置', () => expect(needsMergeReset('<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x\n', ['', 'a\n', 'b\n'])).toBe(true))
+  it('没有标记、或只有三个输入里本来就有的示例标记，不重置', () => {
+    expect(needsMergeReset('已处理\n', ['a\n', 'b\n', 'c\n'])).toBe(false)
+    expect(needsMergeReset('已处理\n' + example, [example, '当前\n' + example, '传入\n' + example])).toBe(false)
+  })
+  it('示例之外还有 git 的标记照样重置；CRLF 也认得', () => {
+    expect(needsMergeReset('<<<<<<< HEAD\r\n当前\r\n=======\r\n传入\r\n>>>>>>> x\r\n' + example, [example, example, example])).toBe(true)
   })
 })

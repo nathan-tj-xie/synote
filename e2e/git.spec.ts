@@ -513,6 +513,46 @@ test('merge: a note open during the conflicting pull opens the merge editor with
   await app.close()
 })
 
+// 审查第 1 轮的两个回归：差异还没算完就点完成，要等算完、按未处理数确认，不能直接暂存带标记的正文；
+// 笔记里本来就有冲突标记示例时，处理过的结果关掉再打开不能被当成 git 的标记整篇重置
+test('merge: complete waits for the diff, and a note with marker examples keeps its result on reopen', async () => {
+  const example = '说明\n<<<<<<< 示例\n本地\n=======\n远端\n>>>>>>> 示例\n'
+  const { app, win, vault, git, pushFromOther } = await launchRepo({ 'a.md': example + '原来\n' })
+  pushFromOther('a.md', example + '远端改\n')
+  writeFileSync(path.join(vault, 'a.md'), example + '本地改\n')
+  git('commit', '-qam', '本地')
+  const disk = () => readFileSync(path.join(vault, 'a.md'), 'utf8')
+  await openGit(win)
+  await win.getByRole('button', { name: 'pull' }).click()
+  await expect(banner(win)).toContainText('1 个冲突文件', { timeout: 10_000 })
+  // 让 Monaco 的 worker（差异计算）每条消息都晚到
+  await win.evaluate(() => {
+    const W = window.Worker
+    window.Worker = class extends W {
+      postMessage(message: unknown, transfer?: Transferable[] | StructuredSerializeOptions) {
+        setTimeout(() => super.postMessage(message, transfer as Transferable[]), 800)
+      }
+    } as typeof Worker
+  })
+  await win.getByRole('button', { name: '文件', exact: true }).click()
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  const bar = win.getByRole('toolbar', { name: '合并编辑器' })
+  await bar.getByRole('button', { name: '完成此文件合并' }).click()
+  const confirm = win.getByRole('alertdialog', { name: '还有 1 处冲突没处理，仍然完成此文件合并？' })
+  await expect(confirm).toBeVisible({ timeout: 30_000 })
+  await confirm.getByRole('button', { name: '取消' }).click()
+  expect(git('ls-files', '-u', '--', 'a.md')).not.toBe('')
+
+  await action(win, 'i1', '接受当前').click()
+  await expect.poll(() => disk(), { timeout: 15_000 }).toBe(example + '本地改\n')
+  await win.getByRole('tab', { name: /^a/ }).getByRole('button', { name: '关闭' }).click()
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(pane(win, 'result').locator('.header .remaining')).toHaveText('冲突已全部处理', { timeout: 30_000 })
+  await expect(lines(win, 'result')).toContainText('本地改')
+  expect(disk()).toBe(example + '本地改\n')
+  await app.close()
+})
+
 test('merge: existing marker examples allow finishing, newly added markers block it', async () => {
   const example = 'Git 示例\n<<<<<<< HEAD\n本地\n=======\n远端\n>>>>>>> example\n'
   const { app, win, vault, git, pushFromOther } = await launchRepo({ 'a.md': 'base\n', 'guide.md': example })

@@ -1,3 +1,7 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
 // 合并编辑器（#70）用的 observable 门面，对应 VS Code 的 src/vs/base/common/observable.ts：实现取自 Monaco 内部模块，
 // Monaco 包里被 tree-shaking 删掉的几个（keepObserved、derivedObservableWithWritableCache）按上游实现补上
 import type { IDisposable } from 'monaco-editor/base/common/lifecycle.js'
