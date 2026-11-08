@@ -1,6 +1,8 @@
 # 切片的实现流程
 
-一个实现切片（`ready-for-agent`）由一个子 agent 从头做到开 PR，外层只管派活和合并。
+一个实现切片（`ready-for-agent`）由一个子 agent 从头做到 **PR 合并**，PR 合并才算做完。流程：父 agent 启动子 agent → 子 agent 实现 → 子 agent 叫一个孙 agent 审查 → 审查通过后子 agent 开 PR → CI 跑完后子 agent 合并 PR、告诉父 agent → 父 agent 核对没问题后关掉子 agent 的 pane。
+
+agent 之间的启动、派活、通知、读输出都用 rex 命令；启动 claude 一律用交互模式（`claude --permission-mode auto -n <名字> "<prompt>"`），不用 `-p`。
 
 ## 子 agent
 
@@ -8,17 +10,18 @@
    - **测哪些接口由子 agent 自己定，不问用户**：动手前从 issue 的需求和验收里推出要测的接口，每个写一句能抓到什么、漏掉什么，记进 PR 描述。
    - **红 → 绿主要在 vitest 这层循环**：解析规则、写回逻辑这类纯逻辑，一个测试一个实现地推进；e2e 每轮要构建，太慢，只把 issue 验收里的用户流程先写成失败的用例，最后一起变绿。
    - 交互上没人想到的边界情况 TDD 覆盖不到，仍然靠下一步的独立审查兜底。
-2. **开 PR 之前先审查**：在当前 Rex 窗口里 `rex split -s $REX_SESSION -b $REX_BLOCK --split=below --focus=false --keep-open -- zsh docs/agents/review.sh <仓库> <输出文件> <信号文件> "<改动说明>"` 新开一个 pane，起一个独立的审查者（claude；不用 codex、omp）；等信号文件出现后读输出，读完就 `rex block close` 关掉这个 pane。
+2. **开 PR 之前先审查（孙 agent）**：在当前 Rex 窗口里 `rex split -s $REX_SESSION -b $REX_BLOCK --split=below --focus=false --keep-open -- zsh docs/agents/review.sh <仓库> <输出文件> <信号文件> "<改动说明>" $REX_BLOCK` 新开一个 pane，起一个独立的审查者（交互模式的 claude，不用 `-p`；不用 codex、omp）。审查者跑完会自己写输出文件，并用 `rex block send` 把结论发到最后一个参数指定的 block（即发起审查的 agent 自己），收到后读输出，读完就 `rex block close` 关掉这个 pane。agent 之间的派活、通知、读输出都用 rex 命令。
 3. 结论是 `VERDICT: CHANGES_REQUESTED` 就逐条修，修完 commit，再审查。审查意见不能跳过，也不能改动审查要求；认为某条是误报的，要在 PR 描述里写明理由。
-4. **最多审查 4 轮**。第 4 轮还没通过就停下，向外层汇报卡在哪里。这种情况多半是方案本身有问题，不要继续一处处补边界情况。
+4. **最多审查 4 轮**。第 4 轮还没通过就停下，用 rex 向父 agent 汇报卡在哪里。这种情况多半是方案本身有问题，不要继续一处处补边界情况。
 5. 通过后 push，用 `gh pr create --base main` 开 PR，描述里写 `Closes #N`，并附上最后一轮审查输出的路径和它审的 commit。
 6. PR 上的 CI 自动跑。失败了就照报错修：只改测试或环境的，修完直接 push；改了功能代码的，先再审查一轮再 push。
-7. 不合并 PR。
+7. **合并**：合并前自己核对三件事：CI 全绿；最后一轮审查输出里有 `VERDICT: PASS`；那一轮审的 commit 就是 PR 的 HEAD（之后只允许有不改功能代码的 CI 修复）。都满足就 `gh pr merge --squash --delete-branch`，确认 issue 已经关闭。CI 因基础设施（如下载 504）失败就等恢复后 `gh run rerun --failed`，不算做完。
+8. **告诉父 agent**：`rex block send -b <父 block> '#N 子 agent：PR #M 已合并，issue 已关闭'` 再 `rex block send-key -b <父 block> enter`。卡住时也这样汇报。
 
-## 外层
+## 父 agent
 
-- 合并之前核对三件事：CI 全绿；最后一轮审查输出里有 `VERDICT: PASS`；那一轮审的 commit 就是 PR 的 HEAD（之后只允许有不改功能代码的 CI 修复）。
-- `gh pr merge --squash --delete-branch` 合并，确认 issue 已经关闭，关掉子 agent 的 pane，然后选下一个切片（blocked-by 为 0、标签是 `ready-for-agent`）。
+- 启动子 agent 时在 prompt 里写明自己的 block（`$REX_BLOCK` 的值），让子 agent 照本文件做到合并并用 rex 汇报。
+- 收到"已合并"后核对：PR 已合并、issue 已关闭、合并前那三件事成立。没问题就 `rex block close` 关掉子 agent 的 pane、`git worktree remove` 清理，然后选下一个切片（blocked-by 为 0、标签是 `ready-for-agent`）。
 
 ## 人工验收
 
