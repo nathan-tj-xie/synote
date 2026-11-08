@@ -162,22 +162,25 @@ function scheduleSave(path: string) {
   timers.set(path, setTimeout(() => flush(path), 500))
 }
 
-async function flush(path: string) {
+// 返回这次是否写进了磁盘：没在 dirty 里的内容（如合并编辑器静默重置出的结果）写失败时，调用方只能靠它知道
+async function flush(path: string): Promise<boolean> {
   clearTimeout(timers.get(path))
   timers.delete(path)
   const text = docOf(path)
-  if (text === undefined || !vault) return
+  if (text === undefined || !vault) return false
   const v = vault // 按发起时所在的库写；之后换了库，主进程会拒绝并报错
   const g = vaultGen
   const write = (writes.get(path) ?? Promise.resolve()).then(() => window.synote.writeFile(v, path, text))
   writes.set(path, write.catch(() => {}))
   try {
     await write
-    if (g !== vaultGen) return // 已换库：回执不属于当前库
+    if (g !== vaultGen) return false // 已换库：回执不属于当前库
     const now = docOf(path)
     if (now === undefined || now === text) useEditor.getState().setDirty(path, false) // undefined：标签页已关
+    return true
   } catch (e) {
     useUi.getState().setError(String(e))
+    return false
   }
 }
 
@@ -360,9 +363,9 @@ export async function completeMerge(path: string) {
   if (locked || !v) return
   try {
     if (docOf(path) === undefined) return // 标签页已关
-    await flush(path)
+    const ok = await flush(path)
     await writes.get(path)
-    if (vault !== v || useEditor.getState().dirty[path]) throw new Error(i18next.t('mergeCompleteUnsaved'))
+    if (!ok || vault !== v || useEditor.getState().dirty[path]) throw new Error(i18next.t('mergeCompleteUnsaved'))
     const res = await window.synote.gitStage(v, [path])
     if (!res.ok) {
       const reason = [i18next.t(`gitErr_${res.kind}`), ...(res.paths ?? (res.raw ? [res.raw] : []))].join('\n')

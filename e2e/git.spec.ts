@@ -1,6 +1,6 @@
 import { _electron as electron, expect, test, type Page } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -564,6 +564,33 @@ test('merge: complete waits for the diff, and a note with marker examples keeps 
   await expect(pane(win, 'result').locator('.header .remaining')).toHaveText('冲突已全部处理', { timeout: 30_000 })
   await expect(lines(win, 'result')).toContainText('本地改')
   expect(disk()).toBe(example + '本地改\n')
+  await app.close()
+})
+
+test('merge: complete does not stage when writing the untouched result fails', async () => {
+  test.skip(process.platform === 'win32', 'chmod')
+  const { app, win, vault, git, pushFromOther } = await launchRepo({ 'a.md': 'base\n' })
+  pushFromOther('a.md', 'remote\n')
+  writeFileSync(path.join(vault, 'a.md'), 'local\n')
+  git('commit', '-qam', 'local')
+  await openGit(win)
+  await win.getByRole('button', { name: 'pull' }).click()
+  await expect(banner(win)).toContainText('1 个冲突文件', { timeout: 10_000 })
+  await win.getByRole('button', { name: '文件', exact: true }).click()
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(pane(win, 'result').locator('.header .remaining')).toHaveText('还有 1 处冲突', { timeout: 30_000 })
+  // 不动手：结果栏是静默重置出来的、不在 dirty 里；让写盘失败
+  const file = path.join(vault, 'a.md')
+  chmodSync(file, 0o444)
+  try {
+    await win.getByRole('toolbar', { name: '合并编辑器' }).getByRole('button', { name: '完成此文件合并' }).click()
+    await win.getByRole('alertdialog').getByRole('button', { name: '仍然完成' }).click()
+    await expect(win.getByRole('alert').filter({ hasText: '结果没能写入' })).toBeVisible({ timeout: 10_000 })
+    expect(git('ls-files', '-u', '--', 'a.md')).not.toBe('') // 仍是冲突，没把带标记的正文暂存
+    await expect(banner(win)).toContainText('1 个冲突文件')
+  } finally {
+    chmodSync(file, 0o644)
+  }
   await app.close()
 })
 
