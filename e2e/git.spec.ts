@@ -527,6 +527,35 @@ test('merge: a note open during the conflicting pull opens the merge editor with
   await app.close()
 })
 
+// 审查第 5 轮的回归：结果栏静默重置过、没动手的笔记放在后台标签页时，外部 git add 后切回去要按磁盘显示，
+// 不能留着没写盘的重置结果、一输入就把两侧内容覆盖成共同祖先
+test('merge: a background tab reloads from disk after its conflict is resolved outside', async () => {
+  const { app, win, vault, git } = await launchConflict()
+  await openGit(win)
+  await win.getByRole('button', { name: 'pull' }).click()
+  await expect(banner(win)).toContainText('2 个冲突文件', { timeout: 10_000 })
+  await win.getByRole('button', { name: '文件', exact: true }).click()
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(pane(win, 'result').locator('.header .remaining')).toHaveText('还有 1 处冲突', { timeout: 30_000 })
+  await win.getByRole('treeitem', { name: 'c.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('c')
+  const file = path.join(vault, 'a.md')
+  expect(readFileSync(file, 'utf8')).toContain('<<<<<<<')
+  git('add', 'a.md')
+  await expect(banner(win)).toContainText('1 个冲突文件', { timeout: 10_000 })
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(win.locator('.cm-content')).toContainText('<<<<<<<')
+  await expect(win.locator('.cm-content')).toContainText('远端 a')
+  await win.locator('.cm-content').click()
+  await win.keyboard.press(process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End')
+  await win.keyboard.type('x')
+  await expect.poll(() => readFileSync(file, 'utf8'), { timeout: 10_000 }).toMatch(/x$/)
+  const disk = readFileSync(file, 'utf8')
+  expect(disk).toContain('本地 a')
+  expect(disk).toContain('远端 a')
+  await app.close()
+})
+
 // 审查第 1 轮的两个回归：差异还没算完就点完成，要等算完、按未处理数确认，不能直接暂存带标记的正文；
 // 笔记里本来就有冲突标记示例时，处理过的结果关掉再打开不能被当成 git 的标记整篇重置
 test('merge: complete waits for the diff, and a note with marker examples keeps its result on reopen', async () => {

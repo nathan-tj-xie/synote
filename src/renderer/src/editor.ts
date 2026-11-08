@@ -310,10 +310,6 @@ function syncDiff() {
   const src = shown && !conflict ? diffMode.get(shown) : undefined
   const want = conflict ? `${shown}\0conflict` : src ? `${shown}\0${src.rev}` : null
   if (want === diffWant) return
-  // 笔记不再冲突（完成此文件合并、外部 git add / merge --abort）而退出合并编辑器：正文里可能只有重新初始化的结果、
-  // 没写盘（#70），按磁盘重载一次；有未保存的改动时 reloadIfClean 不动它，用户动过手的结果已经写盘、重载是空操作
-  const left = diffWant?.endsWith('\0conflict') ? diffWant.slice(0, -'\0conflict'.length) : null
-  if (left && !conflicted.has(left)) reloadIfClean(left)
   diffWant = want
   const my = ++diffSeq
   if (diffShown) {
@@ -411,7 +407,12 @@ export function compareWith(path: string, e: LogEntry) {
 
 useGit.subscribe((s) => {
   const st = s.state
+  const before = conflicted
   conflicted = new Set(st?.status === 'ready' && st.merging ? st.files.filter((f) => f.conflict).map((f) => f.path) : [])
+  // 笔记不再冲突（完成此文件合并、外部 git add / merge --abort）：不论是当前笔记还是后台标签页，正文里都可能只有
+  // 合并编辑器静默重置出的结果、没写盘（#70），按磁盘重载一次。有未保存的改动时 reloadIfClean 不动它；
+  // 用户动过手的结果已经写盘，重载是空操作
+  if (vault) for (const p of before) if (!conflicted.has(p)) reloadIfClean(p)
   if (view) syncDiff()
 })
 
