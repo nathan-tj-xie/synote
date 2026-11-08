@@ -317,6 +317,7 @@ describe('Git（系统 git）', () => {
     expect(text(await git.readStages('a.md'))).toEqual(['共同\n', '当前\n', '传入\n'])
     expect(text(await git.readStages('new.md'))).toEqual([null, '当前新增\n', '传入新增\n'])
     await expect(git.readStages('nope.md')).rejects.toThrow('not in conflict')
+    await expect(git.readStages('.')).rejects.toThrow('not a single file')
     git.close()
   })
 

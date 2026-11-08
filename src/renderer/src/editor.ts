@@ -371,8 +371,9 @@ export async function completeMerge(path: string) {
   }
 }
 
-function applyFromDiff(changes: ChangeSpec[]) {
-  if (view && diffShown === shown) view.dispatch({ changes, annotations: fromDiff.of(true) })
+// quiet：合并编辑器重新初始化结果栏的改动（#70），标成 remote 不触发保存，等用户真正改了再随整篇写盘
+function applyFromDiff(changes: ChangeSpec[], quiet: boolean) {
+  if (view && diffShown === shown) view.dispatch({ changes, annotations: [fromDiff.of(true), ...(quiet ? [Transaction.remote.of(true)] : [])] })
 }
 
 // ⌘⇧D：当前笔记在正文和 HEAD ↔ 工作区对比之间原地切换

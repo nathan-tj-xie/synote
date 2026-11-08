@@ -404,7 +404,10 @@ test('merge: three-way merge editor — accept, combine, reset, base pane, manua
   const boxes = await Promise.all((['i1', 'result', 'i2'] as const).map((w) => pane(win, w).boundingBox()))
   expect(boxes[0]!.x).toBeLessThan(boxes[1]!.x)
   expect(boxes[1]!.x).toBeLessThan(boxes[2]!.x)
-  await expect.poll(() => disk('a.md')).toBe(merged('第一段 共同\n', 'hello world\n'))
+  await expect(lines(win, 'result')).toContainText('中间 2 本地改')
+  await expect(lines(win, 'result')).toContainText('尾部 2 远端改')
+  // 重新初始化出来的结果只在编辑器里：用户动手之前工作区仍是 git 写的冲突标记（全库残留标记检查拦得住）
+  expect(disk('a.md')).toContain('<<<<<<<')
   const remaining = pane(win, 'result').locator('.header .remaining')
   await expect(remaining).toHaveText('还有 2 处冲突')
 
@@ -500,7 +503,7 @@ test('merge: three-way merge editor — accept, combine, reset, base pane, manua
 // 笔记开着时 pull 出冲突：按磁盘重载进来的是带冲突标记的正文，结果栏照 VS Code 打开带标记文件的规则重新初始化
 // （冲突块放共同祖先、算未处理），不能把标记当成手改
 test('merge: a note open during the conflicting pull opens the merge editor with a fresh result', async () => {
-  const { app, win, vault } = await launchConflict()
+  const { app, win, vault, git } = await launchConflict()
   await win.getByRole('treeitem', { name: 'a.md' }).click()
   await expect(win.locator('.cm-content')).toContainText('本地 a')
   await openGit(win)
@@ -509,7 +512,15 @@ test('merge: a note open during the conflicting pull opens the merge editor with
   await expect(lines(win, 'i2')).toContainText('远端 a', { timeout: 10_000 })
   await expect(pane(win, 'result').locator('.header .remaining')).toHaveText('还有 1 处冲突')
   await expect(pane(win, 'result').locator('.merge-editor-conflict-actions').first()).toContainText('未接受任何改动')
-  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('a\n共同\n')
+  await expect(lines(win, 'result')).toContainText('共同')
+  // 只打开、没动手：工作区还是带冲突标记的正文。在外面 git add 之后点"完成合并"，残留标记检查照样拦下
+  await win.waitForTimeout(1000) // 超过自动保存的防抖，确认没有写盘
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toContain('<<<<<<<')
+  git('add', 'a.md', 'b.md')
+  await expect(banner(win)).toContainText('冲突已全部解决', { timeout: 10_000 })
+  await banner(win).getByRole('button', { name: '完成合并' }).click()
+  await expect(win.getByRole('alert').filter({ hasText: '完成合并失败' })).toContainText('a.md')
+  expect(git('rev-parse', '--verify', 'MERGE_HEAD').trim()).not.toBe('')
   await app.close()
 })
 

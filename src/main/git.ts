@@ -352,8 +352,11 @@ export class Git {
   // 常驻 cat-file 只读一次 .git/index，按 `:2:路径` 读会拿到进程启动时的旧索引
   async readStages(rel: string): Promise<[Buffer | null, Buffer | null, Buffer | null]> {
     const out = await this.run(['--literal-pathspecs', 'ls-files', '-u', '-z', '--', rel])
-    const oids = new Map(out.split('\0').filter(Boolean).map((l) => l.split('\t')[0].split(' ')).map(([, oid, stage]) => [stage, oid]))
-    if (!oids.size) throw new GitError('unknown', -1, `${rel} is not in conflict`)
+    const entries = out.split('\0').filter(Boolean).map((l) => l.split('\t'))
+    if (!entries.length) throw new GitError('unknown', -1, `${rel} is not in conflict`)
+    // rel 是目录时会列出底下所有冲突文件，各自的 stage 不能混在一起
+    if (new Set(entries.map(([, p]) => p)).size > 1) throw new GitError('unknown', -1, `${rel} is not a single file`)
+    const oids = new Map(entries.map(([info]) => info.split(' ')).map(([, oid, stage]) => [stage, oid]))
     return Promise.all((['1', '2', '3'] as const).map((n) => (oids.has(n) ? this.readBlob(oids.get(n)!) : null))) as Promise<[Buffer | null, Buffer | null, Buffer | null]>
   }
 

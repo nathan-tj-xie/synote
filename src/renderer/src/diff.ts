@@ -38,7 +38,8 @@ import { monacoColors, monacoRules } from './tokens'
 import { tokens } from '../../shared/tokens'
 import { bomOffset, dataUrl, escapeMd, imageAt, imageMime, lfsHoverMarkdown, MAX_IMAGE, minimalEdit, needsMergeReset } from './diffUtil'
 import { type IEditorWorkerService as WorkerService, MergeDiffComputer } from './merge/model/diffComputer'
-import { type IUndoRedoService as UndoService, MergeEditorModel } from './merge/model/mergeEditorModel'
+import { type IUndoRedoService as UndoService, MergeEditorModel, MergeEditorModelState } from './merge/model/mergeEditorModel'
+import { waitForState } from './merge/observable'
 import { MergeEditor } from './merge/view/mergeEditor'
 
 // diff 计算放在 worker 里，不卡输入
@@ -88,7 +89,8 @@ let conflictDiv: HTMLElement | null = null
 // 合并编辑器上方工具条里切换共同祖先栏的三个按钮
 let layoutButtons: HTMLButtonElement[] = []
 // 冲突视图的三个输入（共同祖先 / 当前 / 传入）和由它们建起的合并模型
-type Conflict = { base: monaco.editor.ITextModel; ours: monaco.editor.ITextModel; theirs: monaco.editor.ITextModel; model: MergeEditorModel }
+// ready：结果栏按合并重新初始化（resetResult）做完；没有要重置的时候立即完成
+type Conflict = { base: monaco.editor.ITextModel; ours: monaco.editor.ITextModel; theirs: monaco.editor.ITextModel; model: MergeEditorModel; ready: Promise<void> }
 // path：当前笔记（右侧）；base：左侧那个版本里笔记的路径（跨目录改名后与 path 不同），两侧的相对链接各按各的解析；
 // conflict：显示的是冲突视图（original 不用）
 let cur: { vault: string; path: string; rev: string; base: string; original: monaco.editor.ITextModel; modified: monaco.editor.ITextModel; conflict: Conflict | null } | null = null
@@ -122,10 +124,13 @@ function reset(doc: string, unexpected = true) {
   if (!align(doc)) console.error('[diff] cannot align modified side with CM6, edits are not written back', { path: cur!.path })
 }
 
-let edits: { onEdit: (changes: Change[]) => void; docNow: () => string } | null = null
+let edits: { onEdit: (changes: Change[], quiet: boolean) => void; docNow: () => string } | null = null
+// 正在重新初始化结果栏：这期间结果模型的改动写回 CM6 但不触发保存（见 resetResult）
+let quiet = false
 // docNow：CM6 视图里的最新正文，写回前后用来核对对齐；
 // onComplete：点了"完成此文件合并"，unhandled 是还没处理的冲突数（大于 0 时调用方先确认）
-export function create(parent: HTMLElement, onEdit: (changes: Change[]) => void, docNow: () => string, onComplete: (path: string, unhandled: number) => void) {
+// onEdit 的 quiet：这批改动来自结果栏的重新初始化，写回 CM6 但不保存
+export function create(parent: HTMLElement, onEdit: (changes: Change[], quiet: boolean) => void, docNow: () => string, onComplete: (path: string, unhandled: number) => void) {
   edits = { onEdit, docNow }
   diffDiv = parent.appendChild(document.createElement('div'))
   conflictDiv = parent.appendChild(document.createElement('div'))
@@ -211,6 +216,7 @@ export function create(parent: HTMLElement, onEdit: (changes: Change[]) => void,
     const c = cur
     if (!c?.conflict) return
     await c.conflict.model.onInitialized
+    await c.conflict.ready
     if (cur === c) onComplete(c.path, c.conflict.model.unhandledConflictsCount.get())
   })
   syncBar()
@@ -226,14 +232,14 @@ function syncBar() {
 
 // 结果栏（或 diff 的工作区一侧）模型的改动写回 CM6。听模型而不是编辑器：合并模型直接改结果模型（初始化合入非冲突改动、
 // 接受某侧），那时编辑器可能还没挂上这个模型
-function syncBack(m: monaco.editor.ITextModel, docNow: () => string, onEdit: (changes: Change[]) => void) {
+function syncBack(m: monaco.editor.ITextModel, docNow: () => string, onEdit: (changes: Change[], quiet: boolean) => void) {
   return m.onDidChangeContent((e) => {
     if (applying || cur?.modified !== m) return
     const doc = docNow()
     // 改动前两边必须对齐（mirror 就是这次改动前的 Monaco 文本），否则这次输入不写回
     if (mirror === null || bomOffset(doc, mirror) !== off) return reset(doc)
     // 一次事件里的多处改动都以改动前的文档为坐标，正好对应 CM6 一个事务里的多个 change
-    onEdit(e.changes.map((c) => ({ from: c.rangeOffset + off, to: c.rangeOffset + c.rangeLength + off, insert: c.text })))
+    onEdit(e.changes.map((c) => ({ from: c.rangeOffset + off, to: c.rangeOffset + c.rangeLength + off, insert: c.text })), quiet)
     const now = docNow()
     if (!align(now)) reset(now)
   })
@@ -290,11 +296,28 @@ export function show(vault: string, path: string, rev: string, base: string, hea
     // 照 VS Code 打开工作区里的冲突文件：结果就是工作区正文，里面还有 git 写的冲突标记时按合并结果重新初始化（非冲突改动合入、冲突块放共同祖先）
     const model = new MergeEditorModel(b, input(ours, 'Ours'), input(theirs, 'Theirs'), modified,
       new MergeDiffComputer(StandaloneServices.get<WorkerService>(IEditorWorkerService)),
-      { resetResult: needsMergeReset(doc, [conflict.base, conflict.ours, conflict.theirs]) }, StandaloneServices.get<UndoService>(IUndoRedoService))
-    cur.conflict = { base: b, ours, theirs, model }
+      { resetResult: false }, StandaloneServices.get<UndoService>(IUndoRedoService))
+    const c: Conflict = { base: b, ours, theirs, model, ready: Promise.resolve() }
+    if (needsMergeReset(doc, [conflict.base, conflict.ours, conflict.theirs])) c.ready = resetResult(c)
+    cur.conflict = c
     mergeEd!.setModel(model)
   } else editor!.setModel({ original: cur.original, modified: cur.modified })
   setReadOnly(readOnly)
+}
+
+// 照 VS Code 打开带冲突标记的文件：结果栏按合并重新初始化（非冲突改动合入、冲突块放共同祖先）。上游在模型构造时做
+// （resetResult 选项），这里改由调用方做，好知道哪次改动来自重置：重置出来的内容只进 CM6、不写盘。用户接受或手改之前，
+// 工作区里仍是 git 写的冲突标记，全库残留标记检查照样拦得住；关掉再打开会再重置一次，结果相同
+async function resetResult(c: Conflict) {
+  await waitForState(c.model.inputDiffComputingState, (s) => s === MergeEditorModelState.upToDate)
+  if (cur?.conflict !== c) return
+  // 输入的差异已算完，reset 里的等待只隔几个微任务，用户输入（宏任务）插不进来
+  quiet = true
+  try {
+    await c.model.reset()
+  } finally {
+    quiet = false
+  }
 }
 
 export function hide() {
@@ -316,7 +339,7 @@ export function hide() {
 export function replace(doc: string) {
   if (!cur) return
   const c = cur.conflict
-  if (c && needsMergeReset(doc, [c.base.getValue(), c.ours.getValue(), c.theirs.getValue()])) queueMicrotask(() => cur?.conflict === c && c.model.reset())
+  if (c && needsMergeReset(doc, [c.base.getValue(), c.ours.getValue(), c.theirs.getValue()])) c.ready = resetResult(c)
   replaceText(doc)
 }
 
