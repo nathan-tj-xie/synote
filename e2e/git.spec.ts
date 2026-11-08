@@ -518,6 +518,9 @@ test('merge: a note open during the conflicting pull opens the merge editor with
   expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toContain('<<<<<<<')
   git('add', 'a.md', 'b.md')
   await expect(banner(win)).toContainText('冲突已全部解决', { timeout: 10_000 })
+  // 外部解决后退出合并编辑器：正文按磁盘显示（带标记），不留没写盘的重新初始化结果
+  await expect(pane(win, 'result')).toBeHidden()
+  await expect(win.locator('.cm-content')).toContainText('<<<<<<<')
   await banner(win).getByRole('button', { name: '完成合并' }).click()
   await expect(win.getByRole('alert').filter({ hasText: '完成合并失败' })).toContainText('a.md')
   expect(git('rev-parse', '--verify', 'MERGE_HEAD').trim()).not.toBe('')

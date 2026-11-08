@@ -28,7 +28,8 @@ export function minimalEdit(a: string, b: string): { from: number; to: number; i
 // shortcut: 示例行恰好和 git 写的标记一字不差（如 `<<<<<<< HEAD`）时认不出是示例；有人这样写时再按 MERGE_HEAD 记住已初始化过
 export function needsMergeReset(doc: string, inputs: string[]): boolean {
   const known = new Set(inputs.flatMap((t) => t.split(/\r?\n/)))
-  return doc.split(/\r?\n/).some((l) => /^<{7}/.test(l) && !known.has(l))
+  // 起始标记的写法同 hasConflictMarkers（7 个起、后面是空格或行尾）
+  return doc.split(/\r?\n/).some((l) => /^<{7,}(?: |$)/.test(l) && !known.has(l))
 }
 
 // doc 是否恰好等于「若干个 BOM + visible」，是的话返回 BOM 的个数（Monaco 藏起来的那部分），否则 null

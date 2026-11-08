@@ -232,9 +232,10 @@ function syncBar() {
 
 // 结果栏（或 diff 的工作区一侧）模型的改动写回 CM6。听模型而不是编辑器：合并模型直接改结果模型（初始化合入非冲突改动、
 // 接受某侧），那时编辑器可能还没挂上这个模型
-function syncBack(m: monaco.editor.ITextModel, docNow: () => string, onEdit: (changes: Change[], quiet: boolean) => void) {
+function syncBack(m: monaco.editor.ITextModel) {
   return m.onDidChangeContent((e) => {
     if (applying || cur?.modified !== m) return
+    const { docNow, onEdit } = edits!
     const doc = docNow()
     // 改动前两边必须对齐（mirror 就是这次改动前的 Monaco 文本），否则这次输入不写回
     if (mirror === null || bomOffset(doc, mirror) !== off) return reset(doc)
@@ -285,7 +286,7 @@ export function show(vault: string, path: string, rev: string, base: string, hea
   }
   const modified = mk(doc)
   cur = { vault, path, rev, base, original: mk(head), modified, conflict: null }
-  syncBack(modified, edits!.docNow, edits!.onEdit)
+  syncBack(modified)
   if (!align(doc)) reset(doc)
   diffDiv!.hidden = !!conflict
   conflictDiv!.hidden = !conflict
