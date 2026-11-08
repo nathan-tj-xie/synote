@@ -20,18 +20,7 @@ jobs:
           node-version: lts/*
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # Electron 二进制在首次运行时才从 GitHub release 下载（常 504），缓存 @electron/get 的默认缓存目录
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/Library/Caches/electron
-            ~/AppData/Local/electron/Cache
-          key: electron-${{ runner.os }}-${{ hashFiles('node_modules/electron/package.json') }}
-      # 命中缓存时只解压不联网；未命中时下载，失败重试，DEBUG 日志里能看出走的哪条路
-      - run: for i in 1 2 3; do node node_modules/electron/install.js && exit 0; sleep 30; done; exit 1
-        shell: bash
-        env:
-          DEBUG: '@electron/get*'
+      - uses: ./.github/actions/electron
       - run: pnpm build
       # 未签名安装包（MVP 不做签名与公证）
       - run: pnpm exec electron-builder --publish always
