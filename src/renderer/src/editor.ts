@@ -35,6 +35,7 @@ let vaultGen = 0
 // 切库交接期间（最终冲刷到 commit 返回）编辑器只读：这段时间的输入没有库可写
 const lock = new Compartment()
 let locked = false
+let holds = 0 // 加锁计数：完成此文件合并、离开冲突组后的重载会和别的加锁时段交叠，全部释放才解锁
 // editable 管输入和焦点，readOnly 挡住命令（复制行等）对正文的修改
 const lockExt = () => [EditorView.editable.of(!locked), EditorState.readOnly.of(locked)]
 const editable = () => lock.of(lockExt())
@@ -53,6 +54,7 @@ let diffSeq = 0
 // 合并中还没解决的冲突文件（S16）：打开时直接进冲突视图（#70 的合并编辑器），优先于 diff 形态；
 // 在合并编辑器里"完成此文件合并"（git add）后回到正文
 let conflicted = new Set<string>()
+let reloading: Promise<unknown> = Promise.resolve() // 最近一次离开冲突组后的重载
 const fromDiff = Annotation.define<boolean>()
 let cmBox: HTMLElement | null = null
 let diffBox: HTMLElement | null = null
@@ -162,8 +164,9 @@ function scheduleSave(path: string) {
   timers.set(path, setTimeout(() => flush(path), 500))
 }
 
-// 返回这次是否写进了磁盘：没在 dirty 里的内容（如合并编辑器静默重置出的结果）写失败时，调用方只能靠它知道
-async function flush(path: string): Promise<boolean> {
+// 返回这次是否写进了当前库：没在 dirty 里的内容（如合并编辑器静默重置出的结果）写失败时，调用方只能靠它知道。
+// rethrow：写盘失败时把原因抛给调用方，不在这里报错
+async function flush(path: string, rethrow = false): Promise<boolean> {
   clearTimeout(timers.get(path))
   timers.delete(path)
   const text = docOf(path)
@@ -179,6 +182,7 @@ async function flush(path: string): Promise<boolean> {
     if (now === undefined || now === text) useEditor.getState().setDirty(path, false) // undefined：标签页已关
     return true
   } catch (e) {
+    if (rethrow) throw e
     useUi.getState().setError(String(e))
     return false
   }
@@ -256,7 +260,7 @@ function attach(e: Event, files: FileList | undefined, paste: boolean, at?: numb
 
 // 切库前调用：防抖中的输入立即写，再等所有在途写入落盘；还有没写进去的改动（写失败）就返回 false
 export async function flushAll(): Promise<boolean> {
-  await Promise.all([...timers.keys()].map(flush))
+  await Promise.all([...timers.keys()].map((p) => flush(p)))
   await Promise.all(writes.values())
   return Object.keys(useEditor.getState().dirty).length === 0
 }
@@ -353,14 +357,18 @@ function requestComplete(path: string, unhandled: number) {
   else completeMerge(path)
 }
 
-// 结果栏一直同步在 CM6 里、照常自动保存（切走再回来、关掉再打开都从工作区正文恢复）：这里先把它落盘，再 git add 移出冲突组
+// 结果栏一直同步在 CM6 里、照常自动保存（切走再回来、关掉再打开都从工作区正文恢复）：这里先把它落盘，再 git add 移出冲突组。
+// 写盘到按磁盘重载完成期间编辑器只读：暂存途中的输入进不了暂存区，也不能让重载被跳过
 export async function completeMerge(path: string) {
   const v = vault
-  if (locked || !v) return
+  // 确认框开着时笔记可能已离开冲突组（外部 git add / merge --abort），这时什么都不写
+  if (locked || !v || !conflicted.has(path) || docOf(path) === undefined) return // undefined：标签页已关
+  setLocked(true)
   try {
-    if (docOf(path) === undefined) return // 标签页已关
-    const ok = await flush(path)
-    await writes.get(path)
+    const ok = await flush(path, true).catch((e) => {
+      throw new Error(`${i18next.t('mergeCompleteUnsaved')}\n${e}`)
+    })
+    await writes.get(path) // flush 等的是它自己那次写；期间又排进的写也要落盘，下面的 dirty 判断才准
     if (!ok || vault !== v || useEditor.getState().dirty[path]) throw new Error(i18next.t('mergeCompleteUnsaved'))
     const res = await window.synote.gitStage(v, [path])
     if (!res.ok) {
@@ -370,7 +378,9 @@ export async function completeMerge(path: string) {
   } catch (e) {
     useUi.getState().setError(String(e))
   } finally {
-    window.synote.gitState().then((st) => vault === v && useGit.setState({ state: st }), () => {})
+    await window.synote.gitState().then((st) => vault === v && useGit.setState({ state: st }), () => {})
+    await reloading // 离开冲突组时 useGit.subscribe 发起的重载
+    setLocked(false)
   }
 }
 
@@ -411,8 +421,16 @@ useGit.subscribe((s) => {
   conflicted = new Set(st?.status === 'ready' && st.merging ? st.files.filter((f) => f.conflict).map((f) => f.path) : [])
   // 笔记不再冲突（完成此文件合并、外部 git add / merge --abort）：不论是当前笔记还是后台标签页，正文里都可能只有
   // 合并编辑器静默重置出的结果、没写盘（#70），按磁盘重载一次。有未保存的改动时 reloadIfClean 不动它；
-  // 用户动过手的结果已经写盘，重载是空操作
-  if (vault) for (const p of before) if (!conflicted.has(p)) reloadIfClean(p)
+  // 用户动过手的结果已经写盘，重载是空操作。重载完成前只读：否则这时的输入会让重载被跳过、把重置结果存下来
+  const left = vault ? [...before].filter((p) => !conflicted.has(p)) : []
+  if (left.length) {
+    setLocked(true)
+    reloading = Promise.all(left.map(reloadIfClean))
+      .catch(() => {})
+      .finally(() => setLocked(false))
+  }
+  const c = useUi.getState().mergeConfirm
+  if (c && !conflicted.has(c.path)) useUi.getState().setMergeConfirm(null) // 笔记已不在冲突组，确认框作废
   if (view) syncDiff()
 })
 
@@ -499,7 +517,8 @@ export const insertEmbed = (display: boolean) => view && shown && !locked && !di
 export const saveCurrent = () => !locked && shown && (timers.has(shown) || useEditor.getState().dirty[shown]) && flush(shown)
 
 export function setLocked(on: boolean) {
-  locked = on
+  holds += on ? 1 : -1
+  locked = holds > 0
   view?.dispatch({ effects: lock.reconfigure(lockExt()) })
   diff?.setReadOnly(on)
 }

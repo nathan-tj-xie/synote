@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 // git 面板（S13）：仓库是本地 bare 仓库的克隆，独立的全局 git 配置（identity 为 false 时不设提交身份）。
-// 笔记库是仓库里的 sub 子目录（默认就是仓库根）；files 和 git() 都相对仓库根
-async function launchRepo(files: Record<string, string>, identity = true, sub = '') {
+// 笔记库是仓库里的 sub 子目录（默认就是仓库根）；files 和 git() 都相对仓库根。gitPath：设置项里指定应用用的 git
+async function launchRepo(files: Record<string, string>, identity = true, sub = '', gitPath = '') {
   const base = mkdtempSync(path.join(tmpdir(), 'synote-git-e2e-'))
   const repo = path.join(base, 'vault')
   const vault = path.join(repo, sub)
@@ -30,6 +30,7 @@ async function launchRepo(files: Record<string, string>, identity = true, sub = 
   git(repo, 'commit', '-qm', 'init')
   git(repo, 'push', '-qu', 'origin', 'main')
   writeFileSync(path.join(userData, 'recent.json'), JSON.stringify([vault]))
+  if (gitPath) writeFileSync(path.join(userData, 'settings.json'), JSON.stringify({ gitPath }))
   const launch = async () => {
     const app = await electron.launch({ args: ['.'], env: { ...env, SYNOTE_USER_DATA: userData } })
     const win = await app.firstWindow()
@@ -614,12 +615,66 @@ test('merge: complete does not stage when writing the untouched result fails', a
   try {
     await win.getByRole('toolbar', { name: '合并编辑器' }).getByRole('button', { name: '完成此文件合并' }).click()
     await win.getByRole('alertdialog').getByRole('button', { name: '仍然完成' }).click()
-    await expect(win.getByRole('alert').filter({ hasText: '结果没能写入' })).toBeVisible({ timeout: 10_000 })
+    // 写盘的原因（只读文件：EACCES）并在提示里，不被"结果没能写入"盖掉
+    await expect(win.getByRole('alert').filter({ hasText: '结果没能写入' })).toContainText(/EACCES|permission denied/i, { timeout: 10_000 })
     expect(git('ls-files', '-u', '--', 'a.md')).not.toBe('') // 仍是冲突，没把带标记的正文暂存
     await expect(banner(win)).toContainText('1 个冲突文件')
   } finally {
     chmodSync(file, 0o644)
   }
+  await app.close()
+})
+
+test('merge: the complete confirmation closes when the merge is aborted outside', async () => {
+  const { app, win, vault, git, pushFromOther } = await launchRepo({ 'a.md': 'base\n' })
+  pushFromOther('a.md', 'remote\n')
+  writeFileSync(path.join(vault, 'a.md'), 'local\n')
+  git('commit', '-qam', 'local')
+  await openGit(win)
+  await win.getByRole('button', { name: 'pull' }).click()
+  await expect(banner(win)).toContainText('1 个冲突文件', { timeout: 10_000 })
+  await win.getByRole('button', { name: '文件', exact: true }).click()
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(pane(win, 'result').locator('.header .remaining')).toHaveText('还有 1 处冲突', { timeout: 30_000 })
+  await win.getByRole('toolbar', { name: '合并编辑器' }).getByRole('button', { name: '完成此文件合并' }).click()
+  const dialog = win.getByRole('alertdialog')
+  await expect(dialog).toBeVisible()
+  git('merge', '--abort')
+  await expect(banner(win)).toHaveCount(0, { timeout: 10_000 })
+  await expect(dialog).toHaveCount(0) // 笔记离开冲突组，确认框随之关掉，没法再"仍然完成"
+  await expect(win.locator('.cm-content')).toContainText('local')
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('local\n')
+  expect(git('status', '--porcelain')).toBe('')
+  await app.close()
+})
+
+test('merge: input while completing is rejected until the note reloads', async () => {
+  // 应用用的 git 在 add 时慢 2 s，留出"写盘之后、暂存返回之前"的窗口
+  const bin = mkdtempSync(path.join(tmpdir(), 'synote-slow-git-'))
+  const real = path.join(execFileSync('git', ['--exec-path']).toString().trim(), 'git')
+  writeFileSync(path.join(bin, 'git'), `#!/bin/sh\ncase " $* " in *" add "*) sleep 2;; esac\nexec "${real}" "$@"\n`, { mode: 0o755 })
+  const { app, win, vault, git, pushFromOther } = await launchRepo({ 'a.md': 'base\n' }, true, '', path.join(bin, 'git'))
+  pushFromOther('a.md', 'remote\n')
+  writeFileSync(path.join(vault, 'a.md'), 'local\n')
+  git('commit', '-qam', 'local')
+  await openGit(win)
+  await win.getByRole('button', { name: 'pull' }).click()
+  await expect(banner(win)).toContainText('1 个冲突文件', { timeout: 10_000 })
+  await win.getByRole('button', { name: '文件', exact: true }).click()
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(pane(win, 'result').locator('.header .remaining')).toHaveText('还有 1 处冲突', { timeout: 30_000 })
+  await action(win, 'i1', '接受当前').click()
+  await expect(pane(win, 'result').locator('.header .remaining')).toHaveText('冲突已全部处理')
+  await win.getByRole('toolbar', { name: '合并编辑器' }).getByRole('button', { name: '完成此文件合并' }).click()
+  // 暂存途中往结果栏输入：只读，不进工作区
+  await lines(win, 'result').click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('X')
+  await expect(banner(win)).toContainText('冲突已全部解决', { timeout: 10_000 })
+  await expect(win.locator('.cm-content')).toHaveText('local')
+  await win.waitForTimeout(1000) // 自动保存是 500 ms 防抖
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('local\n')
+  expect(git('show', ':a.md')).toBe('local\n')
   await app.close()
 })
 
