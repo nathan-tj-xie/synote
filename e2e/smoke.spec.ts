@@ -100,6 +100,15 @@ async function slowFirstCall(app: ElectronApplication, channel: 'file:read' | 'f
   return (key: 'calls' | 'done') => app.evaluate((_m, key) => (globalThis as { slow?: Record<string, number> }).slow![key], key)
 }
 
+// 从命令面板执行命令
+async function command(win: Page, name: string) {
+  await win.keyboard.press('ControlOrMeta+Shift+p')
+  const input = win.getByRole('combobox', { name: '命令面板' })
+  await input.fill(name)
+  await expect(win.getByRole('option').first()).toHaveText(new RegExp(`^${name}`))
+  await input.press('Enter')
+}
+
 // 点标签切换：点左边的文字。点中心的话，悬停后才显示的 × 可能正好在中心（Windows 字体更窄），点成关闭
 const clickTab = (win: Page, name: string) => win.getByRole('tab', { name }).click({ position: { x: 14, y: 17 } })
 
@@ -230,6 +239,61 @@ test('opening vaults in quick succession: last call wins', async () => {
   await expect(win.getByRole('treeitem', { name: '只在快库.md' })).toBeVisible()
   expect(await win.evaluate((v) => window.synote.readFile(v, '只在快库.md'), fastVault)).toBe('快')
   expect((await win.evaluate(() => window.synote.recentVaults()))[0]).toBe(fastVault)
+  await app.close()
+})
+
+// 已打开库时切库（S19）：命令面板「打开笔记库…」（对话框换成 stub）切到 B，「切换笔记库」列表不含当前库，选 A 切回；
+// A 里防抖中的输入切走前已经落盘
+test('switch vaults from the command palette; pending input is saved first', async () => {
+  const { app, win, vault: a } = await launch({ 'x.md': 'A' })
+  const b = path.join(path.dirname(a), 'b')
+  mkdirSync(b)
+  writeFileSync(path.join(b, 'B 独有.md'), '')
+  await app.evaluate(({ ipcMain }, dir) => {
+    ipcMain.removeHandler('vault:pick')
+    ipcMain.handle('vault:pick', () => dir)
+  }, b)
+  await win.getByRole('treeitem', { name: 'x.md' }).click()
+  const editor = win.locator('.cm-content')
+  await editor.click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('改')
+  await command(win, '打开笔记库') // 还在 500 ms 防抖内
+  await expect(win.getByRole('treeitem', { name: 'B 独有.md' })).toBeVisible()
+  expect(readFileSync(path.join(a, 'x.md'), 'utf8')).toBe('A改')
+
+  await command(win, '切换笔记库')
+  const list = win.getByRole('listbox', { name: '切换笔记库' })
+  await expect(list.getByRole('option')).toHaveCount(1) // 只有 A，没有当前的 B
+  await win.getByRole('combobox', { name: '切换笔记库' }).fill(path.basename(path.dirname(a)))
+  await expect(list.getByRole('option', { name: a })).toBeVisible()
+  await win.keyboard.press('Enter')
+  await expect(win.getByRole('treeitem', { name: 'x.md' })).toBeVisible()
+  await win.getByRole('treeitem', { name: 'x.md' }).click()
+  await expect(editor).toHaveText('A改')
+  const tab = win.getByRole('tab', { name: /^x/ })
+  await expect(tab).toBeVisible()
+  // 选中的就是当前库：什么都不做
+  await app.evaluate(({ ipcMain }, dir) => {
+    ipcMain.removeHandler('vault:pick')
+    ipcMain.handle('vault:pick', () => dir)
+  }, a)
+  await command(win, '打开笔记库')
+  await win.waitForTimeout(300)
+  await expect(tab).toBeVisible() // 没有重开（重开会清掉标签）
+  await expect(win.getByRole('alert')).toHaveCount(0)
+  await app.close()
+})
+
+// 最近列表里的库不存在（外置卷没挂载）：切换失败、停在当前库，这条记录不删
+test('switching to a missing recent vault keeps the current vault and the record', async () => {
+  const { app, win, vault } = await launch({ 'x.md': '' }, (v) => [v, v + '-gone'])
+  await expect(win.getByRole('tree')).toBeVisible()
+  await command(win, '切换笔记库')
+  await win.getByRole('option', { name: vault + '-gone' }).click()
+  await expect(win.getByRole('alert')).toContainText('笔记库不存在')
+  await expect(win.getByRole('treeitem', { name: 'x.md' })).toBeVisible()
+  expect(await win.evaluate(() => window.synote.recentVaults())).toEqual([vault, vault + '-gone'])
   await app.close()
 })
 

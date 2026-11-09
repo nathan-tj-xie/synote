@@ -4,6 +4,7 @@ import { i18next } from '../../shared/i18n'
 import { attachmentsSettled, flushAll, forget, insertEmbed, saveCurrent, toggleDiff } from './editor'
 import { matchKey } from './match'
 import { useEditor, useUi, useVault } from './store'
+import { openVault } from './vaults'
 
 type Handler = {
   when?: () => boolean
@@ -73,6 +74,9 @@ export const handlers: Record<CommandId, Handler> = {
   },
   insertMath: { when: () => !!ed().active, run: () => insertEmbed(true) },
   insertInlineMath: { when: () => !!ed().active, run: () => insertEmbed(false) },
+  // 选中的就是当前库：什么都不做
+  openVault: { when: vault, run: () => window.synote.pickVault().then((d) => (d && d !== root() ? openVault(d) : undefined)).catch(fail) },
+  switchVault: { when: vault, run: () => ui().setPalette('vaults') },
 }
 
 export const ids = Object.keys(commands) as CommandId[]

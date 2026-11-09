@@ -29,7 +29,7 @@ type EditorState = {
 
 type UiState = {
   error: string | null
-  palette: 'files' | 'commands' | null
+  palette: 'files' | 'commands' | 'vaults' | null
   sidebar: 'files' | 'search' | 'git'
   history: boolean // 历史栏（S15）是否显示
   // "清理孤儿附件"确认框：清单来自哪个库（确认时按它删，期间切了库主进程会拒绝）

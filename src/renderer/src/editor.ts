@@ -36,6 +36,7 @@ let vaultGen = 0
 const lock = new Compartment()
 let locked = false
 let holds = 0 // 加锁计数：完成此文件合并、离开冲突组后的重载会和别的加锁时段交叠，全部释放才解锁
+const idle: (() => void)[] = [] // 等全部解锁的 lockWhenIdle
 // editable 管输入和焦点，readOnly 挡住命令（复制行等）对正文的修改
 const lockExt = () => [EditorView.editable.of(!locked), EditorState.readOnly.of(locked)]
 const editable = () => lock.of(lockExt())
@@ -519,6 +520,7 @@ export const saveCurrent = () => !locked && shown && (timers.has(shown) || useEd
 export function setLocked(on: boolean) {
   holds += on ? 1 : -1
   locked = holds > 0
+  if (!locked) idle.splice(0).forEach((r) => r())
   view?.dispatch({ effects: lock.reconfigure(lockExt()) })
   diff?.setReadOnly(locked)
 }
@@ -557,6 +559,12 @@ export async function reloadIfClean(path: string) {
   if (path === shown && view) view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text }, effects: setEol.of(detectEol(text)), annotations: Transaction.remote.of(true) })
   else states.set(path, makeState(text, path))
   useEditor.getState().setDirty(path, false)
+}
+
+// 切库用：等别的加锁时段（完成此文件合并、pull、重命名等）全部结束再加锁，不和它们交叠
+export async function lockWhenIdle() {
+  while (locked) await new Promise<void>((r) => idle.push(r))
+  setLocked(true)
 }
 
 // 会改写工作区的 git 操作（pull 等，S13）：插完在途附件、加锁、所有输入落盘（写不进去就抛 unsaved），操作期间编辑器只读；

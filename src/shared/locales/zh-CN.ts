@@ -4,6 +4,8 @@ export const zhCN = {
     appName: 'Synote',
     openVault: '打开笔记库…',
     recentVaults: '最近打开',
+    switchVault: '切换笔记库',
+    findVault: '按路径查找笔记库',
     noVault: '还没有打开笔记库',
     newNote: '新建笔记',
     untitled: '未命名',
