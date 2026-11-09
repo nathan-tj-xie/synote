@@ -1,4 +1,4 @@
-// 快速切换（⌘P）与命令面板（⌘⇧P）共用的组件：Radix Dialog + 虚拟列表 + fuzzysort（ADR 0005）
+// 快速切换（⌘P）、命令面板（⌘⇧P）与切换笔记库共用的组件：Radix Dialog + 虚拟列表 + fuzzysort（ADR 0005）
 import * as Dialog from '@radix-ui/react-dialog'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import fuzzysort from 'fuzzysort'
@@ -9,6 +9,7 @@ import { available, ids, run } from './commands'
 import s from './Palette.module.css'
 import { formatKey, indexPaths, searchPaths, type Hit, type PathIndex } from './match'
 import { useEditor, useUi, useVault } from './store'
+import { openVault } from './vaults'
 
 const ROW = 28
 
@@ -42,7 +43,7 @@ export function Palette() {
   )
 }
 
-function Body({ mode, getIndex, close }: { mode: 'files' | 'commands'; getIndex: () => PathIndex; close: () => void }) {
+function Body({ mode, getIndex, close }: { mode: 'files' | 'commands' | 'vaults'; getIndex: () => PathIndex; close: () => void }) {
   const { t } = useTranslation()
   const [query, setQuery] = useState('')
   const [sel, setSel] = useState(0)
@@ -52,15 +53,21 @@ function Body({ mode, getIndex, close }: { mode: 'files' | 'commands'; getIndex:
   // 只订阅布尔值：文件列表变化、在文件之间切换都不重算命令
   const hasVault = useVault((st) => st.vault !== null)
   const hasActive = useEditor((st) => st.active !== null)
+  const root = useVault((st) => st.vault?.root)
+  const [recent, setRecent] = useState<{ id: string; title: string }[]>([])
+  useEffect(() => {
+    if (mode === 'vaults') window.synote.recentVaults().then((list) => setRecent(list.filter((r) => r !== root).map((r) => ({ id: r, title: r }))))
+  }, [mode, root])
   const cmds = useMemo(
     () => ids.filter((id) => id !== 'commandPalette' && available(id)).map((id) => ({ id, title: t(commands[id].title) })),
     [t, hasVault, hasActive],
   )
   const hits: Hit[] = useMemo(() => {
     if (mode === 'files') return searchPaths(query, getIndex())
-    if (!query.trim()) return cmds.map((c) => ({ id: c.id, text: c.title, indexes: [] }))
-    return fuzzysort.go(query, cmds, { key: 'title' }).map((r) => ({ id: r.obj.id, text: r.obj.title, indexes: r.indexes }))
-  }, [mode, query, cmds, mode === 'files' && getIndex]) // 命令模式不随文件列表重算
+    const items = mode === 'vaults' ? recent : cmds
+    if (!query.trim()) return items.map((c) => ({ id: c.id, text: c.title, indexes: [] }))
+    return fuzzysort.go(query, items, { key: 'title' }).map((r) => ({ id: r.obj.id, text: r.obj.title, indexes: r.indexes }))
+  }, [mode, query, cmds, recent, mode === 'files' && getIndex]) // 命令模式不随文件列表重算
 
   const v = useVirtualizer({ count: hits.length, getScrollElement: () => scrollRef.current, estimateSize: () => ROW, overscan: 10 })
   useEffect(() => setSel(0), [hits])
@@ -70,6 +77,7 @@ function Body({ mode, getIndex, close }: { mode: 'files' | 'commands'; getIndex:
     if (!hit) return
     close()
     if (mode === 'files') useEditor.getState().open(hit.id)
+    else if (mode === 'vaults') openVault(hit.id).catch((e) => useUi.getState().setError(String(e)))
     else run(hit.id as CommandId)
   }
 
@@ -84,7 +92,7 @@ function Body({ mode, getIndex, close }: { mode: 'files' | 'commands'; getIndex:
     }
   }
 
-  const label = t(mode === 'files' ? 'quickOpen' : 'commandPalette')
+  const label = t(({ files: 'quickOpen', commands: 'commandPalette', vaults: 'switchVault' } as const)[mode])
   return (
     <>
       <Dialog.Title className={s.hidden}>{label}</Dialog.Title>
@@ -92,7 +100,7 @@ function Body({ mode, getIndex, close }: { mode: 'files' | 'commands'; getIndex:
         className={s.input}
         autoFocus
         value={query}
-        placeholder={t(mode === 'files' ? 'findFile' : 'findCommand')}
+        placeholder={t(({ files: 'findFile', commands: 'findCommand', vaults: 'findVault' } as const)[mode])}
         aria-label={label}
         role="combobox"
         aria-expanded

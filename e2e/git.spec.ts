@@ -807,3 +807,61 @@ test('merge: a subfolder vault follows a merge finished outside', async () => {
   await expect(banner(win)).toHaveCount(0, { timeout: 10_000 })
   await app.close()
 })
+
+// 合并中切库（S19）：结果栏最后一次输入切走前已落盘，切回来横幅照常；"完成此文件合并"暂存途中触发切库，等暂存结束再切
+test('merge: switching vaults saves the last result input and waits for a running complete', async () => {
+  // 应用用的 git 在 add 时慢 2 s，拉开"暂存进行中"的窗口
+  const bin = mkdtempSync(path.join(tmpdir(), 'synote-slow-git-'))
+  const real = path.join(execFileSync('git', ['--exec-path']).toString().trim(), 'git')
+  writeFileSync(path.join(bin, 'git'), `#!/bin/sh\ncase " $* " in *" add "*) sleep 2;; esac\nexec "${real}" "$@"\n`, { mode: 0o755 })
+  const { app, win, vault, git, pushFromOther } = await launchRepo({ 'a.md': 'base\n' }, true, '', path.join(bin, 'git'))
+  const other = mkdtempSync(path.join(tmpdir(), 'synote-other-'))
+  writeFileSync(path.join(other, 'B 独有.md'), '')
+  await app.evaluate(({ ipcMain }, dir) => {
+    ipcMain.removeHandler('vault:pick')
+    ipcMain.handle('vault:pick', () => dir)
+  }, other)
+  const command = async (name: string) => {
+    await win.keyboard.press('ControlOrMeta+Shift+p')
+    const input = win.getByRole('combobox', { name: '命令面板' })
+    await input.fill(name)
+    await expect(win.getByRole('option').first()).toHaveText(new RegExp(`^${name}`))
+    await input.press('Enter')
+  }
+  const back = async () => {
+    await command('切换笔记库')
+    await win.getByRole('option', { name: vault }).click()
+    await expect(win.getByRole('treeitem', { name: 'a.md' })).toBeVisible()
+  }
+  pushFromOther('a.md', 'remote\n')
+  writeFileSync(path.join(vault, 'a.md'), 'local\n')
+  git('commit', '-qam', 'local')
+  await openGit(win)
+  await win.getByRole('button', { name: 'pull' }).click()
+  await expect(banner(win)).toContainText('1 个冲突文件', { timeout: 10_000 })
+  await win.getByRole('button', { name: '文件', exact: true }).click()
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(pane(win, 'result').locator('.header .remaining')).toHaveText('还有 1 处冲突', { timeout: 30_000 })
+  await action(win, 'i1', '接受当前').click()
+  await expect.poll(() => readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('local\n')
+  await lines(win, 'result').click()
+  await win.keyboard.press('ControlOrMeta+End')
+  await win.keyboard.type('Y')
+  await command('打开笔记库') // 还在 500 ms 防抖内
+  await expect(win.getByRole('treeitem', { name: 'B 独有.md' })).toBeVisible()
+  expect(readFileSync(path.join(vault, 'a.md'), 'utf8')).toBe('local\nY')
+
+  await back()
+  await expect(banner(win)).toContainText('1 个冲突文件', { timeout: 10_000 })
+  await win.getByRole('treeitem', { name: 'a.md' }).click()
+  await expect(pane(win, 'result').locator('.header .remaining')).toBeVisible({ timeout: 30_000 })
+  await win.getByRole('toolbar', { name: '合并编辑器' }).getByRole('button', { name: '完成此文件合并' }).click()
+  const confirm = win.getByRole('alertdialog')
+  if (await confirm.isVisible()) await confirm.getByRole('button', { name: '仍然完成' }).click()
+  await command('打开笔记库') // git add 还在睡
+  await expect(win.getByRole('treeitem', { name: 'B 独有.md' })).toBeVisible({ timeout: 10_000 })
+  expect(git('ls-files', '-u', '--', 'a.md')).toBe('') // 暂存做完了才切走
+  expect(git('show', ':a.md')).toBe('local\nY')
+  await expect(win.getByRole('alert').filter({ hasText: /./ })).toHaveCount(0) // Monaco 留下的空 aria live 区域不算
+  await app.close()
+})
