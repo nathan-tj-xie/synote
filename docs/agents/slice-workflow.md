@@ -11,6 +11,7 @@ agent 之间的启动、派活、通知、读输出都用 rex 命令；启动 cl
    - **红 → 绿主要在 vitest 这层循环**：解析规则、写回逻辑这类纯逻辑，一个测试一个实现地推进；e2e 每轮要构建，太慢，只把 issue 验收里的用户流程先写成失败的用例，最后一起变绿。
    - 交互上没人想到的边界情况 TDD 覆盖不到，仍然靠下一步的独立审查兜底。
 2. **开 PR 之前先审查（孙 agent）**：在当前 Rex 窗口里 `rex split -s $REX_SESSION -b $REX_BLOCK --split=below --focus=false --keep-open -- zsh docs/agents/review.sh <仓库> <输出文件> <信号文件> "<改动说明>" $REX_BLOCK` 新开一个 pane，起一个独立的审查者（交互模式的 claude，不用 `-p`；不用 codex、omp）。审查者跑完会自己写输出文件，并用 `rex block send` 把结论发到最后一个参数指定的 block（即发起审查的 agent 自己），收到后读输出，读完就 `rex block close` 关掉这个 pane。agent 之间的派活、通知、读输出都用 rex 命令。
+   - **例外**：用户直接用 `/implement` 做的切片，技能末尾已经调过 `code-review`（规范、需求两方面）。没有必须改的问题时，不再跑 `review.sh`，直接开 PR；PR 描述里写明审查用的是 `code-review`，合并前也不核对下面第 7 条里的 `VERDICT: PASS`。
 3. 结论是 `VERDICT: CHANGES_REQUESTED` 就逐条修，修完 commit，再审查。审查意见不能跳过，也不能改动审查要求；认为某条是误报的，要在 PR 描述里写明理由。
 4. **最多审查 4 轮**。第 4 轮还没通过就停下，用 rex 向父 agent 汇报卡在哪里。这种情况多半是方案本身有问题，不要继续一处处补边界情况。
 5. 通过后 push，用 `gh pr create --base main` 开 PR，描述里写 `Closes #N`，并附上最后一轮审查输出的路径和它审的 commit。
